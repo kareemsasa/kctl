@@ -1,0 +1,61 @@
+{
+  "started_at": "2026-03-23T05:18:01.004383+00:00",
+  "plan_path": "/private/tmp/kctl-validation-plan.yaml",
+  "repo": "/tmp/kctl-sample-repo",
+  "objective": "Validate that kctl can run a simple no-op Codex step.\n",
+  "defaults": {
+    "verify": "git diff --quiet && test -z \"$(git status --short)\"",
+    "stop_on_failure": true
+  },
+  "status": "failure",
+  "steps": [
+    {
+      "id": "noop",
+      "prompt": "Inspect the repository, make no file changes, and reply with a short confirmation.\n",
+      "expect_clean_diff": true,
+      "status": "failure",
+      "failure_reason": "codex_failed",
+      "before_git_status": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "after_git_status": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "changed_files_count": 0,
+      "codex": {
+        "command": [
+          "codex",
+          "exec",
+          "--full-auto",
+          "--cd",
+          "/tmp/kctl-sample-repo",
+          "You are executing one step in a larger kctl plan.\n\nOverall objective:\nValidate that kctl can run a simple no-op Codex step.\n\nPrior step summaries:\n- No prior steps have run.\n\nCurrent step id: noop\n\nCurrent step prompt:\nInspect the repository, make no file changes, and reply with a short confirmation.\n\nConstraints:\n- Work only in the current repository.\n- Keep changes scoped to the current step.\n- In your final response, summarize what you changed and any verification you ran."
+        ],
+        "cwd": "/tmp/kctl-sample-repo",
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": "WARNING: proceeding, even though we could not update PATH: Operation not permitted (os error 1)\n\nthread 'reqwest-internal-sync-runtime' (11523282) panicked at /Users/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/system-configuration-0.6.1/src/dynamic_store.rs:154:1:\nAttempted to create a NULL object.\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nthread '<unnamed>' (11523281) panicked at /Users/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.12.28/src/blocking/client.rs:1523:5:\nevent loop thread panicked\n\nthread 'main' (11523268) panicked at /Users/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/opentelemetry-otlp-0.31.0/src/exporter/http/mod.rs:190:22:\ncalled `Result::unwrap()` on an `Err` value: Any { .. }\nCould not create otel exporter: panicked during initialization\n2026-03-23T05:17:30.382567Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses\nOpenAI Codex v0.116.0 (research preview)\n--------\nworkdir: /tmp/kctl-sample-repo\nmodel: gpt-5.4\nprovider: openai\napproval: never\nsandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/sasa/.codex/memories]\nreasoning effort: none\nreasoning summaries: none\nsession id: 019d1920-7383-79d0-a029-bd44a0a7c824\n--------\nuser\nYou are executing one step in a larger kctl plan.\n\nOverall objective:\nValidate that kctl can run a simple no-op Codex step.\n\nPrior step summaries:\n- No prior steps have run.\n\nCurrent step id: noop\n\nCurrent step prompt:\nInspect the repository, make no file changes, and reply with a short confirmation.\n\nConstraints:\n- Work only in the current repository.\n- Keep changes scoped to the current step.\n- In your final response, summarize what you changed and any verification you ran.\nmcp startup: no servers\n2026-03-23T05:17:30.387031Z ERROR codex_core::codex: failed to record rollout items: failed to queue rollout items: channel closed\n2026-03-23T05:17:30.387051Z ERROR codex_core::codex: failed to record rollout items: failed to queue rollout items: channel closed\n2026-03-23T05:17:30.388210Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses\n2026-03-23T05:17:30.607394Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses\nReconnecting... 2/5 (stream disconnected before completion: failed to lookup address information: nodename nor servname provided, or not known)\n2026-03-23T05:17:31.010727Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses\nReconnecting... 3/5 (stream disconnected before completion: failed to lookup address information: nodename nor servname provided, or not known)\n2026-03-23T05:17:31.742176Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses\nReconnecting... 4/5 (stream disconnected before completion: failed to lookup address information: nodename nor servname provided, or not known)\n2026-03-23T05:17:33.441136Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses\nReconnecting... 5/5 (stream disconnected before completion: failed to lookup address information: nodename nor servname provided, or not known)\n2026-03-23T05:17:36.692141Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: nodename nor servname provided, or not known, url: wss://chatgpt.com/backend-api/codex/responses\nwarning: Falling back from WebSockets to HTTPS transport. stream disconnected before completion: failed to lookup address information: nodename nor servname provided, or not known\nReconnecting... 1/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))\nReconnecting... 2/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))\nReconnecting... 3/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))\nReconnecting... 4/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))\nReconnecting... 5/5 (stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses))\n2026-03-23T05:18:00.923682Z ERROR codex_core::codex: failed to record rollout items: failed to queue rollout items: channel closed\nERROR: stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)\n"
+      },
+      "verify": {
+        "command": [
+          "sh",
+          "-lc",
+          "git diff --quiet && test -z \"$(git status --short)\""
+        ],
+        "cwd": "/tmp/kctl-sample-repo",
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    }
+  ]
+}

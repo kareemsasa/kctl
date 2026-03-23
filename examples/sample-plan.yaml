@@ -1,0 +1,32 @@
+repo: ../path/to/target-repo
+objective: |
+  Make a small, well-scoped change in the target repository with clear separation
+  between inspection, implementation, validation, and cleanup.
+
+defaults:
+  verify: python3 -m pytest -q
+  stop_on_failure: true
+
+steps:
+  - id: inspect
+    prompt: |
+      Inspect the repository and identify the smallest useful change to satisfy the
+      objective. Do not modify any files. Summarize the intended implementation plan.
+    expect_clean_diff: true
+
+  - id: implement
+    prompt: |
+      Implement the planned change with the smallest practical diff. Add or update
+      code and tests only where needed.
+
+  - id: verify
+    prompt: |
+      Focus on validation. Inspect the current changes, fix obvious test or validation
+      issues if needed, and leave the repository in a verifiable state.
+    verify: python3 -m pytest -q
+
+  - id: review
+    prompt: |
+      Review the current diff and reduce incidental edits only. Avoid broad refactors
+      or unrelated cleanup.
+    expect_clean_diff: false
