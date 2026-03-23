@@ -708,6 +708,7 @@ def run_plan(
     branch: str | None,
     commit: bool,
     commit_message: str | None,
+    allow_dirty_start: bool,
 ) -> int:
     plan = load_plan(plan_path)
     validate_plan(plan)
@@ -715,6 +716,7 @@ def run_plan(
     repo_path = resolve_repo(plan_path, plan["repo"])
     ensure_git_repo(repo_path)
     branch_before = get_current_branch(repo_path)
+    repo_dirty_at_start = bool(get_git_status(repo_path).stdout.strip())
 
     if branch:
         switch_to_branch(repo_path, branch)
@@ -722,6 +724,8 @@ def run_plan(
     branch_after = get_current_branch(repo_path)
     if commit and not commit_message:
         raise PlanError("--commit requires --commit-message.")
+    if commit and repo_dirty_at_start and not allow_dirty_start:
+        raise PlanError("--commit is not allowed when the repo is already dirty. Use --allow-dirty-start to override.")
     if commit and branch_after in {"main", "master"}:
         raise PlanError("--commit is not allowed on main or master.")
 
@@ -782,6 +786,7 @@ def run_plan(
         "repo": str(repo_path),
         "objective": plan["objective"],
         "defaults": defaults,
+        "repo_dirty_at_start": repo_dirty_at_start,
         "branch_before": branch_before,
         "branch_after": branch_after,
         "commit_created": commit_created,
@@ -835,6 +840,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--commit-message",
         help="Commit message to use with --commit.",
     )
+    run_parser.add_argument(
+        "--allow-dirty-start",
+        action="store_true",
+        help="Allow --commit even if the repo is already dirty before the run starts.",
+    )
 
     return parser
 
@@ -852,6 +862,7 @@ def main(argv: list[str] | None = None) -> int:
                 branch=args.branch,
                 commit=args.commit,
                 commit_message=args.commit_message,
+                allow_dirty_start=args.allow_dirty_start,
             )
         except PlanError as exc:
             print(f"Error: {exc}", file=sys.stderr)
