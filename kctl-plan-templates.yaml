@@ -1,0 +1,155 @@
+templates:
+  single_step:
+    description: >
+      Small, low-risk change that can usually be completed in one Codex pass.
+    shape:
+      objective: "<overall objective>"
+      defaults:
+        stop_on_failure: true
+      steps:
+        - id: implement
+          prompt: |
+            <make the requested change>
+            Keep the change narrowly scoped.
+            Add or update tests if behavior changes.
+            Review the diff for unnecessary edits before finishing.
+
+  staged_change:
+    description: >
+      Medium-risk change where inspection, implementation, verification, and review
+      should be separated.
+    shape:
+      objective: "<overall objective>"
+      defaults:
+        stop_on_failure: true
+      steps:
+        - id: inspect
+          prompt: |
+            Read the relevant code path and identify the exact insertion point.
+            Do not modify any files.
+            Summarize the intended implementation approach.
+          expect_clean_diff: true
+
+        - id: implement
+          prompt: |
+            Implement the requested change with the smallest practical diff.
+            Keep the current structure intact unless the objective requires otherwise.
+
+        - id: verify
+          prompt: |
+            Verify the implementation works correctly.
+            Fix any failing tests or validation issues caused by the change.
+
+        - id: review
+          prompt: |
+            Review the diff and remove incidental or unnecessary changes.
+            Avoid broad refactors.
+
+  ui_validation_change:
+    description: >
+      Add or adjust client-side validation in a form or UI workflow.
+    shape:
+      objective: "<overall objective>"
+      defaults:
+        stop_on_failure: true
+      steps:
+        - id: inspect
+          prompt: |
+            Read the relevant form/component flow.
+            Identify where user input is captured, where validation currently exists,
+            and the earliest safe insertion point for the requested validation behavior.
+            Do not modify files.
+          expect_clean_diff: true
+
+        - id: implement
+          prompt: |
+            Implement the validation change in the narrowest possible way.
+            Preserve the existing workflow structure.
+            Do not redesign the form.
+
+        - id: verify
+          prompt: |
+            Verify the validation behavior works correctly.
+            Add or update focused tests if needed.
+            Fix any issues introduced by the implementation.
+
+        - id: review
+          prompt: |
+            Review the diff for unnecessary exports, incidental UI changes,
+            or weak test coverage. Reduce scope where appropriate.
+
+  tooling_change:
+    description: >
+      Modify an internal tool like kctl where design, implementation, and CLI validation
+      should be separated.
+    shape:
+      objective: "<overall objective>"
+      defaults:
+        stop_on_failure: true
+      steps:
+        - id: inspect
+          prompt: |
+            Review the current architecture and identify the narrowest insertion point
+            for this change.
+            Do not modify code yet.
+          expect_clean_diff: true
+
+        - id: implement
+          prompt: |
+            Implement the requested tooling change in the smallest useful slice.
+            Keep the implementation simple and avoid unrelated features.
+
+        - id: validate
+          prompt: |
+            Run the relevant local validation checks for this tool and fix any issues
+            caused by the implementation.
+
+        - id: summarize
+          prompt: |
+            Summarize exactly what changed, how it works, and any limitations.
+            Do not add new features.
+
+  review_only:
+    description: >
+      Read-only plan for understanding or critiquing an existing diff without making changes.
+    shape:
+      objective: "<overall objective>"
+      defaults:
+        stop_on_failure: true
+      steps:
+        - id: inspect
+          prompt: |
+            Review the relevant code, diff, or workflow.
+            Do not modify files.
+            Produce a concise assessment with concrete findings.
+          expect_clean_diff: true
+
+  commit_ready_change:
+    description: >
+      Change intended to end in a clean branch + commit when paired with kctl run
+      commit options.
+    shape:
+      objective: "<overall objective>"
+      defaults:
+        stop_on_failure: true
+      steps:
+        - id: inspect
+          prompt: |
+            Read the relevant code path and identify the narrowest safe implementation plan.
+            Do not modify files.
+          expect_clean_diff: true
+
+        - id: implement
+          prompt: |
+            Implement the requested change with the smallest practical diff.
+            Keep the work scoped to the objective.
+
+        - id: verify
+          prompt: |
+            Run or describe the most relevant verification for this change.
+            Fix any issues introduced by the implementation.
+
+        - id: review
+          prompt: |
+            Review the final diff for scope creep, unnecessary edits, and commit readiness.
+            Remove incidental changes before finishing.
