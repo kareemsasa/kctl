@@ -44,7 +44,72 @@ def run_command(command: list[str], cwd: Path, stdin_text: str | None = None) ->
     )
 
 
-def run_streaming_command(command: list[str], cwd: Path, stdout_prefix: str = "", stderr_prefix: str = "") -> CommandResult:
+def should_display_codex_line(line: str) -> bool:
+    stripped = line.strip()
+    lower = stripped.lower()
+    hidden_prefixes = (
+        "OpenAI Codex ",
+        "workdir:",
+        "model:",
+        "provider:",
+        "approval:",
+        "sandbox:",
+        "reasoning effort:",
+        "reasoning summaries:",
+        "session id:",
+        "mcp startup:",
+        "user",
+        "202",
+    )
+    if not stripped:
+        return False
+    if stripped == "--------":
+        return False
+    if stripped.startswith(hidden_prefixes):
+        return False
+    if stripped.startswith("codex: "):
+        return should_display_codex_line(stripped[7:])
+    if "token" in lower and ("input" in lower or "output" in lower or "total" in lower):
+        return False
+    if stripped.startswith("Reconnecting..."):
+        return False
+    if stripped in {"Constraints:", "Overall objective:", "Prior step summaries:"}:
+        return False
+    if stripped.startswith(("Current step id:", "Current step prompt:")):
+        return False
+    if stripped.startswith("- Work only in the current repository."):
+        return False
+    if stripped.startswith("- Keep changes scoped to the current step."):
+        return False
+    if stripped.startswith("- In your final response, summarize what you changed and any verification you ran."):
+        return False
+    if is_command_like_line(stripped):
+        return False
+    if stripped.startswith(("- ", "* ")):
+        bullet_body = stripped[2:].strip()
+        if is_command_like_line(bullet_body):
+            return False
+        if "/" in bullet_body and len(bullet_body.split()) <= 6:
+            return False
+    if stripped.startswith(("/", "./")):
+        return False
+    if " | " in stripped and any(token in lower for token in ("file changed", "insertion", "deletion")):
+        return False
+    if len(stripped) > 160 and ("/" in stripped or "\\" in stripped):
+        return False
+    if stripped.count(",") >= 4 and "/" in stripped:
+        return False
+    return True
+
+
+def run_streaming_command(
+    command: list[str],
+    cwd: Path,
+    stdout_prefix: str = "",
+    stderr_prefix: str = "",
+    filter_stream: bool = False,
+    hidden_lines: set[str] | None = None,
+) -> CommandResult:
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -60,8 +125,12 @@ def run_streaming_command(command: list[str], cwd: Path, stdout_prefix: str = ""
     def forward_stream(stream: Any, sink: Any, prefix: str, captured_chunks: list[str]) -> None:
         for line in iter(stream.readline, ""):
             captured_chunks.append(line)
-            sink.write(f"{prefix}{line}" if prefix else line)
-            sink.flush()
+            rendered_line = f"{prefix}{line}" if prefix else line
+            if hidden_lines is not None and line.strip() in hidden_lines:
+                continue
+            if not filter_stream or should_display_codex_line(line):
+                sink.write(rendered_line)
+                sink.flush()
         stream.close()
 
     stdout_thread = threading.Thread(
@@ -156,10 +225,10 @@ def validate_plan(plan: dict[str, Any]) -> None:
 
 
 def resolve_repo(plan_path: Path, repo_value: str) -> Path:
-    repo_path = Path(repo_value)
+    repo_path = Path(repo_value).expanduser()
     if not repo_path.is_absolute():
-        repo_path = (plan_path.parent / repo_path).resolve()
-    return repo_path
+        repo_path = plan_path.parent / repo_path
+    return repo_path.resolve()
 
 
 def ensure_git_repo(repo_path: Path) -> None:
@@ -200,6 +269,38 @@ def parse_changed_files(status_output: str) -> list[str]:
     return changed_files
 
 
+def parse_git_status_entries(status_output: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for raw_line in status_output.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+
+        status_code = line[:2]
+        path_text = line[3:] if len(line) > 3 else ""
+        if " -> " in path_text:
+            _, path_text = path_text.split(" -> ", 1)
+
+        path_text = path_text.strip()
+        if path_text:
+            entries[path_text] = status_code
+
+    return entries
+
+
+def detect_new_changes(
+    baseline_entries: dict[str, str],
+    current_entries: dict[str, str],
+) -> list[str]:
+    new_changed_files: list[str] = []
+    for path in sorted(current_entries):
+        baseline_status = baseline_entries.get(path)
+        current_status = current_entries[path]
+        if baseline_status is None or baseline_status != current_status:
+            new_changed_files.append(path)
+    return new_changed_files
+
+
 def build_codex_prompt(objective: str, prior_summaries: list[str], step: dict[str, Any]) -> str:
     sections = [
         "You are executing one step in a larger kctl plan.",
@@ -222,7 +323,36 @@ def build_codex_prompt(objective: str, prior_summaries: list[str], step: dict[st
     return "\n\n".join(sections)
 
 
-def extract_codex_summary(stdout: str) -> str | None:
+def is_command_like_line(line: str) -> bool:
+    stripped = line.strip().strip("`")
+    command_prefixes = (
+        "git ",
+        "python ",
+        "python3 ",
+        "pytest",
+        "npm ",
+        "pnpm ",
+        "yarn ",
+        "cargo ",
+        "go ",
+        "make ",
+        "sh ",
+        "bash ",
+        "./",
+        "cd ",
+        "ls ",
+        "cat ",
+        "sed ",
+        "rg ",
+        "grep ",
+        "uv ",
+    )
+    return stripped.startswith(command_prefixes)
+
+
+def is_meaningful_summary_line(line: str) -> bool:
+    stripped = line.strip()
+    lower = stripped.lower()
     ignored_prefixes = (
         "OpenAI Codex ",
         "workdir:",
@@ -243,24 +373,119 @@ def extract_codex_summary(stdout: str) -> str | None:
         "--------",
         "202",
     )
+
+    if stripped.startswith(ignored_prefixes):
+        return False
+    if lower in {"verification:", "verify:", "validation:", "tests:"}:
+        return False
+    if "token" in lower and ("input" in lower or "output" in lower or "total" in lower):
+        return False
+    if is_command_like_line(stripped):
+        return False
+    if stripped.startswith(("- ", "* ")) and is_command_like_line(stripped[2:]):
+        return False
+    if not any(char.isalpha() for char in stripped):
+        return False
+    if len(stripped.split()) < 3:
+        return False
+    return True
+
+
+def build_synthetic_codex_summary(
+    status: str,
+    changed_files: list[str],
+    verify_result: CommandResult | dict[str, Any] | None,
+) -> str:
+    changed_files_text = ", ".join(changed_files) if changed_files else "-"
+    verify_text = "not-run"
+    if verify_result is not None:
+        verify_exit_code = (
+            verify_result.exit_code
+            if isinstance(verify_result, CommandResult)
+            else verify_result["exit_code"]
+        )
+        verify_text = "passed" if verify_exit_code == 0 else "failed"
+    return f"status={status}; changed_files={changed_files_text}; verify={verify_text}"
+
+
+def extract_codex_summary(stdout: str, status: str, changed_files: list[str], verify_result: CommandResult | None) -> str:
     for line in reversed([line.strip() for line in stdout.splitlines() if line.strip()]):
-        if line.startswith(ignored_prefixes):
-            continue
-        return line[:200]
-    return None
+        if is_meaningful_summary_line(line):
+            return line[:200]
+    return build_synthetic_codex_summary(status, changed_files, verify_result)
+
+
+def shorten_summary(text: str, limit: int = 200) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def extract_compact_step_summary(step_result: dict[str, Any]) -> str:
+    codex_summary = step_result.get("codex_summary")
+    if codex_summary:
+        return shorten_summary(codex_summary)
+    return build_synthetic_codex_summary(
+        status=step_result["status"],
+        changed_files=step_result["changed_files"],
+        verify_result=step_result["verify"],
+    )
 
 
 def summarize_step_result(step_result: dict[str, Any]) -> str:
     changed_files = ", ".join(step_result["changed_files"]) if step_result["changed_files"] else "-"
-    summary = (
+    return (
         f"id={step_result['id']} "
         f"status={step_result['status']} "
-        f"changed_files={changed_files}"
+        f"changed_files={changed_files} "
+        f"summary={extract_compact_step_summary(step_result)}"
     )
-    codex_summary = step_result.get("codex_summary")
-    if codex_summary:
-        summary += f" summary={codex_summary}"
-    return summary
+
+
+def extract_verify_data(verify_result: CommandResult | None) -> dict[str, Any] | None:
+    if verify_result is None:
+        return None
+    return {
+        "command": verify_result.command,
+        "cwd": verify_result.cwd,
+        "exit_code": verify_result.exit_code,
+        "stdout": verify_result.stdout,
+        "stderr": verify_result.stderr,
+    }
+
+
+def format_duration_seconds(started_at: str, ended_at: str) -> str:
+    started = datetime.fromisoformat(started_at)
+    ended = datetime.fromisoformat(ended_at)
+    duration = max(0.0, (ended - started).total_seconds())
+    return f"{duration:.1f}s"
+
+
+def get_verify_label(verify_result: dict[str, Any] | None) -> str:
+    if verify_result is None:
+        return "skipped"
+    return "passed" if verify_result["exit_code"] == 0 else "failed"
+
+
+def print_step_footer(step_result: dict[str, Any]) -> None:
+    footer = (
+        f"Step {step_result['id']} | status={step_result['status']} | "
+        f"duration={format_duration_seconds(step_result['started_at'], step_result['ended_at'])} | "
+        f"verify={get_verify_label(step_result['verify'])} | "
+        f"baseline_changed_files={len(step_result['baseline_changed_files'])} | "
+        f"new_changed_files={len(step_result['new_changed_files'])}"
+    )
+    print(footer, flush=True)
+    if 0 < len(step_result["new_changed_files"]) <= 5:
+        print(f"New: {', '.join(step_result['new_changed_files'])}", flush=True)
+
+
+def prompt_to_continue() -> bool:
+    try:
+        response = input("Continue to next step? [y/N] ")
+    except EOFError:
+        return False
+    return response.strip().lower() == "y"
 
 
 def print_command_result(label: str, result: CommandResult) -> None:
@@ -273,57 +498,43 @@ def print_command_result(label: str, result: CommandResult) -> None:
         print(result.stderr.rstrip(), file=sys.stderr, flush=True)
 
 
-def execute_step(
-    repo_path: Path,
-    objective: str,
-    defaults: dict[str, Any],
-    step: dict[str, Any],
-    prior_summaries: list[str],
+def should_print_diff_stat(diff_stat_output: str, verbose: bool) -> bool:
+    if verbose:
+        return bool(diff_stat_output.strip())
+    lines = [line for line in diff_stat_output.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if len(lines) > 3:
+        return False
+    if any(len(line) > 120 for line in lines):
+        return False
+    return True
+
+
+def build_step_result(
+    step_id: str,
+    step_prompt: str,
+    codex_prompt: str,
+    started_at: str,
+    ended_at: str,
+    expect_clean_diff: bool,
+    status: str,
+    failure_reason: str | None,
+    before_status: CommandResult,
+    after_status: CommandResult,
+    diff_stat: CommandResult,
+    baseline_changed_files: list[str],
+    new_changed_files: list[str],
+    changed_files: list[str],
+    codex_result: CommandResult,
+    verify_result: CommandResult | None,
 ) -> dict[str, Any]:
-    step_id = step["id"]
-    print(f"== Step {step_id} ==", flush=True)
+    verify_data = extract_verify_data(verify_result)
+    codex_summary = extract_codex_summary(codex_result.stdout, status, changed_files, verify_result)
 
-    started_at = datetime.now(timezone.utc).isoformat()
-    before_status = get_git_status(repo_path)
-    codex_prompt = build_codex_prompt(objective, prior_summaries, step)
-    codex_result = run_streaming_command(
-        ["codex", "exec", "--full-auto", "--cd", str(repo_path), codex_prompt],
-        cwd=repo_path,
-        stdout_prefix="codex: ",
-        stderr_prefix="codex: ",
-    )
-    ended_at = datetime.now(timezone.utc).isoformat()
-    after_status = get_git_status(repo_path)
-    diff_stat = get_git_diff_stat(repo_path)
-
-    changed_files = parse_changed_files(after_status.stdout)
-    changed_files_count = len(changed_files)
-    expect_clean_diff = bool(step.get("expect_clean_diff", False))
-    verify_command = step.get("verify") or defaults.get("verify")
-    verify_result: CommandResult | None = None
-    codex_summary = extract_codex_summary(codex_result.stdout) if codex_result.exit_code == 0 else None
-
-    status = "success"
-    failure_reason: str | None = None
-
-    if codex_result.exit_code != 0:
-        status = "failure"
-        failure_reason = "codex_failed"
-
-    if expect_clean_diff and changed_files_count > 0:
-        status = "failure"
-        failure_reason = "expected_clean_diff"
-
-    if verify_command:
-        verify_result = run_command(["sh", "-lc", verify_command], cwd=repo_path)
-        print_command_result("verify", verify_result)
-        if verify_result.exit_code != 0:
-            status = "failure"
-            failure_reason = "verify_failed"
-
-    step_result = {
+    return {
         "id": step_id,
-        "prompt": step["prompt"],
+        "prompt": step_prompt,
         "codex_prompt": codex_prompt,
         "started_at": started_at,
         "ended_at": ended_at,
@@ -345,8 +556,10 @@ def execute_step(
             "stdout": diff_stat.stdout,
             "stderr": diff_stat.stderr,
         },
+        "baseline_changed_files": baseline_changed_files,
+        "new_changed_files": new_changed_files,
         "changed_files": changed_files,
-        "changed_files_count": changed_files_count,
+        "changed_files_count": len(changed_files),
         "codex_summary": codex_summary,
         "codex": {
             "command": codex_result.command,
@@ -355,22 +568,88 @@ def execute_step(
             "stdout": codex_result.stdout,
             "stderr": codex_result.stderr,
         },
-        "verify": None,
+        "verify": verify_data,
     }
 
-    if verify_result is not None:
-        step_result["verify"] = {
-            "command": verify_result.command,
-            "cwd": verify_result.cwd,
-            "exit_code": verify_result.exit_code,
-            "stdout": verify_result.stdout,
-            "stderr": verify_result.stderr,
-        }
 
-    print(f"Changed files: {changed_files_count}", flush=True)
-    if diff_stat.stdout.strip():
+def execute_step(
+    repo_path: Path,
+    objective: str,
+    defaults: dict[str, Any],
+    step: dict[str, Any],
+    prior_summaries: list[str],
+    verbose: bool,
+) -> dict[str, Any]:
+    step_id = step["id"]
+    print(f"== Step {step_id} ==", flush=True)
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    before_status = get_git_status(repo_path)
+    codex_prompt = build_codex_prompt(objective, prior_summaries, step)
+    prompt_lines_to_hide = {line.strip() for line in codex_prompt.splitlines() if line.strip()}
+    codex_result = run_streaming_command(
+        ["codex", "exec", "--full-auto", "--cd", str(repo_path), codex_prompt],
+        cwd=repo_path,
+        stdout_prefix="codex: ",
+        stderr_prefix="codex: ",
+        filter_stream=not verbose,
+        hidden_lines=prompt_lines_to_hide if not verbose else None,
+    )
+    ended_at = datetime.now(timezone.utc).isoformat()
+    after_status = get_git_status(repo_path)
+    diff_stat = get_git_diff_stat(repo_path)
+
+    baseline_entries = parse_git_status_entries(before_status.stdout)
+    after_entries = parse_git_status_entries(after_status.stdout)
+    baseline_changed_files = sorted(baseline_entries)
+    new_changed_files = detect_new_changes(baseline_entries, after_entries)
+    changed_files = parse_changed_files(after_status.stdout)
+    changed_files_count = len(changed_files)
+    expect_clean_diff = bool(step.get("expect_clean_diff", False))
+    verify_command = step.get("verify") or defaults.get("verify")
+    verify_result: CommandResult | None = None
+
+    status = "success"
+    failure_reason: str | None = None
+
+    if codex_result.exit_code != 0:
+        status = "failure"
+        failure_reason = "codex_failed"
+
+    if expect_clean_diff and new_changed_files:
+        status = "failure"
+        failure_reason = "expected_clean_diff"
+
+    if verify_command:
+        verify_result = run_command(["sh", "-lc", verify_command], cwd=repo_path)
+        print_command_result("verify", verify_result)
+        if verify_result.exit_code != 0:
+            status = "failure"
+            failure_reason = "verify_failed"
+
+    step_result = build_step_result(
+        step_id=step_id,
+        step_prompt=step["prompt"],
+        codex_prompt=codex_prompt,
+        started_at=started_at,
+        ended_at=ended_at,
+        expect_clean_diff=expect_clean_diff,
+        status=status,
+        failure_reason=failure_reason,
+        before_status=before_status,
+        after_status=after_status,
+        diff_stat=diff_stat,
+        baseline_changed_files=baseline_changed_files,
+        new_changed_files=new_changed_files,
+        changed_files=changed_files,
+        codex_result=codex_result,
+        verify_result=verify_result,
+    )
+
+    if should_print_diff_stat(diff_stat.stdout, verbose):
         print("git diff --stat:", flush=True)
         print(diff_stat.stdout.rstrip(), flush=True)
+    print_step_footer(step_result)
 
     return step_result
 
@@ -384,7 +663,7 @@ def save_run_log(run_data: dict[str, Any], script_root: Path) -> Path:
     return log_path
 
 
-def run_plan(plan_path: Path) -> int:
+def run_plan(plan_path: Path, verbose: bool, approve_each_step: bool) -> int:
     plan = load_plan(plan_path)
     validate_plan(plan)
 
@@ -398,13 +677,15 @@ def run_plan(plan_path: Path) -> int:
     run_status = "success"
     started_at = datetime.now(timezone.utc).isoformat()
 
-    for step in plan["steps"]:
+    steps = plan["steps"]
+    for index, step in enumerate(steps):
         step_result = execute_step(
             repo_path=repo_path,
             objective=plan["objective"],
             defaults=defaults,
             step=step,
             prior_summaries=prior_summaries,
+            verbose=verbose,
         )
         step_results.append(step_result)
         prior_summaries.append(summarize_step_result(step_result))
@@ -422,6 +703,12 @@ def run_plan(plan_path: Path) -> int:
 
         if should_stop:
             break
+
+        has_next_step = index < len(steps) - 1
+        if approve_each_step and has_next_step:
+            if not prompt_to_continue():
+                run_status = "stopped"
+                break
 
     run_data = {
         "started_at": started_at,
@@ -447,7 +734,7 @@ def run_plan(plan_path: Path) -> int:
         )
     print(f"Run log: {log_path}", flush=True)
 
-    return 0 if run_status == "success" else 1
+    return 1 if run_status == "failure" else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -456,6 +743,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Run a YAML plan.")
     run_parser.add_argument("plan", help="Path to the YAML plan file.")
+    run_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show the raw Codex stream instead of the filtered terminal view.",
+    )
+    run_parser.add_argument(
+        "--approve-each-step",
+        action="store_true",
+        help="Prompt before starting the next step.",
+    )
 
     return parser
 
@@ -466,7 +763,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         try:
-            return run_plan(Path(args.plan).resolve())
+            return run_plan(
+                Path(args.plan).resolve(),
+                verbose=args.verbose,
+                approve_each_step=args.approve_each_step,
+            )
         except PlanError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
