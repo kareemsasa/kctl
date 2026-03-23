@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -28,8 +29,94 @@ class PlanError(Exception):
     pass
 
 
+COLOR_ENABLED = False
 REVIEWER_NAMES = ("scope reviewer", "test reviewer")
 MAX_REVIEW_UNTRACKED_FILE_BYTES = 16_000
+CODEX_STREAM_PREFIX = "codex: "
+UNKNOWN_GIT_ERROR = "unknown git error"
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "\033[1m"
+ANSI_DIM = "\033[2m"
+ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_CYAN = "\033[36m"
+IMPORTANT_OUTPUT_PATTERN = re.compile(
+    r"\b(error|errors|exception|traceback|failed|failure|warning|warnings|fatal|timeout|timed out|denied|invalid)\b"
+)
+CODE_DECLARATION_PATTERN = re.compile(
+    r"^(?:"
+    r"from\s+\S+\s+import\b|"
+    r"import\b|"
+    r"export\b|"
+    r"const\b|"
+    r"let\b|"
+    r"var\b|"
+    r"type\b|"
+    r"interface\b|"
+    r"enum\b|"
+    r"class\b|"
+    r"(?:async\s+)?def\b|"
+    r"(?:async\s+)?function\b|"
+    r"(?:public|private|protected|static|readonly)\b"
+    r")"
+)
+JSX_TAG_PATTERN = re.compile(r"^</?[A-Za-z][A-Za-z0-9._:-]*(?:\s+[^>]*)?>$")
+NUMBERED_DUMP_PATTERN = re.compile(r"^\s*\d+\s+")
+PATH_DUMP_PATTERN = re.compile(r"^(?:\.{0,2}/|/|[A-Za-z0-9_.-]+/).+:\d+(?::\d+)?:")
+PATH_MATCH_WITH_CONTENT_PATTERN = re.compile(
+    r"^(?:\.{0,2}/|/)?(?:[A-Za-z0-9_.-]+/)+[^:\s]+:\d+(?::\d+)?:.+$"
+)
+OBJECT_FRAGMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*:\s*[^.]+,?$")
+TYPE_FIELD_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_?]*\s*:\s*[^=][^,;{}()]*[;,]?$")
+TYPE_LITERAL_FRAGMENT_PATTERN = re.compile(r"^(?:\||&)\s*[\"'A-Za-z0-9_.-]+$")
+JSX_PROPERTY_FRAGMENT_PATTERN = re.compile(
+    r"^(?:className|id|key|name|value|type|variant|size|color|href|src|alt|title|role|on[A-Z][A-Za-z0-9_]*)\s*=\s*.+$"
+)
+PROSE_PREFIX_PATTERN = re.compile(
+    r"^(?:"
+    r"i['’]m\b|"
+    r"i\b|"
+    r"we\b|"
+    r"found\b|"
+    r"checking\b|"
+    r"inspecting\b|"
+    r"reviewing\b|"
+    r"running\b|"
+    r"testing\b|"
+    r"verifying\b|"
+    r"updated\b|"
+    r"changed\b|"
+    r"added\b|"
+    r"removed\b|"
+    r"fixed\b|"
+    r"kept\b|"
+    r"showing\b|"
+    r"hiding\b|"
+    r"status\b|"
+    r"result\b|"
+    r"summary\b|"
+    r"verification\b|"
+    r"final\b|"
+    r"done\b|"
+    r"no files were modified\b|"
+    r"no changes were made\b"
+    r")",
+    re.IGNORECASE,
+)
+RESULT_PREFIX_PATTERN = re.compile(
+    r"^(?:"
+    r"step\s+\S+\s+\||"
+    r"new:\s+|"
+    r"review\s+\S+\s*:|"
+    r"verify(?:\s+\w+)?:|"
+    r"verification\b|"
+    r"tests?\b|"
+    r"no files were modified\.?|"
+    r"no changes were made\.?"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def run_command(command: list[str], cwd: Path, stdin_text: str | None = None) -> CommandResult:
@@ -47,6 +134,129 @@ def run_command(command: list[str], cwd: Path, stdin_text: str | None = None) ->
         stdout=completed.stdout,
         stderr=completed.stderr,
     )
+
+
+def supports_color(stream: Any) -> bool:
+    return bool(COLOR_ENABLED and hasattr(stream, "isatty") and stream.isatty())
+
+
+def style_text(
+    text: str,
+    *,
+    stream: Any = sys.stdout,
+    color: str | None = None,
+    bold: bool = False,
+    dim: bool = False,
+) -> str:
+    if not supports_color(stream):
+        return text
+    codes: list[str] = []
+    if bold:
+        codes.append(ANSI_BOLD)
+    if dim:
+        codes.append(ANSI_DIM)
+    if color:
+        codes.append(color)
+    if not codes:
+        return text
+    return "".join(codes) + text + ANSI_RESET
+
+
+def style_status_text(text: str, status: str, *, stream: Any = sys.stdout, bold: bool = False) -> str:
+    if status == "success":
+        color = ANSI_GREEN
+    elif status in {"paused", "warning", "concern"}:
+        color = ANSI_YELLOW
+    elif status in {"failure", "failed", "block", "blocked", "error"}:
+        color = ANSI_RED
+    else:
+        color = None
+    return style_text(text, stream=stream, color=color, bold=bold)
+
+
+def is_important_output_line(line: str) -> bool:
+    lower = line.lower()
+    if lower.startswith(("error:", "warning:", "warn:", "fatal:", "usage:")):
+        return True
+    if "no such file" in lower or "not found" in lower or "permission denied" in lower:
+        return True
+    return bool(IMPORTANT_OUTPUT_PATTERN.search(lower))
+
+
+def looks_like_code_or_file_dump(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if PATH_MATCH_WITH_CONTENT_PATTERN.match(stripped):
+        return True
+    if CODE_DECLARATION_PATTERN.match(stripped):
+        return True
+    if JSX_TAG_PATTERN.match(stripped):
+        return True
+    if JSX_PROPERTY_FRAGMENT_PATTERN.match(stripped):
+        return True
+    if re.fullmatch(r"[{}\[\]();,]+", stripped):
+        return True
+    if re.fullmatch(r"[{}\[\](),.:;<>=\"'`-]+", stripped):
+        return True
+    if re.match(r"^(?:if|else|for|while|switch|try|catch|finally|return)\b", stripped):
+        return True
+    if "=>" in stripped and (stripped.endswith("{") or stripped.endswith(");") or stripped.endswith(",")):
+        return True
+    if stripped.endswith("{") and re.search(r"\([^)]*\)", stripped):
+        return True
+    if OBJECT_FRAGMENT_PATTERN.match(stripped) and len(stripped.split()) <= 6:
+        return True
+    if TYPE_FIELD_PATTERN.match(stripped) and len(stripped.split()) <= 6:
+        return True
+    if TYPE_LITERAL_FRAGMENT_PATTERN.match(stripped):
+        return True
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\??:\s*(?:string|number|boolean|unknown|any|never|void|React\.\w+|\{.*\}|\[.*\]|<.*>)$", stripped):
+        return True
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=\{.*\},?$", stripped):
+        return True
+    if NUMBERED_DUMP_PATTERN.match(line):
+        body = NUMBERED_DUMP_PATTERN.sub("", line, count=1).strip()
+        if body and (looks_like_code_or_file_dump(body) or "/" in body or body.endswith(("{", "}", ";"))):
+            return True
+    if PATH_DUMP_PATTERN.match(stripped):
+        return True
+    if len(stripped) > 120 and (stripped.count("/") >= 2 or stripped.count("\\") >= 2):
+        return True
+    return False
+
+
+def get_git_error_message(result: CommandResult) -> str:
+    return result.stderr.strip() or result.stdout.strip() or UNKNOWN_GIT_ERROR
+
+
+def looks_like_natural_language_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or looks_like_code_or_file_dump(stripped):
+        return False
+    if PATH_DUMP_PATTERN.match(stripped) or PATH_MATCH_WITH_CONTENT_PATTERN.match(stripped) or NUMBERED_DUMP_PATTERN.match(stripped):
+        return False
+    if stripped.startswith(("/", "./")) or is_command_like_line(stripped):
+        return False
+    if " | " in stripped and any(token in stripped.lower() for token in ("file changed", "insertion", "deletion")):
+        return False
+    word_count = len(stripped.split())
+    if RESULT_PREFIX_PATTERN.match(stripped):
+        return True
+    if PROSE_PREFIX_PATTERN.match(stripped):
+        return word_count >= 2
+    if stripped.startswith(("- ", "* ")):
+        bullet_body = stripped[2:].strip()
+        if not bullet_body or looks_like_code_or_file_dump(bullet_body) or is_command_like_line(bullet_body):
+            return False
+        return len(bullet_body.split()) >= 4 and any(char in bullet_body for char in ".:") 
+    if word_count < 4:
+        return False
+    if len(stripped) > 160 and ("/" in stripped or "\\" in stripped):
+        return False
+    punctuation_count = sum(1 for char in stripped if char in ".,:;!?")
+    alpha_ratio = sum(1 for char in stripped if char.isalpha()) / max(len(stripped), 1)
+    return punctuation_count >= 1 and alpha_ratio >= 0.55
 
 
 def should_display_codex_line(line: str) -> bool:
@@ -72,8 +282,10 @@ def should_display_codex_line(line: str) -> bool:
         return False
     if stripped.startswith(hidden_prefixes):
         return False
-    if stripped.startswith("codex: "):
-        return should_display_codex_line(stripped[7:])
+    if stripped.startswith(CODEX_STREAM_PREFIX):
+        return should_display_codex_line(stripped[len(CODEX_STREAM_PREFIX) :])
+    if is_important_output_line(stripped):
+        return True
     if "token" in lower and ("input" in lower or "output" in lower or "total" in lower):
         return False
     if stripped.startswith("Reconnecting..."):
@@ -88,23 +300,7 @@ def should_display_codex_line(line: str) -> bool:
         return False
     if stripped.startswith("- In your final response, summarize what you changed and any verification you ran."):
         return False
-    if is_command_like_line(stripped):
-        return False
-    if stripped.startswith(("- ", "* ")):
-        bullet_body = stripped[2:].strip()
-        if is_command_like_line(bullet_body):
-            return False
-        if "/" in bullet_body and len(bullet_body.split()) <= 6:
-            return False
-    if stripped.startswith(("/", "./")):
-        return False
-    if " | " in stripped and any(token in lower for token in ("file changed", "insertion", "deletion")):
-        return False
-    if len(stripped) > 160 and ("/" in stripped or "\\" in stripped):
-        return False
-    if stripped.count(",") >= 4 and "/" in stripped:
-        return False
-    return True
+    return looks_like_natural_language_line(stripped)
 
 
 def run_streaming_command(
@@ -128,14 +324,21 @@ def run_streaming_command(
     stderr_chunks: list[str] = []
 
     def forward_stream(stream: Any, sink: Any, prefix: str, captured_chunks: list[str]) -> None:
+        last_displayed_line: str | None = None
         for line in iter(stream.readline, ""):
             captured_chunks.append(line)
             rendered_line = f"{prefix}{line}" if prefix else line
             if hidden_lines is not None and line.strip() in hidden_lines:
                 continue
             if not filter_stream or should_display_codex_line(line):
-                sink.write(rendered_line)
+                if filter_stream and rendered_line == last_displayed_line:
+                    continue
+                display_line = rendered_line
+                if prefix == CODEX_STREAM_PREFIX and supports_color(sink):
+                    display_line = style_text(prefix, stream=sink, dim=True) + line
+                sink.write(display_line)
                 sink.flush()
+                last_displayed_line = rendered_line
         stream.close()
 
     stdout_thread = threading.Thread(
@@ -306,7 +509,7 @@ def init_plan(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(yaml.safe_dump(plan, sort_keys=False))
-    print(f"Created plan {output_path} from template {template_name}", flush=True)
+    print(style_text(f"Created plan {output_path} from template {template_name}", bold=True), flush=True)
     return 0
 
 
@@ -325,14 +528,14 @@ def ensure_git_repo(repo_path: Path) -> None:
 
     git_check = run_command(["git", "rev-parse", "--show-toplevel"], cwd=repo_path)
     if git_check.exit_code != 0:
-        message = git_check.stderr.strip() or git_check.stdout.strip() or "unknown git error"
+        message = get_git_error_message(git_check)
         raise PlanError(f"Target repo is not a git repo: {repo_path} ({message})")
 
 
 def get_current_branch(repo_path: Path) -> str:
     result = run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path)
     if result.exit_code != 0:
-        message = result.stderr.strip() or result.stdout.strip() or "unknown git error"
+        message = get_git_error_message(result)
         raise PlanError(f"Failed to determine current branch: {message}")
     return result.stdout.strip()
 
@@ -345,7 +548,7 @@ def switch_to_branch(repo_path: Path, branch_name: str) -> None:
         switch_result = run_command(["git", "switch", "-c", branch_name], cwd=repo_path)
 
     if switch_result.exit_code != 0:
-        message = switch_result.stderr.strip() or switch_result.stdout.strip() or "unknown git error"
+        message = get_git_error_message(switch_result)
         raise PlanError(f"Failed to switch to branch '{branch_name}': {message}")
 
 
@@ -494,6 +697,8 @@ def is_meaningful_summary_line(line: str) -> bool:
 
     if stripped.startswith(ignored_prefixes):
         return False
+    if looks_like_code_or_file_dump(stripped):
+        return False
     if lower in {"verification:", "verify:", "validation:", "tests:"}:
         return False
     if "token" in lower and ("input" in lower or "output" in lower or "total" in lower):
@@ -502,11 +707,7 @@ def is_meaningful_summary_line(line: str) -> bool:
         return False
     if stripped.startswith(("- ", "* ")) and is_command_like_line(stripped[2:]):
         return False
-    if not any(char.isalpha() for char in stripped):
-        return False
-    if len(stripped.split()) < 3:
-        return False
-    return True
+    return looks_like_natural_language_line(stripped)
 
 
 def build_synthetic_codex_summary(
@@ -593,14 +794,14 @@ def print_step_footer(step_result: dict[str, Any]) -> None:
         f"baseline_changed_files={len(step_result['baseline_changed_files'])} | "
         f"new_changed_files={len(step_result['new_changed_files'])}"
     )
-    print(footer, flush=True)
+    print(style_status_text(footer, step_result["status"], bold=True), flush=True)
     if 0 < len(step_result["new_changed_files"]) <= 5:
         print(f"New: {', '.join(step_result['new_changed_files'])}", flush=True)
 
 
 def prompt_to_continue() -> bool:
     try:
-        response = input("Continue to next step? [y/N] ")
+        response = input(style_text("Continue to next step? [y/N] ", bold=True))
     except EOFError:
         return False
     return response.strip().lower() == "y"
@@ -610,7 +811,10 @@ def prompt_to_continue_after_review(step_id: str, reviews: list[dict[str, Any]])
     concern_count = sum(1 for review in reviews if review["verdict"] == "concern")
     try:
         response = input(
-            f"Review concerns for step {step_id} ({concern_count} concern). Continue anyway? [y/N] "
+            style_text(
+                f"Review concerns for step {step_id} ({concern_count} concern). Continue anyway? [y/N] ",
+                bold=True,
+            )
         )
     except EOFError:
         return False
@@ -620,28 +824,29 @@ def prompt_to_continue_after_review(step_id: str, reviews: list[dict[str, Any]])
 def create_commit(repo_path: Path, commit_message: str) -> str:
     add_result = run_command(["git", "add", "-A"], cwd=repo_path)
     if add_result.exit_code != 0:
-        message = add_result.stderr.strip() or add_result.stdout.strip() or "unknown git error"
+        message = get_git_error_message(add_result)
         raise PlanError(f"Failed to stage changes for commit: {message}")
 
     commit_result = run_command(["git", "commit", "-m", commit_message], cwd=repo_path)
     if commit_result.exit_code != 0:
-        message = commit_result.stderr.strip() or commit_result.stdout.strip() or "unknown git error"
+        message = get_git_error_message(commit_result)
         raise PlanError(f"Failed to create commit: {message}")
 
     sha_result = run_command(["git", "rev-parse", "HEAD"], cwd=repo_path)
     if sha_result.exit_code != 0:
-        message = sha_result.stderr.strip() or sha_result.stdout.strip() or "unknown git error"
+        message = get_git_error_message(sha_result)
         raise PlanError(f"Failed to read commit sha: {message}")
     return sha_result.stdout.strip()
 
 
 def print_command_result(label: str, result: CommandResult) -> None:
-    print(f"{label} exit code: {result.exit_code}", flush=True)
+    status = "success" if result.exit_code == 0 else "failure"
+    print(style_status_text(f"{label} exit code: {result.exit_code}", status), flush=True)
     if result.stdout.strip():
         print(f"{label} stdout:", flush=True)
         print(result.stdout.rstrip(), flush=True)
     if result.stderr.strip():
-        print(f"{label} stderr:", file=sys.stderr, flush=True)
+        print(style_status_text(f"{label} stderr:", "failure", stream=sys.stderr), file=sys.stderr, flush=True)
         print(result.stderr.rstrip(), file=sys.stderr, flush=True)
 
 
@@ -743,9 +948,15 @@ def print_review_summary(step_id: str, reviews: list[dict[str, Any]]) -> None:
         f"{review['reviewer']}={review['verdict']}"
         for review in reviews
     )
-    print(f"Review {step_id}: {summary_text}", flush=True)
+    if any(review["verdict"] == "block" for review in reviews):
+        review_status = "block"
+    elif any(review["verdict"] == "concern" for review in reviews):
+        review_status = "concern"
+    else:
+        review_status = "success"
+    print(style_status_text(f"Review {step_id}: {summary_text}", review_status, bold=True), flush=True)
     for review in reviews:
-        print(f"- {review['reviewer']}: {review['summary']}", flush=True)
+        print(style_status_text(f"- {review['reviewer']}: {review['summary']}", review["verdict"]), flush=True)
 
 
 def build_review_content(repo_path: Path, new_changed_files: list[str]) -> str:
@@ -755,7 +966,7 @@ def build_review_content(repo_path: Path, new_changed_files: list[str]) -> str:
     for path_text in new_changed_files:
         status_result = run_command(["git", "status", "--short", "--", path_text], cwd=repo_path)
         if status_result.exit_code != 0:
-            message = status_result.stderr.strip() or status_result.stdout.strip() or "unknown git error"
+            message = get_git_error_message(status_result)
             raise PlanError(f"Failed to inspect review file status for {path_text}: {message}")
 
         status_line = next((line for line in status_result.stdout.splitlines() if line.strip()), "")
@@ -775,7 +986,7 @@ def build_review_content(repo_path: Path, new_changed_files: list[str]) -> str:
     if tracked_files:
         diff_result = run_command(["git", "diff", "--", *tracked_files], cwd=repo_path)
         if diff_result.exit_code != 0:
-            message = diff_result.stderr.strip() or diff_result.stdout.strip() or "unknown git error"
+            message = get_git_error_message(diff_result)
             raise PlanError(f"Failed to collect git diff for reviews: {message}")
         tracked_diff_text = diff_result.stdout.strip() or "(no tracked diff)"
 
@@ -933,7 +1144,7 @@ def execute_step(
     review_enabled: bool,
 ) -> dict[str, Any]:
     step_id = step["id"]
-    print(f"== Step {step_id} ==", flush=True)
+    print(style_text(f"== Step {step_id} ==", color=ANSI_CYAN, bold=True), flush=True)
 
     started_at = datetime.now(timezone.utc).isoformat()
     before_status = get_git_status(repo_path)
@@ -942,8 +1153,8 @@ def execute_step(
     codex_result = run_streaming_command(
         ["codex", "exec", "--full-auto", "--cd", str(repo_path), codex_prompt],
         cwd=repo_path,
-        stdout_prefix="codex: ",
-        stderr_prefix="codex: ",
+        stdout_prefix=CODEX_STREAM_PREFIX,
+        stderr_prefix=CODEX_STREAM_PREFIX,
         filter_stream=not verbose,
         hidden_lines=prompt_lines_to_hide if not verbose else None,
     )
@@ -956,7 +1167,6 @@ def execute_step(
     baseline_changed_files = sorted(baseline_entries)
     new_changed_files = detect_new_changes(baseline_entries, after_entries)
     changed_files = parse_changed_files(after_status.stdout)
-    changed_files_count = len(changed_files)
     expect_clean_diff = bool(step.get("expect_clean_diff", False))
     verify_command = step.get("verify") or defaults.get("verify")
     verify_result: CommandResult | None = None
@@ -1017,7 +1227,7 @@ def execute_step(
     )
 
     if should_print_diff_stat(diff_stat.stdout, verbose):
-        print("git diff --stat:", flush=True)
+        print(style_text("git diff --stat:", bold=True), flush=True)
         print(diff_stat.stdout.rstrip(), flush=True)
     print_step_footer(step_result)
 
@@ -1085,15 +1295,10 @@ def run_plan(
         step_results.append(step_result)
         prior_summaries.append(summarize_step_result(step_result))
 
-        should_stop = False
-        if step_result["failure_reason"] == "expected_clean_diff":
-            should_stop = True
-        elif step_result["failure_reason"] == "review_blocked":
-            should_stop = True
-        elif step_result["failure_reason"] == "verify_failed" and stop_on_failure:
-            should_stop = True
-        elif step_result["failure_reason"] == "codex_failed" and stop_on_failure:
-            should_stop = True
+        failure_reason = step_result["failure_reason"]
+        should_stop = failure_reason in {"expected_clean_diff", "review_blocked"} or (
+            stop_on_failure and failure_reason in {"verify_failed", "codex_failed"}
+        )
 
         if step_result["status"] == "paused":
             if prompt_to_continue_after_review(step_result["id"], step_result["reviews"]):
@@ -1111,10 +1316,9 @@ def run_plan(
             break
 
         has_next_step = index < len(steps) - 1
-        if approve_each_step and has_next_step:
-            if not prompt_to_continue():
-                run_status = "stopped"
-                break
+        if approve_each_step and has_next_step and not prompt_to_continue():
+            run_status = "stopped"
+            break
 
     if run_status == "success" and commit:
         final_status = get_git_status(repo_path)
@@ -1142,17 +1346,17 @@ def run_plan(
     }
     log_path = save_run_log(run_data, Path(__file__).resolve().parent)
 
-    print("\nFinal summary:", flush=True)
+    print(style_text("\nFinal summary:", bold=True), flush=True)
     for step_result in step_results:
         verify_label = "not-run"
         if step_result["verify"] is not None:
             verify_label = "passed" if step_result["verify"]["exit_code"] == 0 else "failed"
-        print(
+        summary_line = (
             f"- {step_result['id']}: {step_result['status']}, "
-            f"verify={verify_label}, changed_files={step_result['changed_files_count']}",
-            flush=True,
+            f"verify={verify_label}, changed_files={step_result['changed_files_count']}"
         )
-    print(f"Run log: {log_path}", flush=True)
+        print(style_status_text(summary_line, step_result["status"]), flush=True)
+    print(style_text(f"Run log: {log_path}", bold=True), flush=True)
 
     return 1 if run_status == "failure" else 0
 
@@ -1167,6 +1371,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Show the raw Codex stream instead of the filtered terminal view.",
+    )
+    run_parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI color output.",
     )
     run_parser.add_argument(
         "--approve-each-step",
@@ -1215,13 +1424,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite the output file if it already exists.",
     )
+    init_parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI color output.",
+    )
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    global COLOR_ENABLED
     parser = build_parser()
     args = parser.parse_args(argv)
+    COLOR_ENABLED = not getattr(args, "no_color", False)
 
     if args.command == "run":
         try:
@@ -1236,7 +1452,7 @@ def main(argv: list[str] | None = None) -> int:
                 review_enabled=args.review,
             )
         except PlanError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
+            print(style_status_text(f"Error: {exc}", "error", stream=sys.stderr, bold=True), file=sys.stderr)
             return 2
 
     if args.command == "init":
@@ -1249,7 +1465,7 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
             )
         except PlanError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
+            print(style_status_text(f"Error: {exc}", "error", stream=sys.stderr, bold=True), file=sys.stderr)
             return 2
 
     parser.error(f"Unknown command: {args.command}")
