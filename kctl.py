@@ -243,6 +243,26 @@ def ensure_git_repo(repo_path: Path) -> None:
         raise PlanError(f"Target repo is not a git repo: {repo_path} ({message})")
 
 
+def get_current_branch(repo_path: Path) -> str:
+    result = run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path)
+    if result.exit_code != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "unknown git error"
+        raise PlanError(f"Failed to determine current branch: {message}")
+    return result.stdout.strip()
+
+
+def switch_to_branch(repo_path: Path, branch_name: str) -> None:
+    exists_result = run_command(["git", "rev-parse", "--verify", f"refs/heads/{branch_name}"], cwd=repo_path)
+    if exists_result.exit_code == 0:
+        switch_result = run_command(["git", "switch", branch_name], cwd=repo_path)
+    else:
+        switch_result = run_command(["git", "switch", "-c", branch_name], cwd=repo_path)
+
+    if switch_result.exit_code != 0:
+        message = switch_result.stderr.strip() or switch_result.stdout.strip() or "unknown git error"
+        raise PlanError(f"Failed to switch to branch '{branch_name}': {message}")
+
+
 def get_git_status(repo_path: Path) -> CommandResult:
     return run_command(["git", "status", "--short"], cwd=repo_path)
 
@@ -488,6 +508,24 @@ def prompt_to_continue() -> bool:
     return response.strip().lower() == "y"
 
 
+def create_commit(repo_path: Path, commit_message: str) -> str:
+    add_result = run_command(["git", "add", "-A"], cwd=repo_path)
+    if add_result.exit_code != 0:
+        message = add_result.stderr.strip() or add_result.stdout.strip() or "unknown git error"
+        raise PlanError(f"Failed to stage changes for commit: {message}")
+
+    commit_result = run_command(["git", "commit", "-m", commit_message], cwd=repo_path)
+    if commit_result.exit_code != 0:
+        message = commit_result.stderr.strip() or commit_result.stdout.strip() or "unknown git error"
+        raise PlanError(f"Failed to create commit: {message}")
+
+    sha_result = run_command(["git", "rev-parse", "HEAD"], cwd=repo_path)
+    if sha_result.exit_code != 0:
+        message = sha_result.stderr.strip() or sha_result.stdout.strip() or "unknown git error"
+        raise PlanError(f"Failed to read commit sha: {message}")
+    return sha_result.stdout.strip()
+
+
 def print_command_result(label: str, result: CommandResult) -> None:
     print(f"{label} exit code: {result.exit_code}", flush=True)
     if result.stdout.strip():
@@ -663,12 +701,29 @@ def save_run_log(run_data: dict[str, Any], script_root: Path) -> Path:
     return log_path
 
 
-def run_plan(plan_path: Path, verbose: bool, approve_each_step: bool) -> int:
+def run_plan(
+    plan_path: Path,
+    verbose: bool,
+    approve_each_step: bool,
+    branch: str | None,
+    commit: bool,
+    commit_message: str | None,
+) -> int:
     plan = load_plan(plan_path)
     validate_plan(plan)
 
     repo_path = resolve_repo(plan_path, plan["repo"])
     ensure_git_repo(repo_path)
+    branch_before = get_current_branch(repo_path)
+
+    if branch:
+        switch_to_branch(repo_path, branch)
+
+    branch_after = get_current_branch(repo_path)
+    if commit and not commit_message:
+        raise PlanError("--commit requires --commit-message.")
+    if commit and branch_after in {"main", "master"}:
+        raise PlanError("--commit is not allowed on main or master.")
 
     defaults = plan.get("defaults") or {}
     stop_on_failure = bool(defaults.get("stop_on_failure", False))
@@ -676,6 +731,8 @@ def run_plan(plan_path: Path, verbose: bool, approve_each_step: bool) -> int:
     step_results: list[dict[str, Any]] = []
     run_status = "success"
     started_at = datetime.now(timezone.utc).isoformat()
+    commit_created = False
+    commit_sha: str | None = None
 
     steps = plan["steps"]
     for index, step in enumerate(steps):
@@ -710,6 +767,14 @@ def run_plan(plan_path: Path, verbose: bool, approve_each_step: bool) -> int:
                 run_status = "stopped"
                 break
 
+    if run_status == "success" and commit:
+        final_status = get_git_status(repo_path)
+        if final_status.stdout.strip():
+            commit_sha = create_commit(repo_path, commit_message)
+            commit_created = True
+
+    branch_after = get_current_branch(repo_path)
+
     run_data = {
         "started_at": started_at,
         "ended_at": datetime.now(timezone.utc).isoformat(),
@@ -717,6 +782,10 @@ def run_plan(plan_path: Path, verbose: bool, approve_each_step: bool) -> int:
         "repo": str(repo_path),
         "objective": plan["objective"],
         "defaults": defaults,
+        "branch_before": branch_before,
+        "branch_after": branch_after,
+        "commit_created": commit_created,
+        "commit_sha": commit_sha,
         "status": run_status,
         "steps": step_results,
     }
@@ -753,6 +822,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Prompt before starting the next step.",
     )
+    run_parser.add_argument(
+        "--branch",
+        help="Create or switch to this branch before running the plan.",
+    )
+    run_parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="Create a local commit at the end if the run succeeds.",
+    )
+    run_parser.add_argument(
+        "--commit-message",
+        help="Commit message to use with --commit.",
+    )
 
     return parser
 
@@ -767,6 +849,9 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.plan).resolve(),
                 verbose=args.verbose,
                 approve_each_step=args.approve_each_step,
+                branch=args.branch,
+                commit=args.commit,
+                commit_message=args.commit_message,
             )
         except PlanError as exc:
             print(f"Error: {exc}", file=sys.stderr)
