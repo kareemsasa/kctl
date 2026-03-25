@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -138,7 +139,61 @@ def init_plan(
     return 0
 
 
-def build_codex_prompt(objective: str, prior_summaries: list[str], step: dict[str, Any]) -> str:
+def build_artifact_instruction(step_id: str) -> str | None:
+    if step_id == "inspect":
+        return (
+            "Structured artifact requirement:\n"
+            "- End your response with a fenced ```json block only for the inspect artifact.\n"
+            '- Use this exact shape: {"project_type":"string","stack":["string"],"summary":"string",'
+            '"key_directories":[{"path":"string","purpose":"string"}],'
+            '"key_files":[{"path":"string","purpose":"string"}],'
+            '"relevant_areas":[{"path":"string","reason":"string"}],'
+            '"constraints":[{"path":"string","note":"string"}],'
+            '"assumptions":["string"],"unknowns":["string"]}.\n'
+            "- Keep values concise and repository-specific."
+        )
+    if step_id == "plan":
+        return (
+            "Structured artifact requirement:\n"
+            "- End your response with a fenced ```json block only for the plan artifact.\n"
+            '- Use this exact shape: {"objective":"string","approach":"string","steps":[{"id":"string",'
+            '"name":"string","files":["string"],"intent":"string"}],"verification":{"commands":["string"],'
+            '"manual_checks":["string"]},"risks":["string"],"out_of_scope":["string"]}.\n'
+            "- Base the plan on the provided inspect artifact rather than hidden session context."
+        )
+    return None
+
+
+def build_artifact_context(step_id: str, prior_artifacts: dict[str, dict[str, Any]]) -> str | None:
+    if step_id == "plan" and "inspect" in prior_artifacts:
+        return "Structured inspect artifact:\n```json\n" + json.dumps(
+            prior_artifacts["inspect"], indent=2, sort_keys=True
+        ) + "\n```"
+    if step_id == "verify" and "plan" in prior_artifacts:
+        return "Structured plan artifact:\n```json\n" + json.dumps(
+            prior_artifacts["plan"], indent=2, sort_keys=True
+        ) + "\n```"
+    return None
+
+
+def build_verify_instruction() -> str:
+    return (
+        "Verification execution model:\n"
+        "- kctl will run configured verification commands itself and persist verify.json.\n"
+        "- Do not invent command exit codes.\n"
+        "- Use the plan artifact as the source of intended verification scope.\n"
+        "- Focus your response on validation findings, likely issues, and what should be checked manually."
+    )
+
+
+def build_codex_prompt(
+    objective: str,
+    prior_summaries: list[str],
+    step: dict[str, Any],
+    prior_artifacts: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    prior_artifacts = prior_artifacts or {}
+    step_id = step["id"]
     sections = [
         "You are executing one step in a larger kctl plan.",
         f"Overall objective:\n{objective.strip()}",
@@ -147,12 +202,23 @@ def build_codex_prompt(objective: str, prior_summaries: list[str], step: dict[st
         sections.append("Prior step summaries:\n" + "\n".join(f"- {summary}" for summary in prior_summaries))
     else:
         sections.append("Prior step summaries:\n- No prior steps have run.")
-    sections.append(f"Current step id: {step['id']}")
+    artifact_context = build_artifact_context(step_id, prior_artifacts)
+    if artifact_context:
+        sections.append(artifact_context)
+    else:
+        sections.append("Structured artifacts available:\n- None")
+    sections.append(f"Current step id: {step_id}")
     sections.append(f"Current step prompt:\n{step['prompt'].strip()}")
+    artifact_instruction = build_artifact_instruction(step_id)
+    if artifact_instruction:
+        sections.append(artifact_instruction)
+    elif step_id == "verify":
+        sections.append(build_verify_instruction())
     sections.append(
         "Constraints:\n"
         "- Work only in the current repository.\n"
         "- Keep changes scoped to the current step.\n"
+        "- Assume each step is a fresh Codex invocation with no hidden memory from prior steps.\n"
         "- In your final response, summarize what you changed and any verification you ran."
     )
     return "\n\n".join(sections)

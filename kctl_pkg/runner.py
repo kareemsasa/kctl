@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +30,20 @@ from .terminal import (
     style_status_text,
     style_text,
 )
-from .types import CommandResult, PlanError
+from .types import (
+    CommandResult,
+    PlanError,
+    VerifyArtifact,
+    VerifyCommandArtifact,
+    VerifyIssueArtifact,
+    VerifyTestArtifact,
+    artifact_to_dict,
+    parse_inspect_artifact,
+    parse_plan_artifact,
+)
+
+
+FENCED_JSON_PATTERN = re.compile(r"```json\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def extract_verify_data(verify_result: CommandResult | None) -> dict[str, Any] | None:
@@ -128,6 +142,9 @@ def print_step_footer(step_result: dict[str, Any]) -> None:
     print(style_status_text(footer, step_result["status"], bold=True), flush=True)
     if 0 < len(step_result["new_changed_files"]) <= 5:
         print(f"New: {', '.join(step_result['new_changed_files'])}", flush=True)
+    artifact_error = step_result.get("artifact_parse_error")
+    if artifact_error:
+        print(style_status_text(f"Artifact error: {artifact_error}", "failure"), flush=True)
 
 
 def prompt_to_continue() -> bool:
@@ -171,6 +188,35 @@ def print_command_result(label: str, result: CommandResult) -> None:
         print(result.stderr.rstrip(), file=sys.stderr, flush=True)
 
 
+def run_verify_commands(repo_path: Path, commands: list[str]) -> list[CommandResult]:
+    results: list[CommandResult] = []
+    for index, command in enumerate(commands, start=1):
+        result = run_command(["sh", "-lc", command], cwd=repo_path)
+        label = "verify" if len(commands) == 1 else f"verify[{index}]"
+        print_command_result(label, result)
+        results.append(result)
+        if result.exit_code != 0:
+            break
+    return results
+
+
+def combine_verify_results(results: list[CommandResult]) -> CommandResult | None:
+    if not results:
+        return None
+    if len(results) == 1:
+        return results[0]
+    return CommandResult(
+        command=["sh", "-lc", " && ".join("(%s)" % result.command[-1] for result in results)],
+        cwd=results[0].cwd,
+        exit_code=next(
+            (result.exit_code for result in results if result.exit_code != 0),
+            0,
+        ),
+        stdout="\n\n".join(result.stdout.rstrip() for result in results if result.stdout.strip()),
+        stderr="\n\n".join(result.stderr.rstrip() for result in results if result.stderr.strip()),
+    )
+
+
 def print_review_summary(step_id: str, reviews: list[dict[str, Any]]) -> None:
     summary_text = ", ".join(
         f"{review['reviewer']}={review['verdict']}" for review in reviews
@@ -196,6 +242,161 @@ def print_review_summary(step_id: str, reviews: list[dict[str, Any]]) -> None:
         )
 
 
+def ensure_run_output_dir(script_root: Path, run_id: str) -> Path:
+    run_dir = script_root / ".kctl-runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def build_step_file_prefix(step_index: int) -> str:
+    return f"step-{step_index:02d}"
+
+
+def write_raw_output_artifact(
+    run_output_dir: Path,
+    step_index: int,
+    step_id: str,
+    codex_result: CommandResult,
+) -> Path:
+    raw_path = run_output_dir / f"{build_step_file_prefix(step_index)}-raw.md"
+    content = "\n".join(
+        [
+            f"# Step {step_index:02d} Raw Output",
+            "",
+            f"- Step id: `{step_id}`",
+            f"- Codex exit code: `{codex_result.exit_code}`",
+            "",
+            "## stdout",
+            "",
+            "```text",
+            codex_result.stdout.rstrip(),
+            "```",
+            "",
+            "## stderr",
+            "",
+            "```text",
+            codex_result.stderr.rstrip(),
+            "```",
+            "",
+        ]
+    )
+    raw_path.write_text(content)
+    return raw_path
+
+
+def extract_last_fenced_json_block(output_text: str) -> str:
+    matches = FENCED_JSON_PATTERN.findall(output_text)
+    if not matches:
+        raise PlanError("Expected a final fenced JSON block in Codex output.")
+    return matches[-1].strip()
+
+
+def parse_phase_artifact(step_id: str, output_text: str) -> dict[str, Any]:
+    artifact_text = extract_last_fenced_json_block(output_text)
+    try:
+        data = json.loads(artifact_text)
+    except json.JSONDecodeError as exc:
+        raise PlanError(f"Failed to parse {step_id} artifact JSON: {exc}") from exc
+    if step_id == "inspect":
+        return artifact_to_dict(parse_inspect_artifact(data))
+    if step_id == "plan":
+        return artifact_to_dict(parse_plan_artifact(data))
+    raise PlanError(f"No structured artifact parser is defined for step '{step_id}'.")
+
+
+def write_structured_artifact(
+    run_output_dir: Path,
+    step_index: int,
+    artifact_kind: str,
+    artifact_data: dict[str, Any],
+) -> Path:
+    artifact_path = run_output_dir / f"{build_step_file_prefix(step_index)}-{artifact_kind}.json"
+    artifact_path.write_text(json.dumps(artifact_data, indent=2) + "\n")
+    return artifact_path
+
+
+def summarize_command_output(result: CommandResult) -> str:
+    chunks: list[str] = [f"exit_code={result.exit_code}"]
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    if stdout:
+        first_line = next((line.strip() for line in stdout.splitlines() if line.strip()), "")
+        if first_line:
+            chunks.append(f"stdout={first_line[:160]}")
+    if stderr:
+        first_line = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
+        if first_line:
+            chunks.append(f"stderr={first_line[:160]}")
+    return "; ".join(chunks)
+
+
+def build_verify_artifact(
+    verify_results: list[CommandResult],
+    plan_artifact: dict[str, Any] | None,
+) -> dict[str, Any]:
+    commands_run: list[VerifyCommandArtifact] = []
+    tests: list[VerifyTestArtifact] = []
+    issues: list[VerifyIssueArtifact] = []
+
+    if verify_results:
+        for index, verify_result in enumerate(verify_results, start=1):
+            commands_run.append(
+                VerifyCommandArtifact(
+                    command=verify_result.command[-1],
+                    exit_code=verify_result.exit_code,
+                    summary=summarize_command_output(verify_result),
+                )
+            )
+            tests.append(
+                VerifyTestArtifact(
+                    name=f"verification command {index}",
+                    result="pass" if verify_result.exit_code == 0 else "fail",
+                )
+            )
+        if all(result.exit_code == 0 for result in verify_results):
+            issues.append(
+                VerifyIssueArtifact(
+                    severity="info",
+                    summary="Configured verification commands completed successfully.",
+                )
+            )
+            status = "pass"
+            recommended_next_action = "stop"
+        else:
+            issues.append(
+                VerifyIssueArtifact(
+                    severity="error",
+                    summary="At least one configured verification command failed.",
+                )
+            )
+            status = "fail"
+            recommended_next_action = "repair"
+    else:
+        status = "partial"
+        recommended_next_action = "manual_review"
+        issues.append(
+            VerifyIssueArtifact(
+                severity="warning",
+                summary="No verification command was configured for this verify step.",
+            )
+        )
+
+    if plan_artifact:
+        verification = plan_artifact.get("verification", {})
+        manual_checks = verification.get("manual_checks", [])
+        for check in manual_checks:
+            tests.append(VerifyTestArtifact(name=check, result="skipped"))
+
+    verify_artifact = VerifyArtifact(
+        status=status,
+        commands_run=commands_run,
+        tests=tests,
+        issues=issues,
+        recommended_next_action=recommended_next_action,
+    )
+    return artifact_to_dict(verify_artifact)
+
+
 def build_step_result(
     step_id: str,
     step_prompt: str,
@@ -214,6 +415,9 @@ def build_step_result(
     codex_result: CommandResult,
     verify_result: CommandResult | None,
     reviews: list[dict[str, Any]] | None,
+    raw_artifact_path: Path | None,
+    structured_artifacts: dict[str, str],
+    artifact_parse_error: str | None,
 ) -> dict[str, Any]:
     verify_data = extract_verify_data(verify_result)
     codex_summary = extract_codex_summary(
@@ -257,6 +461,9 @@ def build_step_result(
         },
         "verify": verify_data,
         "reviews": reviews or [],
+        "raw_artifact_path": str(raw_artifact_path) if raw_artifact_path else None,
+        "structured_artifacts": structured_artifacts,
+        "artifact_parse_error": artifact_parse_error,
     }
 
 
@@ -265,15 +472,23 @@ def execute_step(
     objective: str,
     defaults: dict[str, Any],
     step: dict[str, Any],
+    step_index: int,
     prior_summaries: list[str],
+    prior_artifacts: dict[str, dict[str, Any]],
+    run_output_dir: Path,
     verbose: bool,
     review_enabled: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     step_id = step["id"]
     print(style_text(f"== Step {step_id} ==", color=ANSI_CYAN, bold=True), flush=True)
     started_at = datetime.now(timezone.utc).isoformat()
     before_status = get_git_status(repo_path)
-    codex_prompt = build_codex_prompt(objective, prior_summaries, step)
+    codex_prompt = build_codex_prompt(
+        objective,
+        prior_summaries,
+        step,
+        prior_artifacts=prior_artifacts,
+    )
     prompt_lines_to_hide = {
         line.strip() for line in codex_prompt.splitlines() if line.strip()
     }
@@ -285,6 +500,12 @@ def execute_step(
         filter_stream=not verbose,
         hidden_lines=prompt_lines_to_hide if not verbose else None,
     )
+    raw_artifact_path = write_raw_output_artifact(
+        run_output_dir=run_output_dir,
+        step_index=step_index,
+        step_id=step_id,
+        codex_result=codex_result,
+    )
     ended_at = datetime.now(timezone.utc).isoformat()
     after_status = get_git_status(repo_path)
     diff_stat = get_git_diff_stat(repo_path)
@@ -294,23 +515,68 @@ def execute_step(
     new_changed_files = detect_new_changes(baseline_entries, after_entries)
     changed_files = parse_changed_files(after_status.stdout)
     expect_clean_diff = bool(step.get("expect_clean_diff", False))
-    verify_command = step.get("verify") or defaults.get("verify")
+    explicit_verify_command = step.get("verify") or defaults.get("verify")
+    verify_commands: list[str] = []
+    if explicit_verify_command:
+        verify_commands = [explicit_verify_command]
+    elif step_id == "verify":
+        plan_verification = prior_artifacts.get("plan", {}).get("verification", {})
+        plan_commands = plan_verification.get("commands", [])
+        if isinstance(plan_commands, list) and all(isinstance(item, str) for item in plan_commands):
+            verify_commands = [item for item in plan_commands if item.strip()]
     verify_result: CommandResult | None = None
+    verify_results: list[CommandResult] = []
     reviews: list[dict[str, Any]] = []
     status = "success"
     failure_reason: str | None = None
+    structured_artifacts: dict[str, str] = {}
+    artifact_parse_error: str | None = None
+    next_artifacts: dict[str, dict[str, Any]] = {}
+
     if codex_result.exit_code != 0:
         status = "failure"
         failure_reason = "codex_failed"
     if expect_clean_diff and new_changed_files:
         status = "failure"
         failure_reason = "expected_clean_diff"
-    if verify_command:
-        verify_result = run_command(["sh", "-lc", verify_command], cwd=repo_path)
-        print_command_result("verify", verify_result)
-        if verify_result.exit_code != 0:
+
+    if step_id in {"inspect", "plan"} and codex_result.exit_code == 0:
+        try:
+            artifact_data = parse_phase_artifact(step_id, codex_result.stdout)
+            artifact_path = write_structured_artifact(
+                run_output_dir=run_output_dir,
+                step_index=step_index,
+                artifact_kind=step_id,
+                artifact_data=artifact_data,
+            )
+            structured_artifacts[step_id] = str(artifact_path)
+            next_artifacts[step_id] = artifact_data
+        except PlanError as exc:
+            artifact_parse_error = str(exc)
+            status = "failure"
+            failure_reason = "artifact_parse_failed"
+
+    if verify_commands:
+        verify_results = run_verify_commands(repo_path, verify_commands)
+        verify_result = combine_verify_results(verify_results)
+        if verify_result is not None and verify_result.exit_code != 0:
             status = "failure"
             failure_reason = "verify_failed"
+
+    if step_id == "verify":
+        verify_artifact_data = build_verify_artifact(
+            verify_results=verify_results,
+            plan_artifact=prior_artifacts.get("plan"),
+        )
+        verify_artifact_path = write_structured_artifact(
+            run_output_dir=run_output_dir,
+            step_index=step_index,
+            artifact_kind="verify",
+            artifact_data=verify_artifact_data,
+        )
+        structured_artifacts["verify"] = str(verify_artifact_path)
+        next_artifacts["verify"] = verify_artifact_data
+
     if review_enabled and status == "success" and new_changed_files:
         reviews = run_step_reviews(
             repo_path=repo_path,
@@ -327,6 +593,7 @@ def execute_step(
         elif any(review["verdict"] == "concern" for review in reviews):
             status = "paused"
             failure_reason = "review_concern"
+
     step_result = build_step_result(
         step_id=step_id,
         step_prompt=step["prompt"],
@@ -345,20 +612,20 @@ def execute_step(
         codex_result=codex_result,
         verify_result=verify_result,
         reviews=reviews,
+        raw_artifact_path=raw_artifact_path,
+        structured_artifacts=structured_artifacts,
+        artifact_parse_error=artifact_parse_error,
     )
     if should_print_diff_stat(diff_stat.stdout, verbose):
         print(style_text("git diff --stat:", bold=True), flush=True)
         print(diff_stat.stdout.rstrip(), flush=True)
     print_step_footer(step_result)
-    return step_result
+    return step_result, next_artifacts
 
 
-def save_run_log(run_data: dict[str, Any], script_root: Path) -> Path:
-    runs_dir = script_root / ".kctl-runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    log_path = runs_dir / f"{timestamp}.json"
-    log_path.write_text(json.dumps(run_data, indent=2))
+def save_run_log(run_data: dict[str, Any], run_output_dir: Path) -> Path:
+    log_path = run_output_dir / "run.json"
+    log_path.write_text(json.dumps(run_data, indent=2) + "\n")
     return log_path
 
 
@@ -392,28 +659,37 @@ def run_plan(
     defaults = plan.get("defaults") or {}
     stop_on_failure = bool(defaults.get("stop_on_failure", False))
     prior_summaries: list[str] = []
+    prior_artifacts: dict[str, dict[str, Any]] = {}
     step_results: list[dict[str, Any]] = []
     run_status = "success"
     started_at = datetime.now(timezone.utc).isoformat()
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_output_dir = ensure_run_output_dir(project_root(), run_id)
     commit_created = False
     commit_sha: str | None = None
     steps = plan["steps"]
-    for index, step in enumerate(steps):
-        step_result = execute_step(
+    for index, step in enumerate(steps, start=1):
+        step_result, new_artifacts = execute_step(
             repo_path=repo_path,
             objective=plan["objective"],
             defaults=defaults,
             step=step,
+            step_index=index,
             prior_summaries=prior_summaries,
+            prior_artifacts=prior_artifacts,
+            run_output_dir=run_output_dir,
             verbose=verbose,
             review_enabled=review_enabled,
         )
         step_results.append(step_result)
         prior_summaries.append(summarize_step_result(step_result))
+        prior_artifacts.update(new_artifacts)
         failure_reason = step_result["failure_reason"]
-        should_stop = failure_reason in {"expected_clean_diff", "review_blocked"} or (
-            stop_on_failure and failure_reason in {"verify_failed", "codex_failed"}
-        )
+        should_stop = failure_reason in {
+            "artifact_parse_failed",
+            "expected_clean_diff",
+            "review_blocked",
+        } or (stop_on_failure and failure_reason in {"verify_failed", "codex_failed"})
         if step_result["status"] == "paused":
             if prompt_to_continue_after_review(
                 step_result["id"], step_result["reviews"]
@@ -429,7 +705,7 @@ def run_plan(
         if should_stop:
             run_status = "failure"
             break
-        has_next_step = index < len(steps) - 1
+        has_next_step = index < len(steps)
         if approve_each_step and has_next_step and not prompt_to_continue():
             run_status = "stopped"
             break
@@ -453,9 +729,10 @@ def run_plan(
         "commit_created": commit_created,
         "commit_sha": commit_sha,
         "status": run_status,
+        "run_output_dir": str(run_output_dir),
         "steps": step_results,
     }
-    log_path = save_run_log(run_data, project_root())
+    log_path = save_run_log(run_data, run_output_dir)
     print(style_text("\nFinal summary:", bold=True), flush=True)
     for step_result in step_results:
         verify_label = "not-run"

@@ -99,11 +99,22 @@ For each step, `kctl`:
 
 ## Run Logs
 
-Each run writes a file like:
+Each run writes a directory like:
 
 ```text
-.kctl-runs/20260323T000000Z.json
+.kctl-runs/20260323T000000Z/
 ```
 
-The log includes plan metadata, per-step Codex output, git status snapshots, diff stats, verification results, and the final run status.
-Each step log also includes `started_at`, `ended_at`, the full `codex_prompt`, `changed_files`, and `changed_files_count`.
+Each run directory contains `run.json` plus per-step artifacts such as:
+
+```text
+step-01-raw.md
+step-01-inspect.json
+step-02-raw.md
+step-02-plan.json
+step-03-raw.md
+step-03-verify.json
+```
+
+The run log includes plan metadata, per-step Codex output, git status snapshots, diff stats, verification results, artifact paths, and the final run status.
+Each step log also includes `started_at`, `ended_at`, the full `codex_prompt`, `changed_files`, `changed_files_count`, and any structured artifact parse errors.
