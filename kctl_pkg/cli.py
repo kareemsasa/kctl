@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .plan import init_plan
+from .plan import init_plan, resolve_plan_path
 from .runner import run_plan
 from .terminal import set_color_enabled, style_status_text
 from .types import PlanError
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         try:
             return run_plan(
-                Path(args.plan).resolve(),
+                resolve_plan_path(args.plan),
                 verbose=args.verbose,
                 approve_each_step=args.approve_each_step,
                 branch=args.branch,

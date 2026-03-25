@@ -22,6 +22,14 @@ Run a plan:
 python3 kctl.py run examples/sample-plan.yaml
 ```
 
+`kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
+
+Example from outside this repository:
+
+```bash
+KCTL_PLAN_ROOT=/Users/sasa/Projects/kctl/plans python3 /Users/sasa/Projects/kctl/kctl.py run traffic-simulator/001-initialize-simulator.yaml
+```
+
 ## Plan Format
 
 Top-level fields:

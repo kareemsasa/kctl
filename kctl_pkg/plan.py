@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,29 @@ import yaml
 from .paths import project_root
 from .terminal import style_text
 from .types import PlanError
+
+
+def resolve_plan_path(plan_value: str) -> Path:
+    direct_path = Path(plan_value).expanduser()
+    if direct_path.exists() and direct_path.is_file():
+        return direct_path.resolve()
+
+    plan_root = os.environ.get("KCTL_PLAN_ROOT")
+    if plan_root:
+        rooted_path = (Path(plan_root).expanduser() / direct_path).resolve()
+        if rooted_path.exists() and rooted_path.is_file():
+            return rooted_path
+        raise PlanError(
+            "Plan file was not found. "
+            f"Checked direct path: {direct_path.resolve()} and "
+            f"KCTL_PLAN_ROOT path: {rooted_path}."
+        )
+
+    raise PlanError(
+        "Plan file was not found. "
+        f"Checked direct path: {direct_path.resolve()}. "
+        "KCTL_PLAN_ROOT was not set."
+    )
 
 
 def load_plan(plan_path: Path) -> dict[str, Any]:
