@@ -22,6 +22,12 @@ Run a plan:
 python3 kctl.py run examples/sample-plan.yaml
 ```
 
+Run the same plan across multiple repositories under a root:
+
+```bash
+python3 kctl.py batch examples/sample-plan.yaml --root /Users/sasa/Projects
+```
+
 `kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
 
 Example from outside this repository:
@@ -107,6 +113,8 @@ For each step, `kctl`:
 7. Enforces `expect_clean_diff` if configured.
 8. Runs step-level or default verification if configured. Verification may run under a different shell/environment than your interactive terminal unless `verify_shell` is set explicitly.
 9. Writes run artifacts under `.kctl-runs/` inside the target repository.
+
+`kctl batch <plan> --root <path>` scans recursively for directories containing `.git`, treats each as a target repository, overrides the plan `repo:` field for that execution only, and runs the normal per-repo flow sequentially.
 
 ## Run Logs
 

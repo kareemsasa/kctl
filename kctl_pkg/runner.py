@@ -725,8 +725,12 @@ def run_plan(
     commit_message: str | None,
     allow_dirty_start: bool,
     review_enabled: bool,
+    repo_override: str | None = None,
 ) -> int:
     plan = load_plan(plan_path)
+    if repo_override is not None:
+        plan = dict(plan)
+        plan["repo"] = repo_override
     validate_plan(plan)
     repo_path = resolve_repo(plan_path, plan["repo"])
     ensure_git_repo(repo_path)
