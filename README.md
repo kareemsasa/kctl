@@ -26,6 +26,23 @@ Run the same plan across multiple repositories under a root:
 
 ```bash
 python3 kctl.py batch examples/sample-plan.yaml --root /Users/sasa/Projects
+python3 kctl.py batch examples/sample-plan.yaml --root /Users/sasa/Projects --output-mode grouped
+```
+
+Run multiple plans for one repository with isolated worktrees:
+
+```bash
+python3 kctl.py plans run-many plans/traffic-simulator --concurrency 3
+python3 kctl.py plans status plans/traffic-simulator
+```
+
+Index execution state for future UI work and inspect it locally:
+
+```bash
+python3 kctl.py ui index /path/to/repo
+python3 kctl.py ui runs /path/to/repo
+python3 kctl.py ui run /path/to/repo 20260325T120000000000Z
+python3 kctl.py ui dashboard /path/to/repo
 ```
 
 `kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
@@ -50,9 +67,12 @@ Top-level fields:
 Step fields:
 
 - `id`: unique step identifier
-- `prompt`: instructions for Codex for that step
+- `kind`: optional `agent` or `verify`; defaults to `agent` unless `commands` are present
+- `name`: optional human-readable step name
+- `prompt`: instructions for Codex for that step; required for `agent` steps
 - `verify`: optional shell command that overrides `defaults.verify`
 - `verify_shell`: optional shell prefix that overrides `defaults.verify_shell`
+- `commands`: optional list of deterministic shell commands for `verify` steps
 - `expect_clean_diff`: when `true`, the run fails if the step leaves any file changes
 
 Example:
@@ -115,6 +135,20 @@ For each step, `kctl`:
 9. Writes run artifacts under `.kctl-runs/` inside the target repository.
 
 `kctl batch <plan> --root <path>` scans recursively for directories containing `.git`, treats each as a target repository, overrides the plan `repo:` field for that execution only, and runs the normal per-repo flow sequentially.
+
+Batch output modes:
+
+- `stream` (default): stream each repo's logs live with repo-prefixed lines.
+- `grouped`: buffer each repo's logs and print them as a single section after that repo completes.
+- `quiet`: suppress per-step logs and print only batch repo boundaries and summaries.
+
+Interactive prompts are not supported in batch mode. `--approve-each-step` will fail fast for `kctl batch`.
+
+`kctl plans run-many <plans-dir> --concurrency <n>` loads all `*.yaml` and `*.yml` files in a directory, validates that they target the same repository, creates one isolated workspace per plan under `.kctl/worktrees/<run-id>/`, and runs plans concurrently up to the requested limit while keeping each plan's own steps sequential.
+
+Multi-plan run state is written under `.kctl/runs/<run-id>/run.json`, with one per-plan subdirectory containing that plan's run log and step artifacts.
+
+`kctl ui index <repo>` builds a local SQLite index at `.kctl/ui-state.db` from existing `.kctl/runs`, `.kctl/worktrees`, and legacy `.kctl-runs` data. `kctl ui runs` and `kctl ui run` are read-only inspection commands over that index. `kctl ui dashboard` launches a minimal local web dashboard for browsing runs, plan executions, step timelines, and workspace details.
 
 ## Run Logs
 

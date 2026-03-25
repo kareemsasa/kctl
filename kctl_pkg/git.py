@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from .process import run_command
@@ -30,6 +31,14 @@ def ensure_git_repo(repo_path: Path) -> None:
     if git_check.exit_code != 0:
         message = get_git_error_message(git_check)
         raise PlanError(f"Target repo is not a git repo: {repo_path} ({message})")
+
+
+def get_repo_root(repo_path: Path) -> Path:
+    result = run_command(["git", "rev-parse", "--show-toplevel"], cwd=repo_path)
+    if result.exit_code != 0:
+        message = get_git_error_message(result)
+        raise PlanError(f"Failed to determine git repo root: {message}")
+    return Path(result.stdout.strip()).resolve()
 
 
 def get_current_branch(repo_path: Path) -> str:
@@ -131,3 +140,31 @@ def create_commit(repo_path: Path, commit_message: str) -> str:
         message = get_git_error_message(sha_result)
         raise PlanError(f"Failed to read commit sha: {message}")
     return sha_result.stdout.strip()
+
+
+def create_isolated_workspace(
+    repo_path: Path,
+    workspace_path: Path,
+    branch_name: str,
+) -> Path:
+    workspace_path.parent.mkdir(parents=True, exist_ok=True)
+    if workspace_path.exists():
+        shutil.rmtree(workspace_path)
+
+    worktree_result = run_command(
+        ["git", "worktree", "add", "-b", branch_name, str(workspace_path), "HEAD"],
+        cwd=repo_path,
+    )
+    if worktree_result.exit_code == 0:
+        return workspace_path
+
+    clone_result = run_command(["git", "clone", str(repo_path), str(workspace_path)], cwd=repo_path)
+    if clone_result.exit_code != 0:
+        message = get_git_error_message(clone_result)
+        raise PlanError(f"Failed to create isolated workspace: {message}")
+
+    switch_result = run_command(["git", "switch", "-c", branch_name], cwd=workspace_path)
+    if switch_result.exit_code != 0:
+        message = get_git_error_message(switch_result)
+        raise PlanError(f"Failed to create isolated workspace branch '{branch_name}': {message}")
+    return workspace_path

@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .output import ConsoleOutputSink, OutputSink
 from .terminal import CODEX_STREAM_PREFIX, should_display_codex_line, style_text, supports_color
 from .types import CommandResult
 
@@ -34,7 +35,9 @@ def run_streaming_command(
     stderr_prefix: str = "",
     filter_stream: bool = False,
     hidden_lines: set[str] | None = None,
+    output_sink: OutputSink | None = None,
 ) -> CommandResult:
+    output_sink = output_sink or ConsoleOutputSink()
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -47,7 +50,7 @@ def run_streaming_command(
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
 
-    def forward_stream(stream: Any, sink: Any, prefix: str, captured_chunks: list[str]) -> None:
+    def forward_stream(stream: Any, prefix: str, captured_chunks: list[str], sink_name: str) -> None:
         last_displayed_line: str | None = None
         for line in iter(stream.readline, ""):
             captured_chunks.append(line)
@@ -58,21 +61,22 @@ def run_streaming_command(
                 if filter_stream and rendered_line == last_displayed_line:
                     continue
                 display_line = rendered_line
-                if prefix == CODEX_STREAM_PREFIX and supports_color(sink):
-                    display_line = style_text(prefix, stream=sink, dim=True) + line
-                sink.write(display_line)
-                sink.flush()
+                if prefix == CODEX_STREAM_PREFIX:
+                    terminal_stream = sys.stderr if sink_name == "stderr" else sys.stdout
+                    if supports_color(terminal_stream):
+                        display_line = style_text(prefix, stream=terminal_stream, dim=True) + line
+                output_sink.write(display_line, stream=sink_name)
                 last_displayed_line = rendered_line
         stream.close()
 
     stdout_thread = threading.Thread(
         target=forward_stream,
-        args=(process.stdout, sys.stdout, stdout_prefix, stdout_chunks),
+        args=(process.stdout, stdout_prefix, stdout_chunks, "stdout"),
         daemon=True,
     )
     stderr_thread = threading.Thread(
         target=forward_stream,
-        args=(process.stderr, sys.stderr, stderr_prefix, stderr_chunks),
+        args=(process.stderr, stderr_prefix, stderr_chunks, "stderr"),
         daemon=True,
     )
     stdout_thread.start()

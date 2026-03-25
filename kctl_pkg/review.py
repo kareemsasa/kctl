@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .git import get_git_error_message, read_text_file_with_limit
+from .output import OutputSink
 from .process import run_command, run_streaming_command
 from .types import CommandResult, PlanError
 
@@ -156,6 +157,7 @@ def run_step_reviews(
     verify_result: CommandResult | None,
     verbose: bool,
     print_review_summary: Any,
+    output_sink: OutputSink,
 ) -> list[dict[str, Any]]:
     review_content = build_review_content(repo_path, new_changed_files)
     verify_summary = build_verify_summary(verify_result)
@@ -187,6 +189,7 @@ def run_step_reviews(
                 stdout_prefix=f"{reviewer}: ",
                 stderr_prefix=f"{reviewer}: ",
                 filter_stream=not verbose,
+                output_sink=output_sink,
             )
             review_output = output_path.read_text().strip()
         finally:

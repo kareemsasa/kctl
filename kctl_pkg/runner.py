@@ -6,7 +6,7 @@ import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .git import (
     create_commit,
@@ -20,7 +20,8 @@ from .git import (
     resolve_repo,
     switch_to_branch,
 )
-from .plan import build_codex_prompt, load_plan, validate_plan
+from .output import ConsoleOutputSink, OutputSink
+from .plan import build_codex_prompt, get_step_kind, load_plan, validate_plan
 from .process import run_command, run_streaming_command
 from .review import run_step_reviews, should_print_diff_stat
 from .terminal import (
@@ -137,7 +138,7 @@ def get_verify_label(verify_result: dict[str, Any] | None) -> str:
     return "passed" if verify_result["exit_code"] == 0 else "failed"
 
 
-def print_step_footer(step_result: dict[str, Any]) -> None:
+def print_step_footer(step_result: dict[str, Any], output_sink: OutputSink) -> None:
     footer = (
         f"Step {step_result['id']} | status={step_result['status']} | "
         f"duration={format_duration_seconds(step_result['started_at'], step_result['ended_at'])} | "
@@ -145,15 +146,17 @@ def print_step_footer(step_result: dict[str, Any]) -> None:
         f"baseline_changed_files={len(step_result['baseline_changed_files'])} | "
         f"new_changed_files={len(step_result['new_changed_files'])}"
     )
-    print(style_status_text(footer, step_result["status"], bold=True), flush=True)
+    output_sink.write_line(style_status_text(footer, step_result["status"], bold=True))
     if 0 < len(step_result["new_changed_files"]) <= 5:
-        print(f"New: {', '.join(step_result['new_changed_files'])}", flush=True)
+        output_sink.write_line(f"New: {', '.join(step_result['new_changed_files'])}")
     artifact_error = step_result.get("artifact_parse_error")
     if artifact_error:
-        print(style_status_text(f"Artifact error: {artifact_error}", "failure"), flush=True)
+        output_sink.write_line(style_status_text(f"Artifact error: {artifact_error}", "failure"))
 
 
-def prompt_to_continue() -> bool:
+def prompt_to_continue(interactive: bool) -> bool:
+    if not interactive:
+        return False
     try:
         response = input(style_text("Continue to next step? [y/N] ", bold=True))
     except EOFError:
@@ -162,8 +165,10 @@ def prompt_to_continue() -> bool:
 
 
 def prompt_to_continue_after_review(
-    step_id: str, reviews: list[dict[str, Any]]
+    step_id: str, reviews: list[dict[str, Any]], interactive: bool
 ) -> bool:
+    if not interactive:
+        return False
     concern_count = sum(1 for review in reviews if review["verdict"] == "concern")
     try:
         response = input(
@@ -177,21 +182,18 @@ def prompt_to_continue_after_review(
     return response.strip().lower() == "y"
 
 
-def print_command_result(label: str, result: CommandResult) -> None:
+def print_command_result(label: str, result: CommandResult, output_sink: OutputSink) -> None:
     status = "success" if result.exit_code == 0 else "failure"
-    print(
-        style_status_text(f"{label} exit code: {result.exit_code}", status), flush=True
-    )
+    output_sink.write_line(style_status_text(f"{label} exit code: {result.exit_code}", status))
     if result.stdout.strip():
-        print(f"{label} stdout:", flush=True)
-        print(result.stdout.rstrip(), flush=True)
+        output_sink.write_line(f"{label} stdout:")
+        output_sink.write_line(result.stdout.rstrip())
     if result.stderr.strip():
-        print(
+        output_sink.write_line(
             style_status_text(f"{label} stderr:", "failure", stream=sys.stderr),
-            file=sys.stderr,
-            flush=True,
+            stream="stderr",
         )
-        print(result.stderr.rstrip(), file=sys.stderr, flush=True)
+        output_sink.write_line(result.stderr.rstrip(), stream="stderr")
 
 
 def parse_verify_shell(verify_shell: str | None) -> list[str]:
@@ -244,12 +246,13 @@ def run_verify_commands(
     repo_path: Path,
     shell_parts: list[str],
     commands: list[str],
+    output_sink: OutputSink,
 ) -> list[CommandResult]:
     results: list[CommandResult] = []
     for index, command in enumerate(commands, start=1):
         result = run_shell_command(shell_parts, command, repo_path)
         label = "verify" if len(commands) == 1 else f"verify[{index}]"
-        print_command_result(label, result)
+        print_command_result(label, result, output_sink)
         results.append(result)
         if result.exit_code != 0:
             break
@@ -278,7 +281,7 @@ def combine_verify_results(
     )
 
 
-def print_review_summary(step_id: str, reviews: list[dict[str, Any]]) -> None:
+def print_review_summary(step_id: str, reviews: list[dict[str, Any]], output_sink: OutputSink) -> None:
     summary_text = ", ".join(
         f"{review['reviewer']}={review['verdict']}" for review in reviews
     )
@@ -288,18 +291,16 @@ def print_review_summary(step_id: str, reviews: list[dict[str, Any]]) -> None:
         review_status = "concern"
     else:
         review_status = "success"
-    print(
+    output_sink.write_line(
         style_status_text(
             f"Review {step_id}: {summary_text}", review_status, bold=True
-        ),
-        flush=True,
+        )
     )
     for review in reviews:
-        print(
+        output_sink.write_line(
             style_status_text(
                 f"- {review['reviewer']}: {review['summary']}", review["verdict"]
-            ),
-            flush=True,
+            )
         )
 
 
@@ -374,6 +375,10 @@ def write_structured_artifact(
     artifact_path = run_output_dir / f"{build_step_file_prefix(step_index)}-{artifact_kind}.json"
     artifact_path.write_text(json.dumps(artifact_data, indent=2) + "\n")
     return artifact_path
+
+
+def load_structured_artifact(artifact_path: str) -> dict[str, Any]:
+    return json.loads(Path(artifact_path).read_text())
 
 
 def summarize_command_output(result: CommandResult) -> str:
@@ -551,28 +556,41 @@ def execute_step(
     run_output_dir: Path,
     verbose: bool,
     review_enabled: bool,
+    output_sink: OutputSink,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     step_id = step["id"]
-    print(style_text(f"== Step {step_id} ==", color=ANSI_CYAN, bold=True), flush=True)
+    step_kind = get_step_kind(step)
+    output_sink.write_line(style_text(f"== Step {step_id} ==", color=ANSI_CYAN, bold=True))
     started_at = datetime.now(timezone.utc).isoformat()
     before_status = get_git_status(repo_path)
-    codex_prompt = build_codex_prompt(
-        objective,
-        prior_summaries,
-        step,
-        prior_artifacts=prior_artifacts,
-    )
-    prompt_lines_to_hide = {
-        line.strip() for line in codex_prompt.splitlines() if line.strip()
-    }
-    codex_result = run_streaming_command(
-        ["codex", "exec", "--full-auto", "--cd", str(repo_path), codex_prompt],
-        cwd=repo_path,
-        stdout_prefix=CODEX_STREAM_PREFIX,
-        stderr_prefix=CODEX_STREAM_PREFIX,
-        filter_stream=not verbose,
-        hidden_lines=prompt_lines_to_hide if not verbose else None,
-    )
+    codex_prompt = ""
+    if step_kind == "agent":
+        codex_prompt = build_codex_prompt(
+            objective,
+            prior_summaries,
+            step,
+            prior_artifacts=prior_artifacts,
+        )
+        prompt_lines_to_hide = {
+            line.strip() for line in codex_prompt.splitlines() if line.strip()
+        }
+        codex_result = run_streaming_command(
+            ["codex", "exec", "--full-auto", "--cd", str(repo_path), codex_prompt],
+            cwd=repo_path,
+            stdout_prefix=CODEX_STREAM_PREFIX,
+            stderr_prefix=CODEX_STREAM_PREFIX,
+            filter_stream=not verbose,
+            hidden_lines=prompt_lines_to_hide if not verbose else None,
+            output_sink=output_sink,
+        )
+    else:
+        codex_result = CommandResult(
+            command=[],
+            cwd=str(repo_path),
+            exit_code=0,
+            stdout="Verification handled by kctl.\n",
+            stderr="",
+        )
     raw_artifact_path = write_raw_output_artifact(
         run_output_dir=run_output_dir,
         step_index=step_index,
@@ -591,7 +609,18 @@ def execute_step(
     explicit_verify_command = step.get("verify") or defaults.get("verify")
     verify_shell_value = step.get("verify_shell") or defaults.get("verify_shell")
     verify_commands: list[str] = []
-    if explicit_verify_command:
+    step_commands = step.get("commands")
+    if step_kind == "verify":
+        if isinstance(step_commands, list) and all(isinstance(item, str) for item in step_commands):
+            verify_commands = [item for item in step_commands if item.strip()]
+        elif explicit_verify_command:
+            verify_commands = [explicit_verify_command]
+        elif step_id == "verify":
+            plan_verification = prior_artifacts.get("plan", {}).get("verification", {})
+            plan_commands = plan_verification.get("commands", [])
+            if isinstance(plan_commands, list) and all(isinstance(item, str) for item in plan_commands):
+                verify_commands = [item for item in plan_commands if item.strip()]
+    elif explicit_verify_command:
         verify_commands = [explicit_verify_command]
     elif step_id == "verify":
         plan_verification = prior_artifacts.get("plan", {}).get("verification", {})
@@ -615,7 +644,7 @@ def execute_step(
         status = "failure"
         failure_reason = "expected_clean_diff"
 
-    if step_id in {"inspect", "plan"} and codex_result.exit_code == 0:
+    if step_kind == "agent" and step_id in {"inspect", "plan"} and codex_result.exit_code == 0:
         try:
             artifact_data = parse_phase_artifact(step_id, codex_result.stdout)
             artifact_path = write_structured_artifact(
@@ -625,7 +654,7 @@ def execute_step(
                 artifact_data=artifact_data,
             )
             structured_artifacts[step_id] = str(artifact_path)
-            next_artifacts[step_id] = artifact_data
+            next_artifacts[step_id] = load_structured_artifact(str(artifact_path))
         except PlanError as exc:
             artifact_parse_error = str(exc)
             status = "failure"
@@ -634,15 +663,14 @@ def execute_step(
     if verify_commands:
         shell_parts = parse_verify_shell(verify_shell_value)
         verify_environment = collect_verify_environment(shell_parts, repo_path)
-        print(
+        output_sink.write_line(
             style_text(
                 "verify environment: "
                 + summarize_verify_environment(verify_environment),
                 dim=True,
-            ),
-            flush=True,
+            )
         )
-        verify_results = run_verify_commands(repo_path, shell_parts, verify_commands)
+        verify_results = run_verify_commands(repo_path, shell_parts, verify_commands, output_sink)
         verify_result = combine_verify_results(verify_results, shell_parts)
         if verify_result is not None and verify_result.exit_code != 0:
             status = "failure"
@@ -661,7 +689,7 @@ def execute_step(
             artifact_data=verify_artifact_data,
         )
         structured_artifacts["verify"] = str(verify_artifact_path)
-        next_artifacts["verify"] = verify_artifact_data
+        next_artifacts["verify"] = load_structured_artifact(str(verify_artifact_path))
 
     if review_enabled and status == "success" and new_changed_files:
         reviews = run_step_reviews(
@@ -671,7 +699,10 @@ def execute_step(
             new_changed_files=new_changed_files,
             verify_result=verify_result,
             verbose=verbose,
-            print_review_summary=print_review_summary,
+            print_review_summary=lambda review_step_id, review_items: print_review_summary(
+                review_step_id, review_items, output_sink
+            ),
+            output_sink=output_sink,
         )
         if any(review["verdict"] == "block" for review in reviews):
             status = "failure"
@@ -682,7 +713,7 @@ def execute_step(
 
     step_result = build_step_result(
         step_id=step_id,
-        step_prompt=step["prompt"],
+        step_prompt=step.get("prompt", ""),
         codex_prompt=codex_prompt,
         started_at=started_at,
         ended_at=ended_at,
@@ -704,9 +735,9 @@ def execute_step(
         verify_environment=verify_environment,
     )
     if should_print_diff_stat(diff_stat.stdout, verbose):
-        print(style_text("git diff --stat:", bold=True), flush=True)
-        print(diff_stat.stdout.rstrip(), flush=True)
-    print_step_footer(step_result)
+        output_sink.write_line(style_text("git diff --stat:", bold=True))
+        output_sink.write_line(diff_stat.stdout.rstrip())
+    print_step_footer(step_result, output_sink)
     return step_result, next_artifacts
 
 
@@ -716,7 +747,7 @@ def save_run_log(run_data: dict[str, Any], run_output_dir: Path) -> Path:
     return log_path
 
 
-def run_plan(
+def execute_plan_run(
     plan_path: Path,
     verbose: bool,
     approve_each_step: bool,
@@ -726,7 +757,12 @@ def run_plan(
     allow_dirty_start: bool,
     review_enabled: bool,
     repo_override: str | None = None,
-) -> int:
+    output_sink: OutputSink | None = None,
+    interactive: bool = True,
+    run_output_dir_override: Path | None = None,
+    status_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    output_sink = output_sink or ConsoleOutputSink()
     plan = load_plan(plan_path)
     if repo_override is not None:
         plan = dict(plan)
@@ -754,12 +790,32 @@ def run_plan(
     step_results: list[dict[str, Any]] = []
     run_status = "success"
     started_at = datetime.now(timezone.utc).isoformat()
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_output_dir = ensure_run_output_dir(repo_path, run_id)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    run_output_dir = run_output_dir_override or ensure_run_output_dir(repo_path, run_id)
+    if run_output_dir_override is not None:
+        run_output_dir.mkdir(parents=True, exist_ok=True)
     commit_created = False
     commit_sha: str | None = None
     steps = plan["steps"]
+    if status_callback is not None:
+        status_callback(
+            {
+                "type": "run_started",
+                "repo": str(repo_path),
+                "run_output_dir": str(run_output_dir),
+                "current_step": steps[0]["id"] if steps else None,
+                "status": "running",
+            }
+        )
     for index, step in enumerate(steps, start=1):
+        if status_callback is not None:
+            status_callback(
+                {
+                    "type": "step_started",
+                    "step_id": step["id"],
+                    "status": "running",
+                }
+            )
         step_result, new_artifacts = execute_step(
             repo_path=repo_path,
             objective=plan["objective"],
@@ -771,10 +827,20 @@ def run_plan(
             run_output_dir=run_output_dir,
             verbose=verbose,
             review_enabled=review_enabled,
+            output_sink=output_sink,
         )
         step_results.append(step_result)
         prior_summaries.append(summarize_step_result(step_result))
         prior_artifacts.update(new_artifacts)
+        if status_callback is not None:
+            status_callback(
+                {
+                    "type": "step_completed",
+                    "step_id": step["id"],
+                    "status": step_result["status"],
+                    "failure_reason": step_result["failure_reason"],
+                }
+            )
         failure_reason = step_result["failure_reason"]
         should_stop = failure_reason in {
             "artifact_parse_failed",
@@ -783,7 +849,7 @@ def run_plan(
         } or (stop_on_failure and failure_reason in {"verify_failed", "codex_failed"})
         if step_result["status"] == "paused":
             if prompt_to_continue_after_review(
-                step_result["id"], step_result["reviews"]
+                step_result["id"], step_result["reviews"], interactive
             ):
                 step_result["status"] = "success"
                 step_result["failure_reason"] = None
@@ -797,7 +863,7 @@ def run_plan(
             run_status = "failure"
             break
         has_next_step = index < len(steps)
-        if approve_each_step and has_next_step and not prompt_to_continue():
+        if approve_each_step and has_next_step and not prompt_to_continue(interactive):
             run_status = "stopped"
             break
     if run_status == "success" and commit:
@@ -824,7 +890,9 @@ def run_plan(
         "steps": step_results,
     }
     log_path = save_run_log(run_data, run_output_dir)
-    print(style_text("\nFinal summary:", bold=True), flush=True)
+    run_data["log_path"] = str(log_path)
+    output_sink.write_line("")
+    output_sink.write_line(style_text("Final summary:", bold=True))
     for step_result in step_results:
         verify_label = "not-run"
         if step_result["verify"] is not None:
@@ -835,6 +903,44 @@ def run_plan(
             f"- {step_result['id']}: {step_result['status']}, "
             f"verify={verify_label}, changed_files={step_result['changed_files_count']}"
         )
-        print(style_status_text(summary_line, step_result["status"]), flush=True)
-    print(style_text(f"Run log: {log_path}", bold=True), flush=True)
-    return 1 if run_status == "failure" else 0
+        output_sink.write_line(style_status_text(summary_line, step_result["status"]))
+    output_sink.write_line(style_text(f"Run log: {log_path}", bold=True))
+    if status_callback is not None:
+        status_callback(
+            {
+                "type": "run_completed",
+                "status": run_status,
+                "current_step": step_results[-1]["id"] if step_results else None,
+                "log_path": str(log_path),
+            }
+        )
+    return run_data
+
+
+def run_plan(
+    plan_path: Path,
+    verbose: bool,
+    approve_each_step: bool,
+    branch: str | None,
+    commit: bool,
+    commit_message: str | None,
+    allow_dirty_start: bool,
+    review_enabled: bool,
+    repo_override: str | None = None,
+    output_sink: OutputSink | None = None,
+    interactive: bool = True,
+) -> int:
+    run_data = execute_plan_run(
+        plan_path=plan_path,
+        verbose=verbose,
+        approve_each_step=approve_each_step,
+        branch=branch,
+        commit=commit,
+        commit_message=commit_message,
+        allow_dirty_start=allow_dirty_start,
+        review_enabled=review_enabled,
+        repo_override=repo_override,
+        output_sink=output_sink,
+        interactive=interactive,
+    )
+    return 1 if run_data["status"] == "failure" else 0

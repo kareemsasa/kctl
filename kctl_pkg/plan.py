@@ -97,12 +97,13 @@ def validate_plan(plan: dict[str, Any]) -> None:
             raise PlanError(f"Step #{index} must be a mapping.")
         step_id = step.get("id")
         prompt = step.get("prompt")
+        step_kind = get_step_kind(step)
         if not isinstance(step_id, str) or not step_id.strip():
             raise PlanError(f"Step #{index} field 'id' is required and must be a non-empty string.")
         if step_id in step_ids:
             raise PlanError(f"Duplicate step id: {step_id}")
         step_ids.add(step_id)
-        if not isinstance(prompt, str) or not prompt.strip():
+        if step_kind == "agent" and (not isinstance(prompt, str) or not prompt.strip()):
             raise PlanError(f"Step '{step_id}' field 'prompt' is required and must be a non-empty string.")
         step_verify = step.get("verify")
         if step_verify is not None and not isinstance(step_verify, str):
@@ -110,9 +111,29 @@ def validate_plan(plan: dict[str, Any]) -> None:
         step_verify_shell = step.get("verify_shell")
         if step_verify_shell is not None and not isinstance(step_verify_shell, str):
             raise PlanError(f"Step '{step_id}' field 'verify_shell' must be a string if provided.")
+        explicit_step_kind = step.get("kind")
+        if explicit_step_kind is not None and explicit_step_kind not in {"agent", "verify"}:
+            raise PlanError(f"Step '{step_id}' field 'kind' must be 'agent' or 'verify' if provided.")
+        step_name = step.get("name")
+        if step_name is not None and (not isinstance(step_name, str) or not step_name.strip()):
+            raise PlanError(f"Step '{step_id}' field 'name' must be a non-empty string if provided.")
+        commands = step.get("commands")
+        if commands is not None:
+            if not isinstance(commands, list) or not all(isinstance(item, str) for item in commands):
+                raise PlanError(f"Step '{step_id}' field 'commands' must be a list of strings if provided.")
         expect_clean_diff = step.get("expect_clean_diff")
         if expect_clean_diff is not None and not isinstance(expect_clean_diff, bool):
             raise PlanError(f"Step '{step_id}' field 'expect_clean_diff' must be a boolean if provided.")
+
+
+def get_step_kind(step: dict[str, Any]) -> str:
+    explicit_kind = step.get("kind")
+    if explicit_kind in {"agent", "verify"}:
+        return explicit_kind
+    commands = step.get("commands")
+    if isinstance(commands, list) and commands:
+        return "verify"
+    return "agent"
 
 
 def build_plan_from_template(
@@ -198,6 +219,10 @@ def build_artifact_context(step_id: str, prior_artifacts: dict[str, dict[str, An
     if step_id == "plan" and "inspect" in prior_artifacts:
         return "Structured inspect artifact:\n```json\n" + json.dumps(
             prior_artifacts["inspect"], indent=2, sort_keys=True
+        ) + "\n```"
+    if step_id not in {"inspect", "plan", "verify"} and "plan" in prior_artifacts:
+        return "Structured plan artifact:\n```json\n" + json.dumps(
+            prior_artifacts["plan"], indent=2, sort_keys=True
         ) + "\n```"
     if step_id == "verify" and "plan" in prior_artifacts:
         return "Structured plan artifact:\n```json\n" + json.dumps(
