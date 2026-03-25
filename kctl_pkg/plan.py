@@ -79,6 +79,9 @@ def validate_plan(plan: dict[str, Any]) -> None:
     verify = defaults.get("verify")
     if verify is not None and not isinstance(verify, str):
         raise PlanError("defaults.verify must be a string if provided.")
+    verify_shell = defaults.get("verify_shell")
+    if verify_shell is not None and not isinstance(verify_shell, str):
+        raise PlanError("defaults.verify_shell must be a string if provided.")
 
     stop_on_failure = defaults.get("stop_on_failure")
     if stop_on_failure is not None and not isinstance(stop_on_failure, bool):
@@ -104,6 +107,9 @@ def validate_plan(plan: dict[str, Any]) -> None:
         step_verify = step.get("verify")
         if step_verify is not None and not isinstance(step_verify, str):
             raise PlanError(f"Step '{step_id}' field 'verify' must be a string if provided.")
+        step_verify_shell = step.get("verify_shell")
+        if step_verify_shell is not None and not isinstance(step_verify_shell, str):
+            raise PlanError(f"Step '{step_id}' field 'verify_shell' must be a string if provided.")
         expect_clean_diff = step.get("expect_clean_diff")
         if expect_clean_diff is not None and not isinstance(expect_clean_diff, bool):
             raise PlanError(f"Step '{step_id}' field 'expect_clean_diff' must be a boolean if provided.")

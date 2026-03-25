@@ -37,6 +37,7 @@ Top-level fields:
 - `repo`: path to the target git repository; relative paths are resolved from the plan file location
 - `objective`: overall objective shared with every Codex step
 - `defaults.verify`: optional shell command to run after each step
+- `defaults.verify_shell`: optional shell prefix for verification commands, for example `zsh -lc`
 - `defaults.stop_on_failure`: whether to stop immediately when Codex or verification fails
 - `steps`: ordered list of step objects
 
@@ -45,6 +46,7 @@ Step fields:
 - `id`: unique step identifier
 - `prompt`: instructions for Codex for that step
 - `verify`: optional shell command that overrides `defaults.verify`
+- `verify_shell`: optional shell prefix that overrides `defaults.verify_shell`
 - `expect_clean_diff`: when `true`, the run fails if the step leaves any file changes
 
 Example:
@@ -57,6 +59,7 @@ objective: |
 
 defaults:
   verify: python3 -m pytest -q
+  verify_shell: zsh -lc
   stop_on_failure: true
 
 steps:
@@ -102,7 +105,7 @@ For each step, `kctl`:
 5. Runs `codex exec` in the target repo and captures stdout, stderr, and exit code.
 6. Captures `git status --short` and `git diff --stat` after the step.
 7. Enforces `expect_clean_diff` if configured.
-8. Runs step-level or default verification if configured.
+8. Runs step-level or default verification if configured. Verification may run under a different shell/environment than your interactive terminal unless `verify_shell` is set explicitly.
 9. Writes run artifacts under `.kctl-runs/` inside the target repository.
 
 ## Run Logs
@@ -126,3 +129,4 @@ step-03-verify.json
 
 The run log includes plan metadata, per-step Codex output, git status snapshots, diff stats, verification results, artifact paths, and the final run status.
 Each step log also includes `started_at`, `ended_at`, the full `codex_prompt`, `changed_files`, `changed_files_count`, and any structured artifact parse errors.
+Verification logs now also include basic environment diagnostics such as the working directory, shell used, `which node`, `node -v`, `which npm`, and `npm -v` when available.

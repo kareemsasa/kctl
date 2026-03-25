@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,16 +46,22 @@ from .types import (
 FENCED_JSON_PATTERN = re.compile(r"```json\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
-def extract_verify_data(verify_result: CommandResult | None) -> dict[str, Any] | None:
+def extract_verify_data(
+    verify_result: CommandResult | None,
+    verify_environment: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     if verify_result is None:
         return None
-    return {
+    data = {
         "command": verify_result.command,
         "cwd": verify_result.cwd,
         "exit_code": verify_result.exit_code,
         "stdout": verify_result.stdout,
         "stderr": verify_result.stderr,
     }
+    if verify_environment is not None:
+        data["environment"] = verify_environment
+    return data
 
 
 def build_synthetic_codex_summary(
@@ -187,10 +194,60 @@ def print_command_result(label: str, result: CommandResult) -> None:
         print(result.stderr.rstrip(), file=sys.stderr, flush=True)
 
 
-def run_verify_commands(repo_path: Path, commands: list[str]) -> list[CommandResult]:
+def parse_verify_shell(verify_shell: str | None) -> list[str]:
+    if verify_shell is None:
+        return ["sh", "-lc"]
+    shell_parts = shlex.split(verify_shell)
+    if not shell_parts:
+        raise PlanError("verify_shell must not be empty.")
+    return shell_parts
+
+
+def run_shell_command(
+    shell_parts: list[str],
+    command_text: str,
+    cwd: Path,
+) -> CommandResult:
+    return run_command([*shell_parts, command_text], cwd=cwd)
+
+
+def probe_command(shell_parts: list[str], cwd: Path, command_text: str) -> str | None:
+    result = run_shell_command(shell_parts, command_text, cwd)
+    if result.exit_code != 0:
+        return None
+    output = result.stdout.strip()
+    return output or None
+
+
+def collect_verify_environment(shell_parts: list[str], repo_path: Path) -> dict[str, Any]:
+    return {
+        "cwd": str(repo_path),
+        "shell": " ".join(shell_parts),
+        "which_node": probe_command(shell_parts, repo_path, "command -v node"),
+        "node_version": probe_command(shell_parts, repo_path, "node -v"),
+        "which_npm": probe_command(shell_parts, repo_path, "command -v npm"),
+        "npm_version": probe_command(shell_parts, repo_path, "npm -v"),
+    }
+
+
+def summarize_verify_environment(verify_environment: dict[str, Any]) -> str:
+    return (
+        f"shell={verify_environment['shell']}; "
+        f"node={verify_environment.get('which_node') or 'not-found'}; "
+        f"node_version={verify_environment.get('node_version') or 'unknown'}; "
+        f"npm={verify_environment.get('which_npm') or 'not-found'}; "
+        f"npm_version={verify_environment.get('npm_version') or 'unknown'}"
+    )
+
+
+def run_verify_commands(
+    repo_path: Path,
+    shell_parts: list[str],
+    commands: list[str],
+) -> list[CommandResult]:
     results: list[CommandResult] = []
     for index, command in enumerate(commands, start=1):
-        result = run_command(["sh", "-lc", command], cwd=repo_path)
+        result = run_shell_command(shell_parts, command, repo_path)
         label = "verify" if len(commands) == 1 else f"verify[{index}]"
         print_command_result(label, result)
         results.append(result)
@@ -199,13 +256,18 @@ def run_verify_commands(repo_path: Path, commands: list[str]) -> list[CommandRes
     return results
 
 
-def combine_verify_results(results: list[CommandResult]) -> CommandResult | None:
+def combine_verify_results(
+    results: list[CommandResult],
+    shell_parts: list[str] | None = None,
+) -> CommandResult | None:
     if not results:
         return None
     if len(results) == 1:
         return results[0]
+    if shell_parts is None:
+        shell_parts = ["sh", "-lc"]
     return CommandResult(
-        command=["sh", "-lc", " && ".join("(%s)" % result.command[-1] for result in results)],
+        command=[*shell_parts, " && ".join("(%s)" % result.command[-1] for result in results)],
         cwd=results[0].cwd,
         exit_code=next(
             (result.exit_code for result in results if result.exit_code != 0),
@@ -332,6 +394,7 @@ def summarize_command_output(result: CommandResult) -> str:
 def build_verify_artifact(
     verify_results: list[CommandResult],
     plan_artifact: dict[str, Any] | None,
+    verify_environment: dict[str, Any] | None,
 ) -> dict[str, Any]:
     commands_run: list[VerifyCommandArtifact] = []
     tests: list[VerifyTestArtifact] = []
@@ -380,6 +443,15 @@ def build_verify_artifact(
             )
         )
 
+    if verify_environment is not None:
+        issues.append(
+            VerifyIssueArtifact(
+                severity="info",
+                summary="Verification environment: "
+                + summarize_verify_environment(verify_environment),
+            )
+        )
+
     if plan_artifact:
         verification = plan_artifact.get("verification", {})
         manual_checks = verification.get("manual_checks", [])
@@ -417,8 +489,9 @@ def build_step_result(
     raw_artifact_path: Path | None,
     structured_artifacts: dict[str, str],
     artifact_parse_error: str | None,
+    verify_environment: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    verify_data = extract_verify_data(verify_result)
+    verify_data = extract_verify_data(verify_result, verify_environment)
     codex_summary = extract_codex_summary(
         codex_result.stdout, status, changed_files, verify_result
     )
@@ -459,6 +532,7 @@ def build_step_result(
             "stderr": codex_result.stderr,
         },
         "verify": verify_data,
+        "verify_environment": verify_environment,
         "reviews": reviews or [],
         "raw_artifact_path": str(raw_artifact_path) if raw_artifact_path else None,
         "structured_artifacts": structured_artifacts,
@@ -515,6 +589,7 @@ def execute_step(
     changed_files = parse_changed_files(after_status.stdout)
     expect_clean_diff = bool(step.get("expect_clean_diff", False))
     explicit_verify_command = step.get("verify") or defaults.get("verify")
+    verify_shell_value = step.get("verify_shell") or defaults.get("verify_shell")
     verify_commands: list[str] = []
     if explicit_verify_command:
         verify_commands = [explicit_verify_command]
@@ -525,6 +600,7 @@ def execute_step(
             verify_commands = [item for item in plan_commands if item.strip()]
     verify_result: CommandResult | None = None
     verify_results: list[CommandResult] = []
+    verify_environment: dict[str, Any] | None = None
     reviews: list[dict[str, Any]] = []
     status = "success"
     failure_reason: str | None = None
@@ -556,8 +632,18 @@ def execute_step(
             failure_reason = "artifact_parse_failed"
 
     if verify_commands:
-        verify_results = run_verify_commands(repo_path, verify_commands)
-        verify_result = combine_verify_results(verify_results)
+        shell_parts = parse_verify_shell(verify_shell_value)
+        verify_environment = collect_verify_environment(shell_parts, repo_path)
+        print(
+            style_text(
+                "verify environment: "
+                + summarize_verify_environment(verify_environment),
+                dim=True,
+            ),
+            flush=True,
+        )
+        verify_results = run_verify_commands(repo_path, shell_parts, verify_commands)
+        verify_result = combine_verify_results(verify_results, shell_parts)
         if verify_result is not None and verify_result.exit_code != 0:
             status = "failure"
             failure_reason = "verify_failed"
@@ -566,6 +652,7 @@ def execute_step(
         verify_artifact_data = build_verify_artifact(
             verify_results=verify_results,
             plan_artifact=prior_artifacts.get("plan"),
+            verify_environment=verify_environment,
         )
         verify_artifact_path = write_structured_artifact(
             run_output_dir=run_output_dir,
@@ -614,6 +701,7 @@ def execute_step(
         raw_artifact_path=raw_artifact_path,
         structured_artifacts=structured_artifacts,
         artifact_parse_error=artifact_parse_error,
+        verify_environment=verify_environment,
     )
     if should_print_diff_stat(diff_stat.stdout, verbose):
         print(style_text("git diff --stat:", bold=True), flush=True)
