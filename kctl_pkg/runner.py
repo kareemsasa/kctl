@@ -19,7 +19,6 @@ from .git import (
     resolve_repo,
     switch_to_branch,
 )
-from .paths import project_root
 from .plan import build_codex_prompt, load_plan, validate_plan
 from .process import run_command, run_streaming_command
 from .review import run_step_reviews, should_print_diff_stat
@@ -664,7 +663,7 @@ def run_plan(
     run_status = "success"
     started_at = datetime.now(timezone.utc).isoformat()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_output_dir = ensure_run_output_dir(project_root(), run_id)
+    run_output_dir = ensure_run_output_dir(repo_path, run_id)
     commit_created = False
     commit_sha: str | None = None
     steps = plan["steps"]

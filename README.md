@@ -103,11 +103,11 @@ For each step, `kctl`:
 6. Captures `git status --short` and `git diff --stat` after the step.
 7. Enforces `expect_clean_diff` if configured.
 8. Runs step-level or default verification if configured.
-9. Writes a JSON log under `.kctl-runs/` in this repository.
+9. Writes run artifacts under `.kctl-runs/` inside the target repository.
 
 ## Run Logs
 
-Each run writes a directory like:
+Each target repository gets its own `.kctl-runs/` directory. A run writes a directory like:
 
 ```text
 .kctl-runs/20260323T000000Z/
