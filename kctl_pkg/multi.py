@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .artifacts import multi_run_dir, resolve_storage_mode, worktree_run_root, discover_multi_run_logs
 from .git import create_isolated_workspace, ensure_git_repo, get_repo_root, resolve_repo
 from .output import ConsoleOutputSink, OutputSink
 from .plan import load_plan, validate_plan
@@ -118,13 +119,16 @@ def run_many_plans(
     plan_specs = load_plan_specs(plans_dir)
     repo_root = plan_specs[0].repo_path
     run_id = build_multi_run_id()
-    run_root = repo_root / ".kctl" / "runs" / run_id
-    worktree_root = repo_root / ".kctl" / "worktrees" / run_id
+    artifact_storage_mode = resolve_storage_mode()
+    run_root = multi_run_dir(repo_root, run_id, storage_mode=artifact_storage_mode)
+    worktree_root = worktree_run_root(repo_root, run_id, storage_mode=artifact_storage_mode)
     output_sink = ConsoleOutputSink()
     run_data: dict[str, Any] = {
         "run_id": run_id,
         "plans_dir": str(plans_dir.resolve()),
         "repo": str(repo_root),
+        "artifact_storage_mode": artifact_storage_mode,
+        "artifact_root_path": str(run_root.parent),
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "concurrency": concurrency,
@@ -248,7 +252,7 @@ def resolve_status_run_path(target: str) -> Path:
             return (target_path / "run.json").resolve()
         plan_specs = load_plan_specs(target_path.resolve())
         repo_root = plan_specs[0].repo_path
-        run_logs = sorted((repo_root / ".kctl" / "runs").glob("*/run.json"))
+        run_logs = discover_multi_run_logs(repo_root)
         matching_logs: list[Path] = []
         for run_log in run_logs:
             data = json.loads(run_log.read_text())
@@ -257,9 +261,12 @@ def resolve_status_run_path(target: str) -> Path:
         if not matching_logs:
             raise PlanError(f"No saved multi-plan runs found for: {target_path.resolve()}")
         return matching_logs[-1]
-    run_log = Path.cwd() / ".kctl" / "runs" / target / "run.json"
-    if run_log.exists():
-        return run_log.resolve()
+    cwd_run_log = multi_run_dir(Path.cwd(), target, storage_mode="in_repo") / "run.json"
+    if cwd_run_log.exists():
+        return cwd_run_log.resolve()
+    external_run_log = multi_run_dir(Path.cwd(), target, storage_mode="external") / "run.json"
+    if external_run_log.exists():
+        return external_run_log.resolve()
     raise PlanError(f"Could not resolve run status target: {target}")
 
 

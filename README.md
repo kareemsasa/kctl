@@ -22,6 +22,13 @@ Run a plan:
 python3 kctl.py run examples/sample-plan.yaml
 ```
 
+Opt in to external artifact storage for a single run:
+
+```bash
+KCTL_ARTIFACT_STORAGE=external python3 kctl.py run examples/sample-plan.yaml
+KCTL_ARTIFACT_STORAGE=external KCTL_HOME=/tmp/kctl-home python3 kctl.py run examples/sample-plan.yaml
+```
+
 Run the same plan across multiple repositories under a root:
 
 ```bash
@@ -36,6 +43,14 @@ python3 kctl.py plans run-many plans/traffic-simulator --concurrency 3
 python3 kctl.py plans status plans/traffic-simulator
 ```
 
+Opt in to external artifact storage for multi-plan runs and UI/index state:
+
+```bash
+KCTL_ARTIFACT_STORAGE=external python3 kctl.py plans run-many plans/traffic-simulator --concurrency 3
+KCTL_ARTIFACT_STORAGE=external python3 kctl.py ui index /path/to/repo
+KCTL_ARTIFACT_STORAGE=external python3 kctl.py ui dashboard /path/to/repo
+```
+
 Index execution state for future UI work and inspect it locally:
 
 ```bash
@@ -46,6 +61,8 @@ python3 kctl.py ui dashboard /path/to/repo
 ```
 
 `kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
+
+When `KCTL_ARTIFACT_STORAGE=external` is set, `kctl` stores run metadata outside the target repository. `KCTL_HOME` controls the external root and defaults to `~/.kctl`.
 
 Example from outside this repository:
 
@@ -75,7 +92,7 @@ Step fields:
 - `commands`: optional list of deterministic shell commands for `verify` steps
 - `expect_clean_diff`: when `true`, the run fails if the step leaves any file changes
 
-Example:
+Legacy example:
 
 ```yaml
 repo: ../path/to/target-repo
@@ -112,6 +129,158 @@ steps:
       or unrelated cleanup.
     expect_clean_diff: false
 ```
+
+Explicit equivalent:
+
+```yaml
+repo: ../path/to/target-repo
+objective: |
+  Make a small, well-scoped change in the target repository with clear separation
+  between inspection, implementation, validation, and cleanup.
+
+defaults:
+  verify:
+    commands:
+      - python3 -m pytest -q
+    shell: zsh -lc
+    mode: full
+  stop_on_failure: true
+
+steps:
+  - id: inspect
+    type: analyze
+    mode: read-only
+    prompt: |
+      Inspect the repository and identify the smallest useful change to satisfy the
+      objective. Do not modify any files. Summarize the intended implementation plan.
+    output:
+      schema: inspect_v1
+
+  - id: implement
+    type: change
+    prompt: |
+      Implement the planned change with the smallest practical diff. Add or update
+      code and tests only where needed.
+
+  - id: verify
+    type: verify
+    prompt: |
+      Focus on validation. Inspect the current changes, fix obvious test or validation
+      issues if needed, and leave the repository in a verifiable state.
+    verify:
+      commands:
+        - python3 -m pytest -q
+      shell: zsh -lc
+      mode: full
+
+  - id: review
+    type: review
+    review:
+      policy: advisory
+    prompt: |
+      Review the current diff and reduce incidental edits only. Avoid broad refactors
+      or unrelated cleanup.
+    output:
+      schema: review_v1
+```
+
+Explicit fields override legacy inference. When omitted, `kctl` resolves behavior from legacy conventions for compatibility.
+
+## Effective Behavior Resolution
+
+During the migration from implicit step behavior to an explicit execution contract, `kctl` resolves step behavior in this order:
+
+1. Explicit step fields
+2. Legacy `kind`
+3. Step-id conventions
+4. Defaults
+
+## Compatibility Mapping
+
+- `expect_clean_diff: true` on legacy analysis-style steps maps to `mode: read-only`.
+- Legacy `defaults.verify` string maps to `verify.commands`.
+- Legacy verify-step conventions map to `type: verify`.
+- Legacy review-step conventions map to `type: review`, with policy inferred when not declared.
+- Legacy hard-coded structured parsing for `inspect` and `plan` maps to `output.schema`.
+- During migration, explicit contract fields take precedence over `kind`, step-id conventions, and defaults.
+
+## Migration Note
+
+Legacy plans remain valid. New plans can declare intent directly with explicit contract fields such as `type`, `mode`, `output.schema`, and `review.policy`.
+
+## Artifact Storage Migration
+
+### Overview
+
+`kctl` supports two artifact storage modes:
+
+- `in_repo`: keeps current behavior by writing run metadata inside the target repository
+- `external`: writes run metadata outside the target repository to keep harness state separate from product code
+
+### Compatibility
+
+Existing in-repo runs remain readable. During migration, `kctl` should support reading both storage layouts. No immediate backfill or conversion is required.
+
+### Recorded Per Run
+
+Each run should record:
+
+- the effective storage mode
+- the resolved artifact root path
+
+This keeps inspection and debugging straightforward while both layouts are supported.
+
+### Rollout
+
+`in_repo` remains the default initially. `external` is opt-in first. The default should change only after the external path has been validated across normal runs, multi-plan runs, and UI/index reads.
+
+## Post-Migration Status
+
+### Explicit Fields
+
+- `type`: `analyze` | `change` | `verify` | `review`
+- `output.schema`: per-step structured artifact contract
+- `review.policy`: `advisory` | `blocking` | `manual`
+- `mode`: `default` | `read-only`
+- `verify_mode`: `legacy` | `full`
+
+### Legacy Conventions
+
+- `id: inspect` and `id: plan` map to inferred step type and inferred `output.schema`
+- `expect_clean_diff: true` maps to inferred `mode: read-only`
+- legacy verify-step behavior maps to inferred `type: verify`
+- implicit review steps map to inferred `review.policy: manual`
+- string `defaults.verify` remains accepted as a legacy verification command form
+
+### Resolution Order
+
+1. Explicit field on the step
+2. `defaults`
+3. Legacy inference
+4. Runner fallback
+
+### First-Class Vs Compatibility
+
+- First-class: `type`, `output.schema`, `review.policy`, `mode`
+- Compatibility-shaped: `verify_mode` semantics, legacy id-based inference, partial baseline awareness in verification
+
+### Storage Status
+
+- Modes: `in_repo` (default), `external` (opt-in via `KCTL_ARTIFACT_STORAGE`)
+- Dual-read is supported; no migration or conversion is required
+- Run metadata records `artifact_storage_mode` and `artifact_root_path`
+
+### Recommended Usage
+
+- Prefer explicit `type`, `output.schema`, and `review.policy`
+- Use `mode: read-only` instead of `expect_clean_diff`
+- Prefer structured verification commands over legacy string forms
+
+### Not Yet Guaranteed
+
+- verification is not fully baseline-scoped
+- not all steps are required to declare schemas
+- legacy inference remains supported
 
 That sample plan is intentionally staged:
 

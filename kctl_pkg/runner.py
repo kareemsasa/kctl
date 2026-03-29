@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .artifacts import resolve_storage_mode, single_run_dir
 from .git import (
     create_commit,
     detect_new_changes,
@@ -21,7 +22,7 @@ from .git import (
     switch_to_branch,
 )
 from .output import ConsoleOutputSink, OutputSink
-from .plan import build_codex_prompt, get_step_kind, load_plan, validate_plan
+from .plan import build_codex_prompt, get_step_kind, load_plan, normalize_plan, validate_plan
 from .process import run_command, run_streaming_command
 from .review import run_step_reviews, should_print_diff_stat
 from .terminal import (
@@ -304,8 +305,8 @@ def print_review_summary(step_id: str, reviews: list[dict[str, Any]], output_sin
         )
 
 
-def ensure_run_output_dir(script_root: Path, run_id: str) -> Path:
-    run_dir = script_root / ".kctl-runs" / run_id
+def ensure_run_output_dir(repo_root: Path, run_id: str, storage_mode: str | None = None) -> Path:
+    run_dir = single_run_dir(repo_root, run_id, storage_mode=storage_mode)
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -353,17 +354,17 @@ def extract_last_fenced_json_block(output_text: str) -> str:
     return matches[-1].strip()
 
 
-def parse_phase_artifact(step_id: str, output_text: str) -> dict[str, Any]:
+def parse_structured_artifact(schema_name: str, output_text: str) -> dict[str, Any]:
     artifact_text = extract_last_fenced_json_block(output_text)
     try:
         data = json.loads(artifact_text)
     except json.JSONDecodeError as exc:
-        raise PlanError(f"Failed to parse {step_id} artifact JSON: {exc}") from exc
-    if step_id == "inspect":
+        raise PlanError(f"Failed to parse {schema_name} artifact JSON: {exc}") from exc
+    if schema_name == "inspect_v1":
         return artifact_to_dict(parse_inspect_artifact(data))
-    if step_id == "plan":
+    if schema_name == "plan_v1":
         return artifact_to_dict(parse_plan_artifact(data))
-    raise PlanError(f"No structured artifact parser is defined for step '{step_id}'.")
+    raise PlanError(f"No structured artifact parser is defined for schema '{schema_name}'.")
 
 
 def write_structured_artifact(
@@ -379,6 +380,43 @@ def write_structured_artifact(
 
 def load_structured_artifact(artifact_path: str) -> dict[str, Any]:
     return json.loads(Path(artifact_path).read_text())
+
+
+def get_effective_step_type(step: dict[str, Any]) -> str:
+    step_type_info = step.get("_kctl_step_type")
+    if isinstance(step_type_info, dict):
+        effective_type = step_type_info.get("effective_type")
+        if isinstance(effective_type, str) and effective_type.strip():
+            return effective_type
+    return "verify" if get_step_kind(step) == "verify" else "change"
+
+
+def get_effective_output_info(step: dict[str, Any]) -> dict[str, Any] | None:
+    output_info = step.get("_kctl_output")
+    if isinstance(output_info, dict):
+        return output_info
+    return None
+
+
+def get_effective_review_info(step: dict[str, Any]) -> dict[str, Any] | None:
+    review_info = step.get("_kctl_review")
+    if isinstance(review_info, dict):
+        return review_info
+    return None
+
+
+def get_effective_mode_info(step: dict[str, Any]) -> dict[str, Any] | None:
+    mode_info = step.get("_kctl_mode")
+    if isinstance(mode_info, dict):
+        return mode_info
+    return None
+
+
+def get_effective_verify_info(step: dict[str, Any]) -> dict[str, Any] | None:
+    verify_info = step.get("_kctl_verify")
+    if isinstance(verify_info, dict):
+        return verify_info
+    return None
 
 
 def summarize_command_output(result: CommandResult) -> str:
@@ -495,6 +533,11 @@ def build_step_result(
     structured_artifacts: dict[str, str],
     artifact_parse_error: str | None,
     verify_environment: dict[str, Any] | None,
+    step_type_info: dict[str, Any] | None,
+    output_info: dict[str, Any] | None,
+    review_info: dict[str, Any] | None,
+    mode_info: dict[str, Any] | None,
+    verify_info: dict[str, Any] | None,
 ) -> dict[str, Any]:
     verify_data = extract_verify_data(verify_result, verify_environment)
     codex_summary = extract_codex_summary(
@@ -542,7 +585,188 @@ def build_step_result(
         "raw_artifact_path": str(raw_artifact_path) if raw_artifact_path else None,
         "structured_artifacts": structured_artifacts,
         "artifact_parse_error": artifact_parse_error,
+        "step_type": step_type_info,
+        "output": output_info,
+        "review_policy": review_info,
+        "mode": mode_info,
+        "verify_mode": verify_info,
     }
+
+
+def execute_agent_step(
+    repo_path: Path,
+    objective: str,
+    prior_summaries: list[str],
+    step: dict[str, Any],
+    prior_artifacts: dict[str, dict[str, Any]],
+    verbose: bool,
+    output_sink: OutputSink,
+) -> tuple[str, CommandResult]:
+    codex_prompt = build_codex_prompt(
+        objective,
+        prior_summaries,
+        step,
+        prior_artifacts=prior_artifacts,
+    )
+    prompt_lines_to_hide = {
+        line.strip() for line in codex_prompt.splitlines() if line.strip()
+    }
+    codex_result = run_streaming_command(
+        ["codex", "exec", "--full-auto", "--cd", str(repo_path), codex_prompt],
+        cwd=repo_path,
+        stdout_prefix=CODEX_STREAM_PREFIX,
+        stderr_prefix=CODEX_STREAM_PREFIX,
+        filter_stream=not verbose,
+        hidden_lines=prompt_lines_to_hide if not verbose else None,
+        output_sink=output_sink,
+    )
+    return codex_prompt, codex_result
+
+
+def resolve_verify_commands(
+    step: dict[str, Any],
+    defaults: dict[str, Any],
+    prior_artifacts: dict[str, dict[str, Any]],
+    effective_step_type: str,
+) -> list[str]:
+    explicit_verify_command = step.get("verify") or defaults.get("verify")
+    step_commands = step.get("commands")
+    step_id = step["id"]
+
+    if effective_step_type == "verify":
+        if isinstance(step_commands, list) and all(isinstance(item, str) for item in step_commands):
+            return [item for item in step_commands if item.strip()]
+        if explicit_verify_command:
+            return [explicit_verify_command]
+        if step_id == "verify":
+            plan_verification = prior_artifacts.get("plan", {}).get("verification", {})
+            plan_commands = plan_verification.get("commands", [])
+            if isinstance(plan_commands, list) and all(isinstance(item, str) for item in plan_commands):
+                return [item for item in plan_commands if item.strip()]
+        return []
+
+    if explicit_verify_command:
+        return [explicit_verify_command]
+    if step_id == "verify":
+        plan_verification = prior_artifacts.get("plan", {}).get("verification", {})
+        plan_commands = plan_verification.get("commands", [])
+        if isinstance(plan_commands, list) and all(isinstance(item, str) for item in plan_commands):
+            return [item for item in plan_commands if item.strip()]
+    return []
+
+
+def maybe_collect_phase_artifact(
+    step: dict[str, Any],
+    effective_step_type: str,
+    codex_result: CommandResult,
+    run_output_dir: Path,
+    step_index: int,
+) -> tuple[dict[str, str], dict[str, dict[str, Any]], str | None, str | None]:
+    output_info = get_effective_output_info(step)
+    structured_artifacts: dict[str, str] = {}
+    next_artifacts: dict[str, dict[str, Any]] = {}
+    artifact_parse_error: str | None = None
+    failure_reason: str | None = None
+
+    if effective_step_type not in {"analyze", "change", "review"}:
+        return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
+    if codex_result.exit_code != 0:
+        return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
+    if not isinstance(output_info, dict):
+        return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
+    schema_name = output_info.get("effective_schema")
+    if not isinstance(schema_name, str) or not schema_name.strip():
+        return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
+
+    try:
+        artifact_data = parse_structured_artifact(schema_name, codex_result.stdout)
+        artifact_path = write_structured_artifact(
+            run_output_dir=run_output_dir,
+            step_index=step_index,
+            artifact_kind=schema_name.removesuffix("_v1"),
+            artifact_data=artifact_data,
+        )
+        structured_artifacts[schema_name] = str(artifact_path)
+        next_artifacts[schema_name.removesuffix("_v1")] = load_structured_artifact(str(artifact_path))
+    except PlanError as exc:
+        artifact_parse_error = str(exc)
+        failure_reason = "artifact_parse_failed"
+    return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
+
+
+def maybe_build_verify_artifact(
+    step: dict[str, Any],
+    effective_step_type: str,
+    run_output_dir: Path,
+    step_index: int,
+    verify_results: list[CommandResult],
+    prior_artifacts: dict[str, dict[str, Any]],
+    verify_environment: dict[str, Any] | None,
+) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    structured_artifacts: dict[str, str] = {}
+    next_artifacts: dict[str, dict[str, Any]] = {}
+
+    if effective_step_type != "verify":
+        return structured_artifacts, next_artifacts
+    if step["id"] != "verify":
+        return structured_artifacts, next_artifacts
+
+    verify_artifact_data = build_verify_artifact(
+        verify_results=verify_results,
+        plan_artifact=prior_artifacts.get("plan"),
+        verify_environment=verify_environment,
+    )
+    verify_artifact_path = write_structured_artifact(
+        run_output_dir=run_output_dir,
+        step_index=step_index,
+        artifact_kind="verify",
+        artifact_data=verify_artifact_data,
+    )
+    structured_artifacts["verify"] = str(verify_artifact_path)
+    next_artifacts["verify"] = load_structured_artifact(str(verify_artifact_path))
+    return structured_artifacts, next_artifacts
+
+
+def should_run_reviews(
+    review_enabled: bool,
+    effective_review_info: dict[str, Any] | None,
+) -> bool:
+    if not review_enabled:
+        return False
+    if not isinstance(effective_review_info, dict):
+        return True
+    effective_policy = effective_review_info.get("effective_policy")
+    return isinstance(effective_policy, str) and bool(effective_policy.strip())
+
+
+def apply_review_policy(
+    reviews: list[dict[str, Any]],
+    effective_review_info: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    if not reviews:
+        return None, None
+    effective_policy = None
+    if isinstance(effective_review_info, dict):
+        effective_policy = effective_review_info.get("effective_policy")
+
+    if effective_policy == "advisory":
+        return "success", None
+    if effective_policy == "blocking":
+        if any(review["verdict"] == "block" for review in reviews):
+            return "failure", "review_blocked"
+        if any(review["verdict"] == "concern" for review in reviews):
+            return "failure", "review_concern"
+        return None, None
+    if effective_policy == "manual":
+        if any(review["verdict"] in {"block", "concern"} for review in reviews):
+            return "paused", "review_manual"
+        return None, None
+
+    if any(review["verdict"] == "block" for review in reviews):
+        return "failure", "review_blocked"
+    if any(review["verdict"] == "concern" for review in reviews):
+        return "paused", "review_concern"
+    return None, None
 
 
 def execute_step(
@@ -559,31 +783,89 @@ def execute_step(
     output_sink: OutputSink,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     step_id = step["id"]
-    step_kind = get_step_kind(step)
+    effective_step_type = get_effective_step_type(step)
+    step_type_info = step.get("_kctl_step_type")
+    output_info = get_effective_output_info(step)
+    review_info = get_effective_review_info(step)
+    mode_info = get_effective_mode_info(step)
+    verify_info = get_effective_verify_info(step)
     output_sink.write_line(style_text(f"== Step {step_id} ==", color=ANSI_CYAN, bold=True))
+    if isinstance(step_type_info, dict):
+        declared_type = step_type_info.get("declared_type") or "-"
+        output_sink.write_line(
+            style_text(
+                "step type: "
+                f"effective={step_type_info.get('effective_type')} "
+                f"source={step_type_info.get('source')} "
+                f"declared={declared_type} "
+                f"inferred={step_type_info.get('inferred_type')}",
+                dim=True,
+            )
+        )
+    if isinstance(output_info, dict) and output_info.get("effective_schema"):
+        declared_schema = output_info.get("declared_schema") or "-"
+        output_sink.write_line(
+            style_text(
+                "output schema: "
+                f"effective={output_info.get('effective_schema')} "
+                f"source={output_info.get('source')} "
+                f"declared={declared_schema} "
+                f"inferred={output_info.get('inferred_schema') or '-'}",
+                dim=True,
+            )
+        )
+    if isinstance(review_info, dict) and review_info.get("effective_policy"):
+        declared_policy = review_info.get("declared_policy") or "-"
+        output_sink.write_line(
+            style_text(
+                "review policy: "
+                f"effective={review_info.get('effective_policy')} "
+                f"source={review_info.get('source')} "
+                f"declared={declared_policy} "
+                f"inferred={review_info.get('inferred_policy') or '-'}",
+                dim=True,
+            )
+        )
+    if isinstance(mode_info, dict):
+        declared_mode = mode_info.get("declared_mode") or "-"
+        output_sink.write_line(
+            style_text(
+                "step mode: "
+                f"effective={mode_info.get('effective_mode')} "
+                f"source={mode_info.get('source')} "
+                f"declared={declared_mode} "
+                f"inferred={mode_info.get('inferred_mode')}",
+                dim=True,
+            )
+        )
+    if isinstance(verify_info, dict):
+        declared_verify_mode = verify_info.get("declared_mode") or "-"
+        default_verify_mode = verify_info.get("default_mode") or "-"
+        output_sink.write_line(
+            style_text(
+                "verify mode: "
+                f"effective={verify_info.get('effective_mode')} "
+                f"source={verify_info.get('source')} "
+                f"declared={declared_verify_mode} "
+                f"default={default_verify_mode} "
+                f"inferred={verify_info.get('inferred_mode')}",
+                dim=True,
+            )
+        )
     started_at = datetime.now(timezone.utc).isoformat()
     before_status = get_git_status(repo_path)
     codex_prompt = ""
-    if step_kind == "agent":
-        codex_prompt = build_codex_prompt(
-            objective,
-            prior_summaries,
-            step,
+    if effective_step_type in {"analyze", "change", "review"}:
+        codex_prompt, codex_result = execute_agent_step(
+            repo_path=repo_path,
+            objective=objective,
+            prior_summaries=prior_summaries,
+            step=step,
             prior_artifacts=prior_artifacts,
-        )
-        prompt_lines_to_hide = {
-            line.strip() for line in codex_prompt.splitlines() if line.strip()
-        }
-        codex_result = run_streaming_command(
-            ["codex", "exec", "--full-auto", "--cd", str(repo_path), codex_prompt],
-            cwd=repo_path,
-            stdout_prefix=CODEX_STREAM_PREFIX,
-            stderr_prefix=CODEX_STREAM_PREFIX,
-            filter_stream=not verbose,
-            hidden_lines=prompt_lines_to_hide if not verbose else None,
+            verbose=verbose,
             output_sink=output_sink,
         )
-    else:
+    elif effective_step_type == "verify":
         codex_result = CommandResult(
             command=[],
             cwd=str(repo_path),
@@ -591,6 +873,8 @@ def execute_step(
             stdout="Verification handled by kctl.\n",
             stderr="",
         )
+    else:
+        raise PlanError(f"Unsupported step type: {effective_step_type}")
     raw_artifact_path = write_raw_output_artifact(
         run_output_dir=run_output_dir,
         step_index=step_index,
@@ -606,27 +890,16 @@ def execute_step(
     new_changed_files = detect_new_changes(baseline_entries, after_entries)
     changed_files = parse_changed_files(after_status.stdout)
     expect_clean_diff = bool(step.get("expect_clean_diff", False))
-    explicit_verify_command = step.get("verify") or defaults.get("verify")
+    effective_mode = "default"
+    if isinstance(mode_info, dict):
+        effective_mode = str(mode_info.get("effective_mode") or "default")
     verify_shell_value = step.get("verify_shell") or defaults.get("verify_shell")
-    verify_commands: list[str] = []
-    step_commands = step.get("commands")
-    if step_kind == "verify":
-        if isinstance(step_commands, list) and all(isinstance(item, str) for item in step_commands):
-            verify_commands = [item for item in step_commands if item.strip()]
-        elif explicit_verify_command:
-            verify_commands = [explicit_verify_command]
-        elif step_id == "verify":
-            plan_verification = prior_artifacts.get("plan", {}).get("verification", {})
-            plan_commands = plan_verification.get("commands", [])
-            if isinstance(plan_commands, list) and all(isinstance(item, str) for item in plan_commands):
-                verify_commands = [item for item in plan_commands if item.strip()]
-    elif explicit_verify_command:
-        verify_commands = [explicit_verify_command]
-    elif step_id == "verify":
-        plan_verification = prior_artifacts.get("plan", {}).get("verification", {})
-        plan_commands = plan_verification.get("commands", [])
-        if isinstance(plan_commands, list) and all(isinstance(item, str) for item in plan_commands):
-            verify_commands = [item for item in plan_commands if item.strip()]
+    verify_commands = resolve_verify_commands(
+        step=step,
+        defaults=defaults,
+        prior_artifacts=prior_artifacts,
+        effective_step_type=effective_step_type,
+    )
     verify_result: CommandResult | None = None
     verify_results: list[CommandResult] = []
     verify_environment: dict[str, Any] | None = None
@@ -640,25 +913,22 @@ def execute_step(
     if codex_result.exit_code != 0:
         status = "failure"
         failure_reason = "codex_failed"
-    if expect_clean_diff and new_changed_files:
+    if effective_mode == "read-only" and new_changed_files:
         status = "failure"
         failure_reason = "expected_clean_diff"
 
-    if step_kind == "agent" and step_id in {"inspect", "plan"} and codex_result.exit_code == 0:
-        try:
-            artifact_data = parse_phase_artifact(step_id, codex_result.stdout)
-            artifact_path = write_structured_artifact(
-                run_output_dir=run_output_dir,
-                step_index=step_index,
-                artifact_kind=step_id,
-                artifact_data=artifact_data,
-            )
-            structured_artifacts[step_id] = str(artifact_path)
-            next_artifacts[step_id] = load_structured_artifact(str(artifact_path))
-        except PlanError as exc:
-            artifact_parse_error = str(exc)
-            status = "failure"
-            failure_reason = "artifact_parse_failed"
+    phase_artifacts, phase_next_artifacts, artifact_parse_error, artifact_failure_reason = maybe_collect_phase_artifact(
+        step=step,
+        effective_step_type=effective_step_type,
+        codex_result=codex_result,
+        run_output_dir=run_output_dir,
+        step_index=step_index,
+    )
+    structured_artifacts.update(phase_artifacts)
+    next_artifacts.update(phase_next_artifacts)
+    if artifact_failure_reason is not None:
+        status = "failure"
+        failure_reason = artifact_failure_reason
 
     if verify_commands:
         shell_parts = parse_verify_shell(verify_shell_value)
@@ -676,22 +946,19 @@ def execute_step(
             status = "failure"
             failure_reason = "verify_failed"
 
-    if step_id == "verify":
-        verify_artifact_data = build_verify_artifact(
-            verify_results=verify_results,
-            plan_artifact=prior_artifacts.get("plan"),
-            verify_environment=verify_environment,
-        )
-        verify_artifact_path = write_structured_artifact(
-            run_output_dir=run_output_dir,
-            step_index=step_index,
-            artifact_kind="verify",
-            artifact_data=verify_artifact_data,
-        )
-        structured_artifacts["verify"] = str(verify_artifact_path)
-        next_artifacts["verify"] = load_structured_artifact(str(verify_artifact_path))
+    verify_artifacts, verify_next_artifacts = maybe_build_verify_artifact(
+        step=step,
+        effective_step_type=effective_step_type,
+        run_output_dir=run_output_dir,
+        step_index=step_index,
+        verify_results=verify_results,
+        prior_artifacts=prior_artifacts,
+        verify_environment=verify_environment,
+    )
+    structured_artifacts.update(verify_artifacts)
+    next_artifacts.update(verify_next_artifacts)
 
-    if review_enabled and status == "success" and new_changed_files:
+    if should_run_reviews(review_enabled, review_info) and status == "success" and new_changed_files:
         reviews = run_step_reviews(
             repo_path=repo_path,
             objective=objective,
@@ -704,12 +971,10 @@ def execute_step(
             ),
             output_sink=output_sink,
         )
-        if any(review["verdict"] == "block" for review in reviews):
-            status = "failure"
-            failure_reason = "review_blocked"
-        elif any(review["verdict"] == "concern" for review in reviews):
-            status = "paused"
-            failure_reason = "review_concern"
+        review_status, review_failure_reason = apply_review_policy(reviews, review_info)
+        if review_status is not None:
+            status = review_status
+            failure_reason = review_failure_reason
 
     step_result = build_step_result(
         step_id=step_id,
@@ -733,6 +998,11 @@ def execute_step(
         structured_artifacts=structured_artifacts,
         artifact_parse_error=artifact_parse_error,
         verify_environment=verify_environment,
+        step_type_info=step_type_info,
+        output_info=output_info,
+        review_info=review_info,
+        mode_info=mode_info,
+        verify_info=verify_info,
     )
     if should_print_diff_stat(diff_stat.stdout, verbose):
         output_sink.write_line(style_text("git diff --stat:", bold=True))
@@ -768,6 +1038,7 @@ def execute_plan_run(
         plan = dict(plan)
         plan["repo"] = repo_override
     validate_plan(plan)
+    plan = normalize_plan(plan)
     repo_path = resolve_repo(plan_path, plan["repo"])
     ensure_git_repo(repo_path)
     branch_before = get_current_branch(repo_path)
@@ -791,7 +1062,10 @@ def execute_plan_run(
     run_status = "success"
     started_at = datetime.now(timezone.utc).isoformat()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    run_output_dir = run_output_dir_override or ensure_run_output_dir(repo_path, run_id)
+    artifact_storage_mode = resolve_storage_mode()
+    run_output_dir = run_output_dir_override or ensure_run_output_dir(
+        repo_path, run_id, storage_mode=artifact_storage_mode
+    )
     if run_output_dir_override is not None:
         run_output_dir.mkdir(parents=True, exist_ok=True)
     commit_created = False
@@ -886,6 +1160,8 @@ def execute_plan_run(
         "commit_created": commit_created,
         "commit_sha": commit_sha,
         "status": run_status,
+        "artifact_storage_mode": artifact_storage_mode,
+        "artifact_root_path": str(run_output_dir.parent),
         "run_output_dir": str(run_output_dir),
         "steps": step_results,
     }

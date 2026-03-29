@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .artifacts import discover_multi_run_logs, discover_single_run_logs, ui_state_db_path
 from .git import ensure_git_repo, get_current_branch, get_repo_root
 from .terminal import style_status_text, style_text
 from .types import PlanError
@@ -29,7 +30,7 @@ def sanitize_slug(value: str) -> str:
 
 
 def default_db_path(repo_root: Path) -> Path:
-    return repo_root / ".kctl" / "ui-state.db"
+    return ui_state_db_path(repo_root)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -85,7 +86,7 @@ def index_repository_state(repo_path: Path, db_path: Path | None = None) -> dict
             "workspaces": 0,
         }
 
-        for run_root in sorted((repo_root / ".kctl" / "runs").glob("*/run.json")):
+        for run_root in discover_multi_run_logs(repo_root):
             aggregate = read_json(run_root)
             run_id = str(aggregate["run_id"])
             run_record = RunRecord(
@@ -208,7 +209,7 @@ def index_repository_state(repo_path: Path, db_path: Path | None = None) -> dict
                     store.upsert("step_executions", record_to_dict(step_record), ["id"])
                     counts["step_executions"] += 1
 
-        for legacy_run_log in sorted((repo_root / ".kctl-runs").glob("*/run.json")):
+        for legacy_run_log in discover_single_run_logs(repo_root):
             legacy_data = read_json(legacy_run_log)
             run_id = f"single:{legacy_run_log.parent.name}"
             plan_path = Path(legacy_data["plan_path"])
