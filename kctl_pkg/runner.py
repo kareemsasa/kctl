@@ -25,6 +25,7 @@ from .output import ConsoleOutputSink, OutputSink
 from .plan import build_codex_prompt, get_step_kind, load_plan, normalize_plan, validate_plan
 from .process import run_command, run_streaming_command
 from .review import run_step_reviews, should_print_diff_stat
+from .summary import write_single_run_summary
 from .terminal import (
     ANSI_CYAN,
     CODEX_STREAM_PREFIX,
@@ -1014,6 +1015,7 @@ def execute_step(
 def save_run_log(run_data: dict[str, Any], run_output_dir: Path) -> Path:
     log_path = run_output_dir / "run.json"
     log_path.write_text(json.dumps(run_data, indent=2) + "\n")
+    write_single_run_summary(run_output_dir, run_data)
     return log_path
 
 

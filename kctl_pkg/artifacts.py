@@ -7,10 +7,13 @@ from pathlib import Path
 
 STORAGE_MODE_IN_REPO = "in_repo"
 STORAGE_MODE_EXTERNAL = "external"
-STORAGE_MODES = {STORAGE_MODE_IN_REPO, STORAGE_MODE_EXTERNAL}
+STORAGE_MODE_CUSTOM_ROOT = "custom_root"
+STORAGE_MODES = {STORAGE_MODE_IN_REPO, STORAGE_MODE_EXTERNAL, STORAGE_MODE_CUSTOM_ROOT}
 
 
 def resolve_storage_mode() -> str:
+    if os.environ.get("KCTL_ARTIFACT_ROOT", "").strip():
+        return STORAGE_MODE_CUSTOM_ROOT
     value = os.environ.get("KCTL_ARTIFACT_STORAGE", STORAGE_MODE_IN_REPO).strip().lower()
     if value in STORAGE_MODES:
         return value
@@ -24,6 +27,13 @@ def kctl_home() -> Path:
     return (Path.home() / ".kctl").resolve()
 
 
+def artifact_root() -> Path:
+    configured_root = os.environ.get("KCTL_ARTIFACT_ROOT")
+    if configured_root:
+        return Path(configured_root).expanduser().resolve()
+    return kctl_home()
+
+
 def repository_key(repo_root: Path) -> str:
     return hashlib.sha256(str(repo_root.resolve()).encode("utf-8")).hexdigest()[:16]
 
@@ -31,8 +41,8 @@ def repository_key(repo_root: Path) -> str:
 def single_runs_base(repo_root: Path, storage_mode: str | None = None) -> Path:
     storage_mode = storage_mode or resolve_storage_mode()
     repo_root = repo_root.resolve()
-    if storage_mode == STORAGE_MODE_EXTERNAL:
-        return kctl_home() / "repos" / repository_key(repo_root) / "single-runs"
+    if storage_mode in {STORAGE_MODE_EXTERNAL, STORAGE_MODE_CUSTOM_ROOT}:
+        return artifact_root() / "repos" / repository_key(repo_root) / "single-runs"
     return repo_root / ".kctl-runs"
 
 
@@ -43,8 +53,8 @@ def single_run_dir(repo_root: Path, run_id: str, storage_mode: str | None = None
 def kctl_state_root(repo_root: Path, storage_mode: str | None = None) -> Path:
     storage_mode = storage_mode or resolve_storage_mode()
     repo_root = repo_root.resolve()
-    if storage_mode == STORAGE_MODE_EXTERNAL:
-        return kctl_home() / "repos" / repository_key(repo_root)
+    if storage_mode in {STORAGE_MODE_EXTERNAL, STORAGE_MODE_CUSTOM_ROOT}:
+        return artifact_root() / "repos" / repository_key(repo_root)
     return repo_root / ".kctl"
 
 
@@ -74,6 +84,8 @@ def discover_single_run_logs(repo_root: Path) -> list[Path]:
         single_runs_base(repo_root, storage_mode=STORAGE_MODE_IN_REPO),
         single_runs_base(repo_root, storage_mode=STORAGE_MODE_EXTERNAL),
     ]
+    if os.environ.get("KCTL_ARTIFACT_ROOT", "").strip():
+        locations.append(single_runs_base(repo_root, storage_mode=STORAGE_MODE_CUSTOM_ROOT))
     discovered: list[Path] = []
     seen: set[Path] = set()
     for location in locations:
@@ -93,6 +105,8 @@ def discover_multi_run_logs(repo_root: Path) -> list[Path]:
         multi_runs_base(repo_root, storage_mode=STORAGE_MODE_IN_REPO),
         multi_runs_base(repo_root, storage_mode=STORAGE_MODE_EXTERNAL),
     ]
+    if os.environ.get("KCTL_ARTIFACT_ROOT", "").strip():
+        locations.append(multi_runs_base(repo_root, storage_mode=STORAGE_MODE_CUSTOM_ROOT))
     discovered: list[Path] = []
     seen: set[Path] = set()
     for location in locations:

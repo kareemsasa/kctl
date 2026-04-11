@@ -309,6 +309,99 @@ class UIIndexTests(unittest.TestCase):
                     connection.close()
             self.assertEqual(run_row, (f"single:{run_id}", "single_run"))
 
+    def test_index_repository_state_reads_custom_root_single_run_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            artifact_root = Path(tmpdir) / "visible-runs"
+            init_git_repo(repo_path)
+            plan_path = repo_path / "plans" / "sample.yaml"
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            plan_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: Custom root run
+                    steps:
+                      - id: inspect
+                        prompt: Inspect
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            run_id = "20260329T000000000001Z"
+            with patch.dict(
+                os.environ,
+                {
+                    "KCTL_ARTIFACT_ROOT": str(artifact_root),
+                    "KCTL_ARTIFACT_STORAGE": "external",
+                    "KCTL_HOME": str(Path(tmpdir) / "ignored-home"),
+                },
+                clear=False,
+            ):
+                run_dir = single_run_dir(repo_path, run_id, storage_mode="custom_root")
+                run_dir.mkdir(parents=True, exist_ok=True)
+                raw_output_path = run_dir / "step-01-raw.md"
+                raw_output_path.write_text("# raw\n")
+                artifact_path = run_dir / "step-01-inspect.json"
+                artifact_path.write_text(json.dumps({"summary": "ok"}) + "\n")
+                run_data = {
+                    "started_at": "2026-03-29T00:00:00+00:00",
+                    "ended_at": "2026-03-29T00:01:00+00:00",
+                    "plan_path": str(plan_path),
+                    "repo": str(repo_path),
+                    "objective": "Custom root run",
+                    "defaults": {},
+                    "review_enabled": False,
+                    "repo_dirty_at_start": False,
+                    "branch_before": "main",
+                    "branch_after": "main",
+                    "commit_created": False,
+                    "commit_sha": None,
+                    "status": "success",
+                    "artifact_storage_mode": "custom_root",
+                    "artifact_root_path": str(run_dir.parent),
+                    "run_output_dir": str(run_dir),
+                    "steps": [
+                        {
+                            "id": "inspect",
+                            "prompt": "Inspect",
+                            "codex_prompt": "prompt",
+                            "started_at": "2026-03-29T00:00:00+00:00",
+                            "ended_at": "2026-03-29T00:00:10+00:00",
+                            "expect_clean_diff": False,
+                            "status": "success",
+                            "failure_reason": None,
+                            "before_git_status": {"exit_code": 0, "stdout": "", "stderr": ""},
+                            "after_git_status": {"exit_code": 0, "stdout": "", "stderr": ""},
+                            "diff_stat": {"exit_code": 0, "stdout": "", "stderr": ""},
+                            "baseline_changed_files": [],
+                            "new_changed_files": [],
+                            "changed_files": [],
+                            "changed_files_count": 0,
+                            "codex_summary": "done",
+                            "codex": {"command": ["codex"], "cwd": str(repo_path), "exit_code": 0, "stdout": "ok", "stderr": ""},
+                            "verify": None,
+                            "verify_environment": None,
+                            "reviews": [],
+                            "raw_artifact_path": str(raw_output_path),
+                            "structured_artifacts": {"inspect_v1": str(artifact_path)},
+                            "artifact_parse_error": None,
+                        }
+                    ],
+                }
+                (run_dir / "run.json").write_text(json.dumps(run_data, indent=2) + "\n")
+                counts = index_repository_state(repo_path)
+                self.assertEqual(counts["runs"], 1)
+                db_path = default_db_path(repo_path)
+                self.assertTrue(str(db_path).startswith(str(artifact_root)))
+                connection = sqlite3.connect(str(db_path))
+                try:
+                    run_row = connection.execute("SELECT id, launch_source FROM runs").fetchone()
+                finally:
+                    connection.close()
+            self.assertEqual(run_row, (f"single:{run_id}", "single_run"))
+
 
 if __name__ == "__main__":
     unittest.main()

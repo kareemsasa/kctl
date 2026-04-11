@@ -14,6 +14,7 @@ from .git import create_isolated_workspace, ensure_git_repo, get_repo_root, reso
 from .output import ConsoleOutputSink, OutputSink
 from .plan import load_plan, validate_plan
 from .runner import execute_plan_run
+from .summary import write_multi_run_summary
 from .terminal import style_status_text, style_text
 from .types import PlanError
 
@@ -89,6 +90,7 @@ def write_run_state(run_root: Path, run_data: dict[str, Any]) -> Path:
     run_root.mkdir(parents=True, exist_ok=True)
     run_path = run_root / "run.json"
     run_path.write_text(json.dumps(run_data, indent=2) + "\n")
+    write_multi_run_summary(run_root, run_data)
     return run_path
 
 
@@ -264,6 +266,9 @@ def resolve_status_run_path(target: str) -> Path:
     cwd_run_log = multi_run_dir(Path.cwd(), target, storage_mode="in_repo") / "run.json"
     if cwd_run_log.exists():
         return cwd_run_log.resolve()
+    custom_run_log = multi_run_dir(Path.cwd(), target, storage_mode="custom_root") / "run.json"
+    if custom_run_log.exists():
+        return custom_run_log.resolve()
     external_run_log = multi_run_dir(Path.cwd(), target, storage_mode="external") / "run.json"
     if external_run_log.exists():
         return external_run_log.resolve()

@@ -2,6 +2,23 @@
 
 `kctl` is a small CLI that runs a YAML execution plan and uses `codex` as the coding agent inside another git repository. `kctl` does not edit code itself in the target repo; it coordinates sequential Codex steps, captures outputs, runs verification commands, and writes a machine-readable run log.
 
+## Product Direction
+
+`kctl` is moving toward a local control plane for Codex-driven development workflows.
+
+The CLI runner still matters, but the deeper goal is not just "run Codex with a plan." The goal is to make agent work:
+
+- controllable through explicit staged execution
+- verifiable through deterministic checks and review passes
+- inspectable through durable logs, structured artifacts, and indexed state
+- scalable across multiple plans, repositories, and isolated workspaces
+
+Direct `codex` usage is thread-level interaction. `kctl` is intended to operate one level up: runs, plan executions, steps, workspaces, and eventually agent sessions/threads as first-class operational objects.
+
+If this repo feels split between a CLI harness and a dashboard, prefer the control-plane interpretation. The CLI is the execution surface; the web UI is the long-term operator surface.
+
+See [docs/product-direction.md](/home/kareem/code/personal/tooling/kctl/docs/product-direction.md) for the current framing, MVP control-plane scope, and near-term priorities.
+
 ## Requirements
 
 - Python 3
@@ -27,6 +44,7 @@ Opt in to external artifact storage for a single run:
 ```bash
 KCTL_ARTIFACT_STORAGE=external python3 kctl.py run examples/sample-plan.yaml
 KCTL_ARTIFACT_STORAGE=external KCTL_HOME=/tmp/kctl-home python3 kctl.py run examples/sample-plan.yaml
+KCTL_ARTIFACT_ROOT=/tmp/kctl-runs python3 kctl.py run examples/sample-plan.yaml
 ```
 
 Run the same plan across multiple repositories under a root:
@@ -49,6 +67,7 @@ Opt in to external artifact storage for multi-plan runs and UI/index state:
 KCTL_ARTIFACT_STORAGE=external python3 kctl.py plans run-many plans/traffic-simulator --concurrency 3
 KCTL_ARTIFACT_STORAGE=external python3 kctl.py ui index /path/to/repo
 KCTL_ARTIFACT_STORAGE=external python3 kctl.py ui dashboard /path/to/repo
+KCTL_ARTIFACT_ROOT=/tmp/kctl-runs python3 kctl.py plans run-many plans/traffic-simulator --concurrency 3
 ```
 
 Index execution state for future UI work and inspect it locally:
@@ -62,7 +81,7 @@ python3 kctl.py ui dashboard /path/to/repo
 
 `kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
 
-When `KCTL_ARTIFACT_STORAGE=external` is set, `kctl` stores run metadata outside the target repository. `KCTL_HOME` controls the external root and defaults to `~/.kctl`.
+When `KCTL_ARTIFACT_STORAGE=external` is set, `kctl` stores run metadata outside the target repository. `KCTL_HOME` controls the external root and defaults to `~/.kctl`. When `KCTL_ARTIFACT_ROOT` is set, it takes precedence over both in-repo storage and `KCTL_HOME` and uses the same external artifact layout under the configured root.
 
 Example from outside this repository:
 
@@ -212,10 +231,11 @@ Legacy plans remain valid. New plans can declare intent directly with explicit c
 
 ### Overview
 
-`kctl` supports two artifact storage modes:
+`kctl` supports three artifact storage modes:
 
 - `in_repo`: keeps current behavior by writing run metadata inside the target repository
 - `external`: writes run metadata outside the target repository to keep harness state separate from product code
+- `custom_root`: writes run metadata under `KCTL_ARTIFACT_ROOT` using the same external layout under a caller-chosen root
 
 ### Compatibility
 
@@ -232,7 +252,7 @@ This keeps inspection and debugging straightforward while both layouts are suppo
 
 ### Rollout
 
-`in_repo` remains the default initially. `external` is opt-in first. The default should change only after the external path has been validated across normal runs, multi-plan runs, and UI/index reads.
+`in_repo` remains the default initially. `external` is opt-in first. `custom_root` is selected automatically when `KCTL_ARTIFACT_ROOT` is set. The default should change only after the external path has been validated across normal runs, multi-plan runs, and UI/index reads.
 
 ## Post-Migration Status
 
@@ -266,7 +286,7 @@ This keeps inspection and debugging straightforward while both layouts are suppo
 
 ### Storage Status
 
-- Modes: `in_repo` (default), `external` (opt-in via `KCTL_ARTIFACT_STORAGE`)
+- Modes: `in_repo` (default), `external` (opt-in via `KCTL_ARTIFACT_STORAGE`), `custom_root` (selected automatically when `KCTL_ARTIFACT_ROOT` is set)
 - Dual-read is supported; no migration or conversion is required
 - Run metadata records `artifact_storage_mode` and `artifact_root_path`
 
@@ -315,7 +335,7 @@ Interactive prompts are not supported in batch mode. `--approve-each-step` will 
 
 `kctl plans run-many <plans-dir> --concurrency <n>` loads all `*.yaml` and `*.yml` files in a directory, validates that they target the same repository, creates one isolated workspace per plan under `.kctl/worktrees/<run-id>/`, and runs plans concurrently up to the requested limit while keeping each plan's own steps sequential.
 
-Multi-plan run state is written under `.kctl/runs/<run-id>/run.json`, with one per-plan subdirectory containing that plan's run log and step artifacts.
+Multi-plan run state is written under `.kctl/runs/<run-id>/run.json`, with a sibling `summary.md` and one per-plan subdirectory containing that plan's run log and step artifacts.
 
 `kctl ui index <repo>` builds a local SQLite index at `.kctl/ui-state.db` from existing `.kctl/runs`, `.kctl/worktrees`, and legacy `.kctl-runs` data. `kctl ui runs` and `kctl ui run` are read-only inspection commands over that index. `kctl ui dashboard` launches a minimal local web dashboard for browsing runs, plan executions, step timelines, and workspace details.
 
@@ -327,9 +347,10 @@ Each target repository gets its own `.kctl-runs/` directory. A run writes a dire
 .kctl-runs/20260323T000000Z/
 ```
 
-Each run directory contains `run.json` plus per-step artifacts such as:
+Each run directory contains `run.json`, a human-readable `summary.md`, and per-step artifacts such as:
 
 ```text
+summary.md
 step-01-raw.md
 step-01-inspect.json
 step-02-raw.md
@@ -339,5 +360,6 @@ step-03-verify.json
 ```
 
 The run log includes plan metadata, per-step Codex output, git status snapshots, diff stats, verification results, artifact paths, and the final run status.
+The summary file is the human-readable promotion artifact: plan name, timestamp, steps run, pass/fail per step, and verification outcomes.
 Each step log also includes `started_at`, `ended_at`, the full `codex_prompt`, `changed_files`, `changed_files_count`, and any structured artifact parse errors.
 Verification logs now also include basic environment diagnostics such as the working directory, shell used, `which node`, `node -v`, `which npm`, and `npm -v` when available.

@@ -120,6 +120,11 @@ class MultiPlanTests(unittest.TestCase):
             self.assertEqual(step["step_type"]["effective_type"], "verify")
             self.assertEqual(step["step_type"]["source"], "explicit")
             self.assertEqual(run_data["status"], "success")
+            summary_text = (Path(run_data["run_output_dir"]) / "summary.md").read_text()
+            self.assertIn("# verify.yaml", summary_text)
+            self.assertIn("Timestamp:", summary_text)
+            self.assertIn("## Steps", summary_text)
+            self.assertIn("- validate: success (verification: passed)", summary_text)
 
     def test_normalize_plan_records_explicit_and_inferred_step_types(self) -> None:
         plan = {
@@ -309,6 +314,53 @@ class MultiPlanTests(unittest.TestCase):
                 self.assertEqual(run_output_dir, single_run_dir(repo_path, run_output_dir.name, storage_mode="external"))
                 self.assertTrue(run_output_dir.exists())
 
+    def test_execute_plan_run_custom_root_storage_records_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            artifact_root = Path(tmpdir) / "visible-runs"
+            init_git_repo(repo_path)
+            plan_path = Path(tmpdir) / "verify.yaml"
+            plan_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: verify only
+                    steps:
+                      - id: verify
+                        kind: verify
+                        commands:
+                          - printf ok
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            env = {
+                "KCTL_ARTIFACT_ROOT": str(artifact_root),
+                "KCTL_ARTIFACT_STORAGE": "external",
+                "KCTL_HOME": str(Path(tmpdir) / "ignored-home"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                with patch("kctl_pkg.runner.run_streaming_command", side_effect=AssertionError("agent should not run")):
+                    run_data = execute_plan_run(
+                        plan_path=plan_path,
+                        verbose=False,
+                        approve_each_step=False,
+                        branch=None,
+                        commit=False,
+                        commit_message=None,
+                        allow_dirty_start=False,
+                        review_enabled=False,
+                        interactive=False,
+                    )
+
+                run_output_dir = Path(run_data["run_output_dir"])
+                self.assertEqual(run_data["artifact_storage_mode"], "custom_root")
+                self.assertEqual(run_data["artifact_root_path"], str(run_output_dir.parent))
+                self.assertEqual(run_output_dir, single_run_dir(repo_path, run_output_dir.name, storage_mode="custom_root"))
+                self.assertTrue(run_output_dir.exists())
+                self.assertEqual(run_output_dir.parents[2], artifact_root / "repos")
+
     def test_run_many_plans_external_storage_writes_under_kctl_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -370,6 +422,78 @@ class MultiPlanTests(unittest.TestCase):
                     Path(run_state["plans"][0]["worktree_path"]).resolve().parents[3],
                     (kctl_home / "repos").resolve(),
                 )
+
+    def test_run_many_plans_custom_root_writes_under_visible_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            artifact_root = Path(tmpdir) / "visible-runs"
+            init_git_repo(repo_path)
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            for index in range(2):
+                (plans_dir / f"{index + 1:03d}-plan.yaml").write_text(
+                    textwrap.dedent(
+                        f"""
+                        repo: {repo_path}
+                        objective: plan {index}
+                        steps:
+                          - id: inspect
+                            prompt: Inspect {index}
+                        """
+                    ).strip()
+                    + "\n"
+                )
+
+            def fake_create_workspace(repo_root: Path, workspace_path: Path, branch_name: str) -> Path:
+                workspace_path.mkdir(parents=True, exist_ok=True)
+                return workspace_path
+
+            def fake_execute_plan_run(**kwargs):
+                run_output_dir = kwargs["run_output_dir_override"]
+                run_output_dir.mkdir(parents=True, exist_ok=True)
+                return {
+                    "status": "success",
+                    "artifact_storage_mode": "custom_root",
+                    "artifact_root_path": str(run_output_dir.parent),
+                    "steps": [
+                        {
+                            "id": "inspect",
+                            "status": "success",
+                            "verify": None,
+                            "changed_files_count": 0,
+                        }
+                    ],
+                    "log_path": str(run_output_dir / "run.json"),
+                }
+
+            env = {
+                "KCTL_ARTIFACT_ROOT": str(artifact_root),
+                "KCTL_ARTIFACT_STORAGE": "external",
+                "KCTL_HOME": str(Path(tmpdir) / "ignored-home"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=fake_create_workspace), patch(
+                    "kctl_pkg.multi.execute_plan_run", side_effect=fake_execute_plan_run
+                ):
+                    exit_code = run_many_plans(plans_dir, concurrency=2, verbose=False)
+
+                self.assertEqual(exit_code, 0)
+                run_logs = sorted((artifact_root / "repos").glob("*/runs/*/run.json"))
+                self.assertTrue(run_logs)
+                run_state = json.loads(run_logs[-1].read_text())
+                self.assertEqual(run_state["artifact_storage_mode"], "custom_root")
+                self.assertEqual(Path(run_state["artifact_root_path"]).resolve(), Path(run_logs[-1]).parent.parent.resolve())
+                self.assertTrue(run_state["plans"])
+                self.assertEqual(Path(run_state["plans"][0]["run_output_dir"]).resolve().parent, Path(run_logs[-1]).parent.resolve())
+                self.assertEqual(
+                    Path(run_state["plans"][0]["worktree_path"]).resolve().parents[3],
+                    (artifact_root / "repos").resolve(),
+                )
+                summary_text = (Path(run_logs[-1]).parent / "summary.md").read_text()
+                self.assertIn("# plans", summary_text)
+                self.assertIn("Timestamp:", summary_text)
+                self.assertIn("## Plans", summary_text)
+                self.assertIn("- 001-plan: passed (verification: not-run)", summary_text)
 
     def test_execute_plan_run_explicit_output_schema_is_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -758,6 +882,9 @@ class MultiPlanTests(unittest.TestCase):
             run_state = json.loads(run_logs[-1].read_text())
             self.assertEqual(run_state["status"], "passed")
             self.assertEqual(len(run_state["plans"]), 3)
+            summary_text = (run_logs[-1].parent / "summary.md").read_text()
+            self.assertIn("## Plans", summary_text)
+            self.assertIn("- 001-plan: passed (verification: not-run)", summary_text)
 
 
 if __name__ == "__main__":
