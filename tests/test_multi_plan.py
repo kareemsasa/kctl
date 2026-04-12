@@ -33,6 +33,98 @@ def init_git_repo(repo_path: Path) -> None:
 
 
 class MultiPlanTests(unittest.TestCase):
+    def test_execute_plan_run_provider_override_applies_to_preflight_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_path = Path(tmpdir) / "provider.yaml"
+            plan_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: provider override
+                    defaults:
+                      provider: codex
+                    steps:
+                      - id: implement
+                        prompt: Implement
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            def fake_streaming_command(*args, **kwargs):
+                command = args[0]
+                return CommandResult(command=command, cwd=str(repo_path), exit_code=0, stdout="ok\n", stderr="")
+
+            def fake_which(binary: str, path: str | None = None) -> str:
+                return f"/usr/bin/{binary}"
+
+            with patch("kctl_pkg.preflight.shutil.which", side_effect=fake_which), patch(
+                "kctl_pkg.runner.run_streaming_command",
+                side_effect=fake_streaming_command,
+            ):
+                run_data = execute_plan_run(
+                    plan_path=plan_path,
+                    verbose=False,
+                    approve_each_step=False,
+                    branch=None,
+                    commit=False,
+                    commit_message=None,
+                    allow_dirty_start=False,
+                    review_enabled=False,
+                    interactive=False,
+                    provider_override="claude",
+                )
+
+            self.assertIn("claude", run_data["preflight"]["required_binaries"])
+            self.assertNotIn("codex", run_data["preflight"]["required_binaries"])
+
+    def test_execute_plan_run_classifies_agent_quota_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_path = Path(tmpdir) / "quota.yaml"
+            plan_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: quota
+                    steps:
+                      - id: implement
+                        prompt: Implement
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            def fake_streaming_command(*args, **kwargs):
+                command = args[0]
+                return CommandResult(
+                    command=command,
+                    cwd=str(repo_path),
+                    exit_code=1,
+                    stdout="",
+                    stderr="You've hit your limit · resets 3pm (America/Chicago)\n",
+                )
+
+            with patch("kctl_pkg.runner.run_streaming_command", side_effect=fake_streaming_command):
+                run_data = execute_plan_run(
+                    plan_path=plan_path,
+                    verbose=False,
+                    approve_each_step=False,
+                    branch=None,
+                    commit=False,
+                    commit_message=None,
+                    allow_dirty_start=False,
+                    review_enabled=False,
+                    interactive=False,
+                )
+
+            step = run_data["steps"][0]
+            self.assertEqual(step["failure_reason"], "agent_quota_exhausted")
+            self.assertEqual(step["failure_details"]["reset_hint"], "3pm (America/Chicago)")
+
     def test_resolve_storage_prefers_custom_root_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             custom_root = Path(tmpdir) / "visible-runs"
@@ -111,7 +203,7 @@ class MultiPlanTests(unittest.TestCase):
                 )
 
             step = run_data["steps"][0]
-            self.assertEqual(step["codex"]["command"], [])
+            self.assertEqual(step["agent"]["command"], [])
             self.assertEqual(step["verify"]["exit_code"], 0)
             self.assertEqual(step["step_type"]["effective_type"], "verify")
             self.assertEqual(step["step_type"]["source"], "inferred")
@@ -151,7 +243,7 @@ class MultiPlanTests(unittest.TestCase):
                 )
 
             step = run_data["steps"][0]
-            self.assertEqual(step["codex"]["command"], [])
+            self.assertEqual(step["agent"]["command"], [])
             self.assertEqual(step["verify"]["exit_code"], 0)
             self.assertEqual(step["step_type"]["effective_type"], "verify")
             self.assertEqual(step["step_type"]["source"], "explicit")

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENV_PYTHON="${REPO_ROOT}/.venv/bin/python"
+
+if [[ ! -x "${VENV_PYTHON}" ]]; then
+  echo "error: expected venv python at ${VENV_PYTHON}" >&2
+  echo "hint: python3 -m venv .venv && .venv/bin/python -m pip install -e .[dev]" >&2
+  exit 1
+fi
+
+cd "${REPO_ROOT}"
+
+# Keep tests deterministic regardless of the caller's shell environment.
+export KCTL_ARTIFACT_STORAGE="in_repo"
+unset KCTL_ARTIFACT_ROOT
+unset KCTL_HOME
+
+exec "${VENV_PYTHON}" -m unittest discover -s tests -p "test_*.py" "$@"

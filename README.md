@@ -31,6 +31,16 @@ Install dependencies:
 python3 -m pip install -r requirements.txt
 ```
 
+## Verification
+
+Use the repo-local test entrypoint so verification always runs through the project venv:
+
+```bash
+bash scripts/test
+```
+
+The script hard-requires `.venv/bin/python`, forces `KCTL_ARTIFACT_STORAGE=in_repo` (and unsets external artifact overrides), then runs `unittest` discovery from this repository root.
+
 ## Usage
 
 Run a plan:
@@ -129,7 +139,7 @@ objective: |
   between inspection, implementation, validation, and cleanup.
 
 defaults:
-  verify: python3 -m pytest -q
+  verify: bash scripts/test
   verify_shell: zsh -lc
   stop_on_failure: true
 
@@ -149,7 +159,7 @@ steps:
     prompt: |
       Focus on validation. Inspect the current changes, fix obvious test or validation
       issues if needed, and leave the repository in a verifiable state.
-    verify: python3 -m pytest -q
+    verify: bash scripts/test
 
   - id: review
     prompt: |
@@ -169,7 +179,7 @@ objective: |
 defaults:
   verify:
     commands:
-      - python3 -m pytest -q
+      - bash scripts/test
     shell: zsh -lc
     mode: full
   stop_on_failure: true
@@ -197,7 +207,7 @@ steps:
       issues if needed, and leave the repository in a verifiable state.
     verify:
       commands:
-        - python3 -m pytest -q
+        - bash scripts/test
       shell: zsh -lc
       mode: full
 

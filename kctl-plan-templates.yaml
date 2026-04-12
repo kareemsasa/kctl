@@ -85,6 +85,7 @@ templates:
     shape:
       objective: "<overall objective>"
       defaults:
+        verify: bash scripts/test
         stop_on_failure: true
       steps:
         - id: inspect

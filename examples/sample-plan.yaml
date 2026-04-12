@@ -4,7 +4,7 @@ objective: |
   between inspection, implementation, validation, and cleanup.
 
 defaults:
-  verify: python3 -m pytest -q
+  verify: bash scripts/test
   stop_on_failure: true
 
 steps:
@@ -23,7 +23,7 @@ steps:
     prompt: |
       Focus on validation. Inspect the current changes, fix obvious test or validation
       issues if needed, and leave the repository in a verifiable state.
-    verify: python3 -m pytest -q
+    verify: bash scripts/test
 
   - id: review
     prompt: |

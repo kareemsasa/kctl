@@ -20,6 +20,27 @@ from .terminal import style_status_text, style_text
 from .types import PlanError
 
 
+def _apply_provider_override_to_plan(
+    plan: dict[str, Any],
+    provider_override: str | None,
+) -> dict[str, Any]:
+    if provider_override is None:
+        return plan
+    if provider_override not in {"codex", "claude"}:
+        raise PlanError("provider override must be one of: codex, claude.")
+    updated_plan = dict(plan)
+    defaults = dict(updated_plan.get("defaults") or {})
+    defaults["provider"] = provider_override
+    if provider_override == "codex":
+        defaults.pop("permission_mode", None)
+    elif "permission_mode" not in defaults:
+        defaults["permission_mode"] = "auto"
+    updated_plan["defaults"] = defaults
+    updated_plan["_kctl_provider"] = provider_override
+    updated_plan["_kctl_permission_mode"] = defaults.get("permission_mode") or "auto"
+    return updated_plan
+
+
 PLAN_FILE_PATTERNS = ("*.yaml", "*.yml")
 
 
@@ -219,6 +240,10 @@ def run_many_plans(
     plan_specs, normalized_plans = load_normalized_multi_plans(
         plans_dir, selected_filenames=selected_filenames or None
     )
+    normalized_plans = {
+        plan_id: _apply_provider_override_to_plan(plan, provider_override)
+        for plan_id, plan in normalized_plans.items()
+    }
     preflight_report = preflight_multi_run(
         plans_dir=plans_dir,
         run_id=run_id,
@@ -351,13 +376,27 @@ def run_many_plans(
                 verify_result = "passed" if step_result["verify"]["exit_code"] == 0 else "failed"
                 break
         mapped_status = "passed" if final_status == "success" else "blocked" if final_status == "stopped" else "failed"
+        last_failure_reason = next(
+            (
+                step_result.get("failure_reason")
+                for step_result in reversed(run_data_result["steps"])
+                if step_result.get("failure_reason")
+            ),
+            None,
+        )
         update_plan_state(
             spec.plan_id,
             status=mapped_status,
             current_step=run_data_result["steps"][-1]["id"] if run_data_result["steps"] else None,
             log_path=run_data_result["log_path"],
             verify_result=verify_result,
-            failure_reason=None if mapped_status == "passed" else "run_stopped" if mapped_status == "blocked" else "run_failed",
+            failure_reason=(
+                None
+                if mapped_status == "passed"
+                else "run_stopped"
+                if mapped_status == "blocked"
+                else last_failure_reason or "run_failed"
+            ),
         )
         return spec.plan_id, 0 if mapped_status == "passed" else 1
 

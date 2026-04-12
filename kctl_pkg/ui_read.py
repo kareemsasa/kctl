@@ -155,6 +155,7 @@ class AttentionItem:
     plan_file_path: str | None
     current_step_key: str | None
     failure_reason: str | None
+    reset_hint: str | None
     verify_status: str
     workspace_path: str | None
     started_at: str
@@ -569,6 +570,35 @@ def classify_operator_action(
     return "safe_rerun"
 
 
+def _extract_reset_hint_from_log(
+    log_path: str | None,
+    failure_reason: str | None,
+) -> str | None:
+    if failure_reason not in {"agent_quota_exhausted", "agent_rate_limited"}:
+        return None
+    if not log_path:
+        return None
+    try:
+        run_data = json.loads(Path(log_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    steps = run_data.get("steps")
+    if not isinstance(steps, list):
+        return None
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            continue
+        if step.get("failure_reason") not in {"agent_quota_exhausted", "agent_rate_limited"}:
+            continue
+        details = step.get("failure_details")
+        if not isinstance(details, dict):
+            continue
+        hint = details.get("reset_hint")
+        if isinstance(hint, str) and hint.strip():
+            return hint.strip()
+    return None
+
+
 def list_attention_items(repo_id: str | Path, db_path: Path | None = None) -> list[AttentionItem]:
     plan_executions = list_repository_plan_executions(repo_id, db_path=db_path)
     now_utc = datetime.now(timezone.utc)
@@ -592,6 +622,10 @@ def list_attention_items(repo_id: str | Path, db_path: Path | None = None) -> li
             started_at=plan.started_at,
             now_utc=now_utc,
         )
+        reset_hint = _extract_reset_hint_from_log(
+            plan.log_path,
+            plan.failure_reason,
+        )
         items.append(
             AttentionItem(
                 kind=kind,
@@ -603,6 +637,7 @@ def list_attention_items(repo_id: str | Path, db_path: Path | None = None) -> li
                 plan_file_path=plan.plan_file_path,
                 current_step_key=plan.current_step_key,
                 failure_reason=plan.failure_reason,
+                reset_hint=reset_hint,
                 verify_status=plan.verify_status,
                 workspace_path=plan.worktree_path,
                 started_at=plan.started_at,

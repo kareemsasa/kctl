@@ -237,6 +237,7 @@ def summarize_preflight_for_dashboard(
     target_repo_value: str,
     plans_dir_value: str,
     selected_plan_names: list[str] | None = None,
+    provider_override: str | None = None,
 ) -> dict[str, object]:
     repo_status, repo_message = check_repo_path(target_repo_value)
     plans_status, plans_message, plans = list_plans_in_directory(plans_dir_value)
@@ -265,6 +266,19 @@ def summarize_preflight_for_dashboard(
             plans_dir,
             selected_filenames=selected_filenames or None,
         )
+        if provider_override:
+            for plan_id, plan in list(normalized_plans.items()):
+                defaults = dict(plan.get("defaults") or {})
+                defaults["provider"] = provider_override
+                if provider_override == "codex":
+                    defaults.pop("permission_mode", None)
+                elif "permission_mode" not in defaults:
+                    defaults["permission_mode"] = "auto"
+                normalized_plan = dict(plan)
+                normalized_plan["defaults"] = defaults
+                normalized_plan["_kctl_provider"] = provider_override
+                normalized_plan["_kctl_permission_mode"] = defaults.get("permission_mode") or "auto"
+                normalized_plans[plan_id] = normalized_plan
         report = preflight_multi_run(
             plans_dir=plans_dir,
             run_id=build_multi_run_id(),
@@ -348,6 +362,16 @@ def _operator_action_label(action: str) -> str:
     }.get(action, action)
 
 
+def _failure_reason_label(reason: str | None) -> str | None:
+    if reason == "agent_quota_exhausted":
+        return "Blocked by agent quota"
+    if reason == "agent_rate_limited":
+        return "Blocked by agent rate limit"
+    if reason == "agent_failed":
+        return "Agent failed"
+    return reason
+
+
 def _render_attention_card(item: AttentionItem, providers: list[tuple[str, str]] | None = None) -> str:
     link_href = _link({}, run_id=item.run_id, plan_execution_id=item.plan_execution_id)
     action_label = _operator_action_label(item.operator_action)
@@ -358,7 +382,9 @@ def _render_attention_card(item: AttentionItem, providers: list[tuple[str, str]]
         f"<div>step={_escape(item.current_step_key)} verify={_escape(item.verify_status)}</div>",
     ]
     if item.failure_reason:
-        parts.append(f"<div>reason={_escape(item.failure_reason)}</div>")
+        parts.append(f"<div>reason={_escape(_failure_reason_label(item.failure_reason))}</div>")
+    if item.reset_hint:
+        parts.append(f"<div>Retry after: {_escape(item.reset_hint)}</div>")
     parts.append("</a>")
     if item.operator_action == "safe_rerun" and item.plan_file_path:
         provider_html = _provider_select_html("provider_override", providers) if providers else ""
@@ -524,6 +550,7 @@ class DashboardApp:
             str(self.repo_path),
             str(self.default_plans_dir),
             selected_plan_names=None,
+            provider_override=None,
         )
         selected_run_preflight: dict[str, object] | None = None
         live_output: str | None = None
@@ -1326,6 +1353,8 @@ class DashboardApp:
     function wirePlansPreview(targetRepoInputId, plansDirInputId, statusId, previewId, preflightMessageId, preflightContainerId) {{
       const targetRepoInput = document.getElementById(targetRepoInputId);
       const plansDirInput = document.getElementById(plansDirInputId);
+      const runManyForm = plansDirInput ? plansDirInput.closest('form') : null;
+      const providerOverrideInput = runManyForm ? runManyForm.querySelector('select[name="provider_override"]') : null;
       const status = document.getElementById(statusId);
       const preview = document.getElementById(previewId);
       if (!targetRepoInput || !plansDirInput || !status || !preview) return;
@@ -1343,6 +1372,9 @@ class DashboardApp:
           target_repo: targetRepoInput.value.trim(),
           plans_dir: resolvedPlansDir(),
         }});
+        if (providerOverrideInput && providerOverrideInput.value.trim()) {{
+          params.set('provider_override', providerOverrideInput.value.trim());
+        }}
         selectedPlans.forEach((plan) => params.append('selected_plans', plan));
         const response = await fetch(`/api/preflight?${{params.toString()}}`);
         const data = await response.json();
@@ -1373,6 +1405,9 @@ class DashboardApp:
       }}
       targetRepoInput.addEventListener('input', scheduleRefresh);
       plansDirInput.addEventListener('input', scheduleRefresh);
+      if (providerOverrideInput) {{
+        providerOverrideInput.addEventListener('change', scheduleRefresh);
+      }}
       refreshPreview();
     }}
     window.addEventListener('DOMContentLoaded', () => {{
@@ -1527,6 +1562,7 @@ def serve_dashboard(
                         target_repo_value,
                         plans_dir_value,
                         selected_plan_names=selected_plan_names or None,
+                        provider_override=params.get("provider_override", [""])[0].strip() or None,
                     )
                 ).encode("utf-8")
                 self.send_response(HTTPStatus.OK)

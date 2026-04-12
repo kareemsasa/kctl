@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -294,8 +295,18 @@ class UIReadTests(unittest.TestCase):
             store = UIStateStore(db_path)
             try:
                 store.initialize()
-                plan_def_id = list_plan_executions(repo_path, run_id)[0].plan_definition_id
-                existing_plan_execution_id = list_plan_executions(repo_path, run_id)[0].id
+                plan_execution = list_plan_executions(repo_path, run_id)[0]
+                plan_def_id = plan_execution.plan_definition_id
+                existing_plan_execution_id = plan_execution.id
+                run_log_path = Path(plan_execution.log_path or "")
+                run_log_data = json.loads(run_log_path.read_text())
+                run_log_data["status"] = "failure"
+                run_log_data["steps"][-1]["status"] = "failure"
+                run_log_data["steps"][-1]["failure_reason"] = "agent_quota_exhausted"
+                run_log_data["steps"][-1]["failure_details"] = {
+                    "reset_hint": "3pm (America/Chicago)"
+                }
+                run_log_path.write_text(json.dumps(run_log_data, indent=2) + "\n")
                 # failed plan, clean workspace (path doesn't exist) → safe_rerun
                 store.upsert(
                     "plan_executions",
@@ -310,9 +321,9 @@ class UIReadTests(unittest.TestCase):
                         "ended_at": "2026-03-25T12:05:00+00:00",
                         "worktree_path": None,
                         "branch_name": "kctl/test",
-                        "log_path": None,
+                        "log_path": str(run_log_path),
                         "changed_files_count": 0,
-                        "failure_reason": "run_failed",
+                        "failure_reason": "agent_quota_exhausted",
                     },
                     ["id"],
                 )
@@ -326,6 +337,7 @@ class UIReadTests(unittest.TestCase):
             self.assertEqual(failed_items[0].operator_action, "safe_rerun")
             self.assertIsNotNone(failed_items[0].plan_file_path)
             self.assertIsNotNone(failed_items[0].started_at)
+            self.assertEqual(failed_items[0].reset_hint, "3pm (America/Chicago)")
 
     def test_attention_item_operator_action_is_fix_config_for_preflight_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -452,6 +464,15 @@ class ClassifyOperatorActionTests(unittest.TestCase):
 
     def test_missing_workspace_is_safe_rerun(self) -> None:
         action = classify_operator_action("failed", "run_failed", None, "2026-04-12T05:00:00+00:00")
+        self.assertEqual(action, "safe_rerun")
+
+    def test_quota_failure_is_safe_rerun_when_workspace_clean(self) -> None:
+        action = classify_operator_action(
+            "failed",
+            "agent_quota_exhausted",
+            False,
+            "2026-04-12T05:00:00+00:00",
+        )
         self.assertEqual(action, "safe_rerun")
 
     def test_stale_threshold_boundary(self) -> None:

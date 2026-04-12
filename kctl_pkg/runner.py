@@ -50,6 +50,18 @@ from .types import (
 
 
 FENCED_JSON_PATTERN = re.compile(r"```json\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+QUOTA_PATTERNS = (
+    "hit your limit",
+    "usage limit",
+    "quota exceeded",
+    "quota exhausted",
+)
+RATE_LIMIT_PATTERNS = (
+    "rate limit",
+    "too many requests",
+    "429",
+)
+RESET_HINT_PATTERN = re.compile(r"resets?\s+([^\n\r]+)", re.IGNORECASE)
 
 
 def extract_verify_data(
@@ -438,6 +450,37 @@ def summarize_command_output(result: CommandResult) -> str:
     return "; ".join(chunks)
 
 
+def apply_provider_override(
+    defaults: dict[str, Any],
+    provider_override: str | None,
+) -> dict[str, Any]:
+    if provider_override is None:
+        return defaults
+    if provider_override not in {"codex", "claude"}:
+        raise PlanError("provider override must be one of: codex, claude.")
+    updated = dict(defaults)
+    updated["provider"] = provider_override
+    if provider_override == "codex":
+        updated.pop("permission_mode", None)
+    elif "permission_mode" not in updated:
+        updated["permission_mode"] = "auto"
+    return updated
+
+
+def classify_agent_failure(agent_result: CommandResult) -> tuple[str, dict[str, str] | None]:
+    combined_text = f"{agent_result.stdout}\n{agent_result.stderr}"
+    normalized = combined_text.lower()
+    if any(pattern in normalized for pattern in QUOTA_PATTERNS):
+        reset_match = RESET_HINT_PATTERN.search(combined_text)
+        details = {"reset_hint": reset_match.group(1).strip()} if reset_match else None
+        return "agent_quota_exhausted", details
+    if any(pattern in normalized for pattern in RATE_LIMIT_PATTERNS):
+        reset_match = RESET_HINT_PATTERN.search(combined_text)
+        details = {"reset_hint": reset_match.group(1).strip()} if reset_match else None
+        return "agent_rate_limited", details
+    return "agent_failed", None
+
+
 def build_verify_artifact(
     verify_results: list[CommandResult],
     plan_artifact: dict[str, Any] | None,
@@ -542,6 +585,7 @@ def build_step_result(
     review_info: dict[str, Any] | None,
     mode_info: dict[str, Any] | None,
     verify_info: dict[str, Any] | None,
+    failure_details: dict[str, str] | None = None,
     provider: str = "codex",
     permission_mode: str | None = None,
 ) -> dict[str, Any]:
@@ -558,6 +602,7 @@ def build_step_result(
         "expect_clean_diff": expect_clean_diff,
         "status": status,
         "failure_reason": failure_reason,
+        "failure_details": failure_details,
         "before_git_status": {
             "exit_code": before_status.exit_code,
             "stdout": before_status.stdout,
@@ -942,16 +987,18 @@ def execute_step(
     reviews: list[dict[str, Any]] = []
     status = "success"
     failure_reason: str | None = None
+    failure_details: dict[str, str] | None = None
     structured_artifacts: dict[str, str] = {}
     artifact_parse_error: str | None = None
     next_artifacts: dict[str, dict[str, Any]] = {}
 
     if agent_result.exit_code != 0:
         status = "failure"
-        failure_reason = "agent_failed"
+        failure_reason, failure_details = classify_agent_failure(agent_result)
     if effective_mode == "read-only" and new_changed_files:
         status = "failure"
         failure_reason = "expected_clean_diff"
+        failure_details = None
 
     phase_artifacts, phase_next_artifacts, artifact_parse_error, artifact_failure_reason = maybe_collect_phase_artifact(
         step=step,
@@ -965,6 +1012,7 @@ def execute_step(
     if artifact_failure_reason is not None:
         status = "failure"
         failure_reason = artifact_failure_reason
+        failure_details = None
 
     if verify_commands:
         shell_parts = parse_verify_shell(verify_shell_value)
@@ -981,6 +1029,7 @@ def execute_step(
         if verify_result is not None and verify_result.exit_code != 0:
             status = "failure"
             failure_reason = "verify_failed"
+            failure_details = None
 
     verify_artifacts, verify_next_artifacts = maybe_build_verify_artifact(
         step=step,
@@ -1012,6 +1061,7 @@ def execute_step(
         if review_status is not None:
             status = review_status
             failure_reason = review_failure_reason
+            failure_details = None
 
     step_result = build_step_result(
         step_id=step_id,
@@ -1040,6 +1090,7 @@ def execute_step(
         review_info=review_info,
         mode_info=mode_info,
         verify_info=verify_info,
+        failure_details=failure_details,
         provider=provider,
         permission_mode=permission_mode,
     )
@@ -1080,6 +1131,15 @@ def execute_plan_run(
         plan["repo"] = repo_override
     validate_plan(plan)
     plan = normalize_plan(plan)
+    effective_defaults = apply_provider_override(
+        dict(plan.get("defaults") or {}),
+        provider_override,
+    )
+    plan = dict(plan)
+    plan["defaults"] = effective_defaults
+    plan["_kctl_provider"], plan["_kctl_permission_mode"] = resolve_provider_config(
+        effective_defaults
+    )
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     preflight_report = preflight_single_run(
         plan_path,
@@ -1140,12 +1200,6 @@ def execute_plan_run(
     if commit and branch_after in {"main", "master"}:
         raise PlanError("--commit is not allowed on main or master.")
     defaults = dict(plan.get("defaults") or {})
-    if provider_override is not None:
-        defaults["provider"] = provider_override
-        if provider_override == "codex":
-            defaults.pop("permission_mode", None)
-        elif "permission_mode" not in defaults:
-            defaults["permission_mode"] = "auto"
     stop_on_failure = bool(defaults.get("stop_on_failure", False))
     prior_summaries: list[str] = []
     prior_artifacts: dict[str, dict[str, Any]] = {}
@@ -1211,7 +1265,11 @@ def execute_plan_run(
             "artifact_parse_failed",
             "expected_clean_diff",
             "review_blocked",
-        } or (stop_on_failure and failure_reason in {"verify_failed", "agent_failed"})
+        } or (
+            stop_on_failure
+            and failure_reason
+            in {"verify_failed", "agent_failed", "agent_quota_exhausted", "agent_rate_limited"}
+        )
         if step_result["status"] == "paused":
             if prompt_to_continue_after_review(
                 step_result["id"], step_result["reviews"], interactive

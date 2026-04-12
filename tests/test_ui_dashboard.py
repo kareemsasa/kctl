@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from kctl_pkg.ui_dashboard import (
@@ -61,6 +62,50 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("binaries", summary["items"])
             self.assertIn("writable_paths", summary["items"])
             self.assertIn("required_env", summary["items"])
+
+    def test_summarize_preflight_for_dashboard_honors_provider_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plans_dir = repo_path / ".kctl" / "plans"
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / "001-first.yaml").write_text("placeholder\n")
+            plan_specs = [SimpleNamespace(filename="001-first.yaml")]
+            normalized_plan = {
+                "defaults": {"provider": "codex"},
+                "steps": [{"id": "implement", "_kctl_step_type": {"effective_type": "change"}}],
+            }
+
+            class FakeIssue:
+                code = ""
+                message = ""
+                fix = ""
+
+            class FakeReport:
+                ok = True
+                repo_root = repo_path
+                run_root = repo_path / ".kctl" / "runs" / "r1"
+                worktree_root = repo_path / ".kctl" / "worktrees" / "r1"
+                required_binaries = ["claude", "git"]
+                required_env: list[str] = []
+                issues = [FakeIssue()]
+
+            with patch(
+                "kctl_pkg.ui_dashboard.load_normalized_multi_plans",
+                return_value=(plan_specs, {"001-first": normalized_plan}),
+            ), patch(
+                "kctl_pkg.ui_dashboard.preflight_multi_run",
+                return_value=FakeReport(),
+            ):
+                summary = summarize_preflight_for_dashboard(
+                    str(repo_path),
+                    str(plans_dir),
+                    provider_override="claude",
+                )
+
+            binaries_details = summary["items"]["binaries"]["details"] or ""
+            self.assertIn("claude", binaries_details)
+            self.assertNotIn("codex", binaries_details)
 
     def test_build_dashboard_access_urls_prefers_announce_url(self) -> None:
         urls = build_dashboard_access_urls(
@@ -282,8 +327,19 @@ class UIDashboardTests(unittest.TestCase):
                 verbose: bool,
                 selected_plan_names: list[str] | None = None,
                 run_id_override: str | None = None,
+                provider_override: str | None = None,
             ) -> int:
-                calls.append(("run_many", plans_dir_arg.resolve(), concurrency, verbose, selected_plan_names, run_id_override))
+                calls.append(
+                    (
+                        "run_many",
+                        plans_dir_arg.resolve(),
+                        concurrency,
+                        verbose,
+                        selected_plan_names,
+                        run_id_override,
+                        provider_override,
+                    )
+                )
                 return 0
 
             def fake_index(repo_path_arg: Path, db_path: Path | None = None) -> dict[str, int]:
@@ -306,7 +362,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertEqual(
                 calls,
                 [
-                    ("run_many", app.plans_dir_for_repo(target_repo).resolve(), 2, False, ["001-one.yaml"], run_id),
+                    ("run_many", app.plans_dir_for_repo(target_repo).resolve(), 2, False, ["001-one.yaml"], run_id, None),
                     ("index", repo_path.resolve(), None),
                 ],
             )
@@ -410,6 +466,15 @@ class UIDashboardTests(unittest.TestCase):
             from kctl_pkg.ui_store import UIStateStore
             db_path = default_db_path(repo_path)
             plan_exec = _list_plan_executions(repo_path, run_id)[0]
+            run_log_path = Path(plan_exec.log_path or "")
+            run_log_data = json.loads(run_log_path.read_text())
+            run_log_data["status"] = "failure"
+            run_log_data["steps"][-1]["status"] = "failure"
+            run_log_data["steps"][-1]["failure_reason"] = "agent_quota_exhausted"
+            run_log_data["steps"][-1]["failure_details"] = {
+                "reset_hint": "3pm (America/Chicago)"
+            }
+            run_log_path.write_text(json.dumps(run_log_data, indent=2) + "\n")
             store = UIStateStore(db_path)
             try:
                 store.initialize()
@@ -427,9 +492,9 @@ class UIDashboardTests(unittest.TestCase):
                         "ended_at": "2026-03-25T12:05:00+00:00",
                         "worktree_path": None,
                         "branch_name": None,
-                        "log_path": None,
+                        "log_path": str(run_log_path),
                         "changed_files_count": 0,
-                        "failure_reason": "run_failed",
+                        "failure_reason": "agent_quota_exhausted",
                     },
                     ["id"],
                 )
@@ -444,6 +509,8 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("/actions/rerun-plan", html)
             self.assertIn("Rerun", html)
             self.assertNotIn("Fix Config", html)
+            self.assertIn("Blocked by agent quota", html)
+            self.assertIn("Retry after: 3pm (America/Chicago)", html)
 
     def test_attention_queue_shows_fix_config_label_for_preflight_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
