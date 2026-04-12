@@ -11,6 +11,8 @@ from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .multi import run_many_plans
+from .plan import build_plan_from_template, load_plan_templates
+from .paths import project_root
 from .ui_index import index_repository_state
 
 from .types import PlanError
@@ -66,6 +68,7 @@ class DashboardState:
     repo_name: str
     repo_root: str
     action_message: str | None
+    plan_templates: list[tuple[str, str | None]]
     overview: RepositoryOverview
     attention_items: list[AttentionItem]
     workspaces: list[WorkspaceSummary]
@@ -118,6 +121,11 @@ class DashboardApp:
         attention_items = list_attention_items(self.repo_path, db_path=self.db_path)
         workspaces = list_workspaces(self.repo_path, db_path=self.db_path)
         runs = list_runs(self.repo_path, db_path=self.db_path)
+        templates = load_plan_templates(project_root())
+        plan_templates = [
+            (template_name, template.get("description") if isinstance(template, dict) else None)
+            for template_name, template in templates.items()
+        ]
         selected_run: RunDetail | None = None
         plan_cards: list[PlanExecutionCard] = []
         selected_plan: PlanExecutionCard | None = None
@@ -141,6 +149,7 @@ class DashboardApp:
             repo_name=repository.name,
             repo_root=repository.root_path,
             action_message=action_message,
+            plan_templates=plan_templates,
             overview=overview,
             attention_items=attention_items,
             workspaces=workspaces,
@@ -154,6 +163,28 @@ class DashboardApp:
 
     def run_index_now(self) -> None:
         index_repository_state(self.repo_path, db_path=self.db_path)
+
+    def create_plan(
+        self,
+        *,
+        template_name: str,
+        output_path: Path,
+        objective: str,
+        force: bool,
+    ) -> Path:
+        if output_path.exists() and not force:
+            raise PlanError(f"Plan file already exists: {output_path}")
+        templates = load_plan_templates(project_root())
+        plan = build_plan_from_template(
+            templates=templates,
+            template_name=template_name,
+            repo=str(self.repo_path),
+            objective=objective,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        yaml = __import__("yaml")
+        output_path.write_text(yaml.safe_dump(plan, sort_keys=False))
+        return output_path
 
     def start_run_many(self, plans_dir: Path, concurrency: int) -> None:
         def _run() -> None:
@@ -227,6 +258,24 @@ class DashboardApp:
                 "<label for='concurrency'><strong>Concurrency</strong></label>"
                 "<input id='concurrency' name='concurrency' type='number' min='1' value='1'>"
                 "<button type='submit'>Run Plans</button>"
+                "</form>"
+                "<form method='post' action='/actions/create-plan'>"
+                f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
+                "<label for='template_name'><strong>Template</strong></label>"
+                "<select id='template_name' name='template_name'>"
+                + "".join(
+                    f"<option value='{_escape(name)}'>{_escape(name)}"
+                    + (f" - {_escape(description)}" if description else "")
+                    + "</option>"
+                    for name, description in state.plan_templates
+                )
+                + "</select>"
+                "<label for='output_path'><strong>Plan File</strong></label>"
+                "<input id='output_path' name='output_path' type='text' placeholder='/path/to/plan.yaml' required>"
+                "<label for='objective'><strong>Objective</strong></label>"
+                "<input id='objective' name='objective' type='text' placeholder='Describe the change' required>"
+                "<label class='checkbox'><input name='force' type='checkbox' value='1'> Overwrite if the file exists</label>"
+                "<button type='submit'>Create Plan</button>"
                 "</form>"
             )
             + "</section>"
@@ -356,8 +405,17 @@ class DashboardApp:
       font: inherit;
       padding: 8px 10px;
     }}
+    select {{
+      font: inherit;
+      padding: 8px 10px;
+    }}
     button {{
       cursor: pointer;
+    }}
+    .checkbox {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }}
     .notice {{
       margin-bottom: 12px;
@@ -514,7 +572,7 @@ def serve_dashboard(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/actions/index", "/actions/run-many"}:
+            if parsed.path not in {"/actions/index", "/actions/run-many", "/actions/create-plan"}:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -525,6 +583,23 @@ def serve_dashboard(
                 if parsed.path == "/actions/index":
                     app.run_index_now()
                     message = "Index refreshed."
+                elif parsed.path == "/actions/create-plan":
+                    template_name = form_data.get("template_name", [""])[0].strip()
+                    output_path_value = form_data.get("output_path", [""])[0].strip()
+                    objective = form_data.get("objective", [""])[0].strip()
+                    if not template_name:
+                        raise PlanError("Template name is required.")
+                    if not output_path_value:
+                        raise PlanError("Plan file path is required.")
+                    if not objective:
+                        raise PlanError("Objective is required.")
+                    created_path = app.create_plan(
+                        template_name=template_name,
+                        output_path=Path(output_path_value).expanduser(),
+                        objective=objective,
+                        force=form_data.get("force", [""])[0] == "1",
+                    )
+                    message = f"Created plan at {created_path}."
                 else:
                     plans_dir_value = form_data.get("plans_dir", [""])[0].strip()
                     if not plans_dir_value:

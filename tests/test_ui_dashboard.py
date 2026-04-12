@@ -62,6 +62,8 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("lifecycle=released", html)
             self.assertIn("Run Plans", html)
             self.assertIn("Refresh Index", html)
+            self.assertIn("Create Plan", html)
+            self.assertIn("template_name", html)
 
     def test_dashboard_attention_queue_surfaces_blocked_and_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -232,6 +234,26 @@ class UIDashboardTests(unittest.TestCase):
                     ("index", repo_path.resolve(), None),
                 ],
             )
+
+    def test_create_plan_writes_template_based_plan_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+            output_path = Path(tmpdir) / "plans" / "001-sample.yaml"
+
+            created_path = app.create_plan(
+                template_name="single_step",
+                output_path=output_path,
+                objective="Add a small UI improvement",
+                force=False,
+            )
+
+            self.assertEqual(created_path, output_path)
+            contents = output_path.read_text()
+            self.assertIn("objective: Add a small UI improvement", contents)
+            self.assertIn(f"repo: {repo_path}", contents)
+            self.assertIn("id: implement", contents)
 
 
 if __name__ == "__main__":
