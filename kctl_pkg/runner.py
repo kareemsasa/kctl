@@ -23,7 +23,7 @@ from .git import (
 )
 from .output import ConsoleOutputSink, OutputSink
 from .plan import build_codex_prompt, get_step_kind, load_plan, normalize_plan, validate_plan
-from .preflight import preflight_single_run
+from .preflight import freeze_preflight_report, preflight_single_run
 from .process import run_command, run_streaming_command
 from .review import run_step_reviews, should_print_diff_stat
 from .summary import write_single_run_summary
@@ -1049,13 +1049,19 @@ def execute_plan_run(
         run_id,
         run_output_dir_override=run_output_dir_override,
     )
+    preflight_captured_at = datetime.now(timezone.utc).isoformat()
+    preflight_snapshot = freeze_preflight_report(
+        preflight_report,
+        captured_at=preflight_captured_at,
+        source="launch",
+    )
     if not preflight_report.ok:
         if preflight_report.run_root is not None:
             try:
                 preflight_report.run_root.mkdir(parents=True, exist_ok=True)
                 blocked_run_data = {
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                    "ended_at": datetime.now(timezone.utc).isoformat(),
+                    "started_at": preflight_captured_at,
+                    "ended_at": preflight_captured_at,
                     "plan_path": str(plan_path.resolve()),
                     "repo": str(preflight_report.repo_root)
                     if preflight_report.repo_root is not None
@@ -1072,7 +1078,7 @@ def execute_plan_run(
                     "artifact_storage_mode": preflight_report.environment["storage_mode"],
                     "artifact_root_path": str(preflight_report.run_root.parent),
                     "run_output_dir": str(preflight_report.run_root),
-                    "preflight": preflight_report.to_dict(),
+                    "preflight": preflight_snapshot,
                     "steps": [],
                 }
                 log_path = save_run_log(blocked_run_data, preflight_report.run_root)
@@ -1204,7 +1210,7 @@ def execute_plan_run(
         "artifact_storage_mode": artifact_storage_mode,
         "artifact_root_path": str(run_output_dir.parent),
         "run_output_dir": str(run_output_dir),
-        "preflight": preflight_report.to_dict(),
+        "preflight": preflight_snapshot,
         "steps": step_results,
     }
     log_path = save_run_log(run_data, run_output_dir)

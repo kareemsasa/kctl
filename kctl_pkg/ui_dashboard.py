@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from .multi import build_multi_run_id, resolve_multi_run_log, run_many_plans
+from .multi import build_multi_run_id, load_normalized_multi_plans, resolve_multi_run_log, run_many_plans
 from .plan import build_plan_from_template, load_plan_templates
 from .paths import project_root
+from .preflight import preflight_multi_run
 from .ui_index import index_repository_state
 
 from .types import PlanError
@@ -93,6 +94,224 @@ def list_plans_in_directory(path_value: str) -> tuple[str, str, list[str]]:
     return "ok", f"Found {len(plan_paths)} plan file(s) in {candidate.resolve()}", plan_paths
 
 
+def _preflight_item(
+    status: str,
+    summary: str,
+    details: str | None = None,
+    remediation: str | None = None,
+    action_label: str | None = None,
+    action_value: str | None = None,
+) -> dict[str, str | None]:
+    return {
+        "status": status,
+        "summary": summary,
+        "details": details,
+        "remediation": remediation,
+        "action_label": action_label,
+        "action_value": action_value,
+    }
+
+
+def _preflight_status_tone(status: str) -> str:
+    if status in {"ok", "pass"}:
+        return "pass"
+    if status in {"blocked", "error", "missing", "not_dir", "empty"}:
+        return "block"
+    return "warn"
+
+
+def _render_preflight_item_html(label: str, item: dict[str, object]) -> str:
+    tone = _preflight_status_tone(str(item.get("status") or "warn"))
+    badge = tone.upper()
+    details = item.get("details")
+    remediation = item.get("remediation")
+    action_label = item.get("action_label")
+    action_value = item.get("action_value")
+    return (
+        f"<div class='preflight-item {_status_class(tone)}'>"
+        f"<div><strong>{_escape(label)}</strong> <span class='preflight-badge preflight-badge-{_escape(tone)}'>{_escape(badge)}</span></div>"
+        f"<div>{_escape(item.get('summary'))}</div>"
+        + (f"<div class='help'>{_escape(details)}</div>" if details else "")
+        + (f"<div class='help'><strong>Fix:</strong> {_escape(remediation)}</div>" if remediation else "")
+        + (
+            f"<button type='button' class='mini-button' data-copy='{_escape(action_value)}'>{_escape(action_label)}</button>"
+            if action_label and action_value
+            else ""
+        )
+        + "</div>"
+    )
+
+
+def _preflight_run_snapshot(run_data: dict[str, object] | None) -> dict[str, object] | None:
+    if not run_data:
+        return None
+    preflight = run_data.get("preflight")
+    if not isinstance(preflight, dict):
+        return None
+    issues = preflight.get("issues") or []
+    by_code: dict[str, list[dict[str, object]]] = {}
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        by_code.setdefault(str(issue.get("code") or "unknown"), []).append(issue)
+    required_binaries = [str(item) for item in preflight.get("required_binaries") or []]
+    required_env = [str(item) for item in preflight.get("required_env") or []]
+    run_root = preflight.get("run_root")
+    worktree_root = preflight.get("worktree_root")
+    return {
+        "status": "block" if issues else "pass",
+        "message": "Launch preflight snapshot recorded with blockers." if issues else "Launch preflight snapshot recorded as clear.",
+        "captured_at": str(preflight.get("captured_at") or run_data.get("started_at") or ""),
+        "items": {
+            "repo": _preflight_item(
+                "block" if by_code.get("missing_repo") or by_code.get("invalid_repo") else "pass",
+                str((by_code.get("missing_repo") or by_code.get("invalid_repo") or [{"message": preflight.get("repo_root") or "Repo root recorded."}])[0].get("message") or ""),
+                remediation=str((by_code.get("missing_repo") or by_code.get("invalid_repo") or [{}])[0].get("fix") or "") or None,
+            ),
+            "plans_dir": _preflight_item(
+                "block" if by_code.get("missing_plans_dir") or by_code.get("invalid_plans_dir") else "pass",
+                str((by_code.get("missing_plans_dir") or by_code.get("invalid_plans_dir") or [{"message": "Plans directory resolved at launch."}])[0].get("message") or ""),
+                remediation=str((by_code.get("missing_plans_dir") or by_code.get("invalid_plans_dir") or [{}])[0].get("fix") or "") or None,
+            ),
+            "binaries": _preflight_item(
+                "block" if by_code.get("missing_binary") or by_code.get("missing_path") else "pass",
+                "Required binaries available at launch."
+                if not (by_code.get("missing_binary") or by_code.get("missing_path"))
+                else str((by_code.get("missing_binary") or by_code.get("missing_path") or [{}])[0].get("message") or ""),
+                details=", ".join(required_binaries) if required_binaries else "No external binaries required.",
+                remediation=str((by_code.get("missing_binary") or by_code.get("missing_path") or [{}])[0].get("fix") or "") or None,
+                action_label="Copy binary",
+                action_value=required_binaries[0] if required_binaries else None,
+            ),
+            "writable_paths": _preflight_item(
+                "block" if by_code.get("run_dir_unwritable") or by_code.get("workspace_dir_unwritable") else "pass",
+                "Run and workspace paths were writable at launch."
+                if not (by_code.get("run_dir_unwritable") or by_code.get("workspace_dir_unwritable"))
+                else str((by_code.get("run_dir_unwritable") or by_code.get("workspace_dir_unwritable") or [{}])[0].get("message") or ""),
+                details="; ".join(value for value in [str(run_root or ""), str(worktree_root or "")] if value),
+                remediation=str((by_code.get("run_dir_unwritable") or by_code.get("workspace_dir_unwritable") or [{}])[0].get("fix") or "") or None,
+                action_label="Copy path",
+                action_value=str(run_root or worktree_root or "") or None,
+            ),
+            "required_env": _preflight_item(
+                "block" if by_code.get("missing_env") else "pass",
+                "Required environment variables were present at launch."
+                if not by_code.get("missing_env")
+                else str((by_code.get("missing_env") or [{}])[0].get("message") or ""),
+                details=", ".join(required_env) if required_env else "No required environment variables declared.",
+                remediation=str((by_code.get("missing_env") or [{}])[0].get("fix") or "") or None,
+                action_label="Copy env",
+                action_value=required_env[0] if required_env else None,
+            ),
+        },
+    }
+
+
+def summarize_preflight_for_dashboard(
+    target_repo_value: str,
+    plans_dir_value: str,
+    selected_plan_names: list[str] | None = None,
+) -> dict[str, object]:
+    repo_status, repo_message = check_repo_path(target_repo_value)
+    plans_status, plans_message, plans = list_plans_in_directory(plans_dir_value)
+    summary: dict[str, object] = {
+        "status": "warn",
+        "decision": "Runnable with warnings",
+        "message": "Preflight is waiting for valid repo and plans inputs.",
+        "items": {
+            "repo": _preflight_item(repo_status, repo_message),
+            "plans_dir": _preflight_item(plans_status, plans_message),
+            "binaries": _preflight_item("warn", "Waiting for plans to resolve required binaries."),
+            "writable_paths": _preflight_item("warn", "Waiting for plans to resolve run/workspace paths."),
+            "required_env": _preflight_item("warn", "Waiting for plans to resolve required environment variables."),
+        },
+    }
+    if repo_status != "ok" or plans_status != "ok":
+        summary["status"] = "block"
+        summary["decision"] = "Blocked"
+        summary["message"] = "Preflight is blocked until repo and plans inputs resolve."
+        return summary
+
+    plans_dir = Path(plans_dir_value).expanduser().resolve()
+    selected_filenames = {name.strip() for name in (selected_plan_names or []) if name.strip()}
+    try:
+        plan_specs, normalized_plans = load_normalized_multi_plans(
+            plans_dir,
+            selected_filenames=selected_filenames or None,
+        )
+        report = preflight_multi_run(
+            plans_dir=plans_dir,
+            run_id=build_multi_run_id(),
+            plan_specs=plan_specs,
+            normalized_plans=normalized_plans,
+        )
+    except PlanError as exc:
+        return {
+            "status": "block",
+            "decision": "Blocked",
+            "message": str(exc),
+            "items": {
+                "repo": _preflight_item(repo_status, repo_message),
+                "plans_dir": _preflight_item("block", str(exc), remediation="Fix the plans directory contents so kctl can load the selected plans."),
+                "binaries": _preflight_item("warn", "Could not resolve plan requirements."),
+                "writable_paths": _preflight_item("warn", "Could not resolve plan paths."),
+                "required_env": _preflight_item("warn", "Could not resolve required environment variables."),
+            },
+        }
+
+    binary_issues = [issue.message for issue in report.issues if issue.code in {"missing_binary", "missing_path"}]
+    binary_fix = next((issue.fix for issue in report.issues if issue.code in {"missing_binary", "missing_path"}), None)
+    writable_issues = [issue.message for issue in report.issues if issue.code in {"run_dir_unwritable", "workspace_dir_unwritable"}]
+    writable_fix = next((issue.fix for issue in report.issues if issue.code in {"run_dir_unwritable", "workspace_dir_unwritable"}), None)
+    env_issues = [issue.message for issue in report.issues if issue.code == "missing_env"]
+    env_fix = next((issue.fix for issue in report.issues if issue.code == "missing_env"), None)
+    return {
+        "status": "pass" if report.ok else "block",
+        "message": "Preflight clear. Launch can proceed." if report.ok else f"Preflight blocked by {len(report.issues)} issue(s).",
+        "decision": "Ready to run" if report.ok else "Blocked",
+        "items": {
+            "repo": _preflight_item(
+                "pass" if report.repo_root is not None else "block",
+                f"Repo root: {report.repo_root}" if report.repo_root is not None else repo_message,
+                remediation="Point the form at a valid git repository root." if report.repo_root is None else None,
+            ),
+            "plans_dir": _preflight_item(
+                "pass",
+                f"{len(plan_specs)} plan(s) selected from {plans_dir}",
+                ", ".join(spec.filename for spec in plan_specs),
+            ),
+            "binaries": _preflight_item(
+                "pass" if not binary_issues else "block",
+                "Required binaries available." if not binary_issues else binary_issues[0],
+                ", ".join(report.required_binaries) if report.required_binaries else "No external binaries required.",
+                remediation=binary_fix,
+                action_label="Copy binary" if report.required_binaries else None,
+                action_value=report.required_binaries[0] if report.required_binaries else None,
+            ),
+            "writable_paths": _preflight_item(
+                "pass" if not writable_issues else "block",
+                "Run and workspace paths writable." if not writable_issues else writable_issues[0],
+                "; ".join(
+                    value
+                    for value in [str(report.run_root) if report.run_root else None, str(report.worktree_root) if report.worktree_root else None]
+                    if value
+                ),
+                remediation=writable_fix,
+                action_label="Copy path" if report.run_root or report.worktree_root else None,
+                action_value=str(report.run_root or report.worktree_root) if report.run_root or report.worktree_root else None,
+            ),
+            "required_env": _preflight_item(
+                "pass" if not env_issues else "block",
+                "Required environment present." if not env_issues else env_issues[0],
+                ", ".join(report.required_env) if report.required_env else "No required environment variables declared.",
+                remediation=env_fix,
+                action_label="Copy env" if report.required_env else None,
+                action_value=report.required_env[0] if report.required_env else None,
+            ),
+        },
+    }
+
+
 def read_plan_file(plan_path: Path) -> tuple[str, str]:
     if not plan_path.exists():
         raise PlanError(f"Plan file does not exist: {plan_path}")
@@ -117,6 +336,8 @@ class DashboardState:
     selected_plan_file_name: str | None
     selected_plan_file_path: str | None
     selected_plan_file_contents: str | None
+    launch_preflight: dict[str, object]
+    selected_run_preflight: dict[str, object] | None
     live_output: str | None
     live_output_status: str | None
     live_output_path: str | None
@@ -171,6 +392,17 @@ class DashboardApp:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def load_saved_run_data(self, run_root_path: str | None) -> dict[str, object] | None:
+        if not run_root_path:
+            return None
+        run_log = Path(run_root_path) / "run.json"
+        if not run_log.exists():
+            return None
+        try:
+            return json.loads(run_log.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
     def read_live_output(self, run_data: dict[str, object] | None) -> tuple[str | None, str | None, str | None]:
         if not run_data:
             return None, None, None
@@ -213,6 +445,12 @@ class DashboardApp:
         selected_plan_file_name: str | None = None
         selected_plan_file_path: str | None = None
         selected_plan_file_contents: str | None = None
+        launch_preflight = summarize_preflight_for_dashboard(
+            str(self.repo_path),
+            str(self.default_plans_dir),
+            selected_plan_names=None,
+        )
+        selected_run_preflight: dict[str, object] | None = None
         live_output: str | None = None
         live_output_status: str | None = None
         live_output_path: str | None = None
@@ -236,6 +474,9 @@ class DashboardApp:
             if live_run_data is not None and str(live_run_data.get("status") or "") == "running":
                 selected_run = self._build_run_detail_from_live_data(live_run_data)
                 plan_cards = self._build_plan_cards_from_live_data(live_run_data)
+            selected_run_preflight = _preflight_run_snapshot(
+                live_run_data or (self.load_saved_run_data(selected_run.run_root_path) if selected_run is not None else None)
+            )
 
         if plan_execution_id is None and plan_cards:
             plan_execution_id = plan_cards[0].id
@@ -268,6 +509,8 @@ class DashboardApp:
             selected_plan_file_name=selected_plan_file_name,
             selected_plan_file_path=selected_plan_file_path,
             selected_plan_file_contents=selected_plan_file_contents,
+            launch_preflight=launch_preflight,
+            selected_run_preflight=selected_run_preflight,
             live_output=live_output,
             live_output_status=live_output_status,
             live_output_path=live_output_path,
@@ -392,6 +635,38 @@ class DashboardApp:
         if state.selected_plan is not None:
             base_params["plan_execution_id"] = state.selected_plan.id
         default_plans_status, default_plans_message, default_plan_files = list_plans_in_directory(str(self.default_plans_dir))
+        preflight_items = state.launch_preflight.get("items", {})
+        preflight_html = "".join(
+            _render_preflight_item_html(label, item)
+            for label, item in (
+                ("Repo", preflight_items.get("repo") or {}),
+                ("Plans Dir", preflight_items.get("plans_dir") or {}),
+                ("Binaries", preflight_items.get("binaries") or {}),
+                ("Writable Paths", preflight_items.get("writable_paths") or {}),
+                ("Required Env", preflight_items.get("required_env") or {}),
+            )
+        )
+        run_preflight_html = ""
+        if state.selected_run_preflight is not None:
+            run_preflight_items = state.selected_run_preflight.get("items", {})
+            run_preflight_html = (
+                "<div class='preflight-summary'>"
+                "<div><strong>Launch Snapshot</strong></div>"
+                f"<div class='repo-check' data-status='{_escape(state.selected_run_preflight.get('status'))}'>{_escape(state.selected_run_preflight.get('message'))}</div>"
+                f"<div class='help'>captured_at={_escape(state.selected_run_preflight.get('captured_at'))}</div>"
+                f"<div class='preflight-grid'>"
+                + "".join(
+                    _render_preflight_item_html(label, item)
+                    for label, item in (
+                        ("Repo", run_preflight_items.get("repo") or {}),
+                        ("Plans Dir", run_preflight_items.get("plans_dir") or {}),
+                        ("Binaries", run_preflight_items.get("binaries") or {}),
+                        ("Writable Paths", run_preflight_items.get("writable_paths") or {}),
+                        ("Required Env", run_preflight_items.get("required_env") or {}),
+                    )
+                )
+                + "</div></div>"
+            )
 
         run_items = "".join(
             (
@@ -451,6 +726,12 @@ class DashboardApp:
                 "<input id='plans_dir' name='plans_dir' type='text' placeholder='Optional override'>"
                 "<div id='plans_dir_status' class='repo-check'></div>"
                 "<div id='plans_dir_preview' class='plans-preview'></div>"
+                "<div class='preflight-summary'>"
+                f"<div class='launch-decision launch-decision-{_escape(_preflight_status_tone(str(state.launch_preflight.get('status') or 'warn')))}' id='run_many_launch_decision'>{_escape(state.launch_preflight.get('decision') or 'Runnable with warnings')}</div>"
+                "<div><strong>Launch Preflight</strong></div>"
+                f"<div id='run_many_preflight_message' class='repo-check' data-status='{_escape(state.launch_preflight.get('status'))}'>{_escape(state.launch_preflight.get('message'))}</div>"
+                f"<div id='run_many_preflight' class='preflight-grid'>{preflight_html}</div>"
+                "</div>"
                 "<label for='concurrency'><strong>Concurrency</strong></label>"
                 "<input id='concurrency' name='concurrency' type='number' min='1' value='1'>"
                 "<div class='help'>How many plans can run at the same time. Use 1 for the safest option.</div>"
@@ -543,6 +824,7 @@ class DashboardApp:
                 f"<div>plans={_escape(state.selected_run.plan_execution_count)} passed={_escape(state.selected_run.passed_count)} "
                 f"failed={_escape(state.selected_run.failed_count)} running={_escape(state.selected_run.running_count)} "
                 f"blocked={_escape(state.selected_run.blocked_count)}</div>"
+                f"{run_preflight_html}"
                 "</section>"
             )
 
@@ -704,6 +986,68 @@ class DashboardApp:
       gap: 8px;
       margin: 4px 0;
     }}
+    .preflight-summary {{
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }}
+    .launch-decision {{
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-weight: 700;
+    }}
+    .launch-decision-pass {{
+      background: #dcfce7;
+      color: #166534;
+    }}
+    .launch-decision-warn {{
+      background: #fef3c7;
+      color: #92400e;
+    }}
+    .launch-decision-block {{
+      background: #fee2e2;
+      color: #991b1b;
+    }}
+    .preflight-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+    }}
+    .preflight-item {{
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 10px;
+      background: white;
+    }}
+    .preflight-badge {{
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 0.78em;
+      letter-spacing: 0.04em;
+    }}
+    .preflight-badge-pass {{
+      background: #dcfce7;
+      color: #166534;
+    }}
+    .preflight-badge-warn {{
+      background: #fef3c7;
+      color: #92400e;
+    }}
+    .preflight-badge-block {{
+      background: #fee2e2;
+      color: #991b1b;
+    }}
+    .mini-button {{
+      margin-top: 8px;
+      padding: 6px 8px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: #f8fafc;
+      font-size: 0.85em;
+    }}
     .list-item, .card {{
       display: block;
       text-decoration: none;
@@ -843,7 +1187,67 @@ class DashboardApp:
       input.addEventListener('input', scheduleRefresh);
       refreshStatus();
     }}
-    function wirePlansPreview(targetRepoInputId, plansDirInputId, statusId, previewId) {{
+    function wireCopyButtons(root) {{
+      (root || document).querySelectorAll('[data-copy]').forEach((node) => {{
+        if (node.dataset.bound === '1') return;
+        node.dataset.bound = '1';
+        node.setAttribute('data-label', node.textContent || '');
+        node.addEventListener('click', async () => {{
+          const value = node.getAttribute('data-copy') || '';
+          if (!value) return;
+          try {{
+            await navigator.clipboard.writeText(value);
+            node.textContent = 'Copied';
+            window.setTimeout(() => {{
+              node.textContent = node.getAttribute('data-label') || '';
+            }}, 1200);
+          }} catch (_error) {{
+            node.textContent = 'Copy failed';
+          }}
+        }});
+      }});
+    }}
+    function renderPreflight(preflight, messageId, containerId) {{
+      const message = document.getElementById(messageId);
+      const container = document.getElementById(containerId);
+      const decision = document.getElementById('run_many_launch_decision');
+      if (!message || !container || !preflight) return;
+      message.dataset.status = preflight.status || 'unknown';
+      message.textContent = preflight.message || '';
+      const bannerTone = preflight.status === 'pass' || preflight.status === 'ok'
+        ? 'pass'
+        : (preflight.status === 'block' || preflight.status === 'blocked' || preflight.status === 'error')
+          ? 'block'
+          : 'warn';
+      if (decision) {{
+        decision.className = `launch-decision launch-decision-${{bannerTone}}`;
+        decision.textContent = preflight.decision || (bannerTone === 'pass' ? 'Ready to run' : bannerTone === 'block' ? 'Blocked' : 'Runnable with warnings');
+      }}
+      const labels = [
+        ['repo', 'Repo'],
+        ['plans_dir', 'Plans Dir'],
+        ['binaries', 'Binaries'],
+        ['writable_paths', 'Writable Paths'],
+        ['required_env', 'Required Env'],
+      ];
+      container.innerHTML = labels.map(([key, label]) => {{
+        const item = (preflight.items || {{}})[key] || {{}};
+        const details = item.details ? `<div class="help">${{item.details}}</div>` : '';
+        const remediation = item.remediation ? `<div class="help"><strong>Fix:</strong> ${{item.remediation}}</div>` : '';
+        const action = item.action_label && item.action_value
+          ? `<button type="button" class="mini-button" data-copy="${{item.action_value}}">${{item.action_label}}</button>`
+          : '';
+        const tone = item.status === 'pass' || item.status === 'ok'
+          ? 'pass'
+          : (item.status === 'block' || item.status === 'blocked' || item.status === 'error' || item.status === 'missing' || item.status === 'not_dir' || item.status === 'empty')
+            ? 'block'
+            : 'warn';
+        const statusClass = tone === 'pass' ? 'status-success' : tone === 'block' ? 'status-failure' : 'status-neutral';
+        return `<div class="preflight-item ${{statusClass}}"><div><strong>${{label}}</strong> <span class="preflight-badge preflight-badge-${{tone}}">${{tone.toUpperCase()}}</span></div><div>${{item.summary || ''}}</div>${{details}}${{remediation}}${{action}}</div>`;
+      }}).join('');
+      wireCopyButtons(container);
+    }}
+    function wirePlansPreview(targetRepoInputId, plansDirInputId, statusId, previewId, preflightMessageId, preflightContainerId) {{
       const targetRepoInput = document.getElementById(targetRepoInputId);
       const plansDirInput = document.getElementById(plansDirInputId);
       const status = document.getElementById(statusId);
@@ -857,6 +1261,17 @@ class DashboardApp:
         if (!repoValue) return "";
         return repoValue.replace(/\/+$/, "") + "/.kctl/plans";
       }}
+      async function refreshPreflight() {{
+        const selectedPlans = Array.from(preview.querySelectorAll('input[name="selected_plans"]:checked')).map((node) => node.value);
+        const params = new URLSearchParams({{
+          target_repo: targetRepoInput.value.trim(),
+          plans_dir: resolvedPlansDir(),
+        }});
+        selectedPlans.forEach((plan) => params.append('selected_plans', plan));
+        const response = await fetch(`/api/preflight?${{params.toString()}}`);
+        const data = await response.json();
+        renderPreflight(data, preflightMessageId, preflightContainerId);
+      }}
       async function refreshPreview() {{
         const params = new URLSearchParams({{ path: resolvedPlansDir() }});
         const response = await fetch(`/api/list-plans?${{params.toString()}}`);
@@ -865,11 +1280,16 @@ class DashboardApp:
         status.textContent = data.message;
         if (!data.plans || data.plans.length === 0) {{
           preview.innerHTML = "";
+          refreshPreflight();
           return;
         }}
         preview.innerHTML =
           "<strong>Plans found</strong>" +
           data.plans.map((plan) => `<label><input type="checkbox" name="selected_plans" value="${{plan}}"> <span>${{plan}}</span></label>`).join("");
+        preview.querySelectorAll('input[name="selected_plans"]').forEach((node) => {{
+          node.addEventListener('change', () => {{ refreshPreflight(); }});
+        }});
+        refreshPreflight();
       }}
       function scheduleRefresh() {{
         clearTimeout(timer);
@@ -880,9 +1300,17 @@ class DashboardApp:
       refreshPreview();
     }}
     window.addEventListener('DOMContentLoaded', () => {{
+      wireCopyButtons(document);
       wireRepoCheck('target_repo_run_many', 'target_repo_run_many_status');
       wireRepoCheck('target_repo_create_plan', 'target_repo_create_plan_status');
-      wirePlansPreview('target_repo_run_many', 'plans_dir', 'plans_dir_status', 'plans_dir_preview');
+      wirePlansPreview(
+        'target_repo_run_many',
+        'plans_dir',
+        'plans_dir_status',
+        'plans_dir_preview',
+        'run_many_preflight_message',
+        'run_many_preflight'
+      );
       const runId = {json.dumps(state.selected_run.id if state.selected_run else "")};
       const runStatus = {json.dumps(state.live_output_status or (state.selected_run.status if state.selected_run else ""))};
       const outputNode = document.getElementById('live_output_stream');
@@ -1008,6 +1436,23 @@ def serve_dashboard(
                 path_value = params.get("path", [""])[0]
                 status, message, plans = list_plans_in_directory(path_value)
                 body = json.dumps({"status": status, "message": message, "plans": plans}).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/api/preflight":
+                params = parse_qs(parsed.query)
+                target_repo_value = params.get("target_repo", [""])[0]
+                plans_dir_value = params.get("plans_dir", [""])[0]
+                selected_plan_names = [name.strip() for name in params.get("selected_plans", []) if name.strip()]
+                body = json.dumps(
+                    summarize_preflight_for_dashboard(
+                        target_repo_value,
+                        plans_dir_value,
+                        selected_plan_names=selected_plan_names or None,
+                    )
+                ).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()

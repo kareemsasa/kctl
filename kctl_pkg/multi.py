@@ -13,7 +13,7 @@ from .artifacts import discover_multi_run_logs, multi_run_dir, resolve_storage, 
 from .git import create_isolated_workspace, ensure_git_repo, get_repo_root, resolve_repo
 from .output import ConsoleOutputSink, FileOutputSink, OutputSink, TeeOutputSink
 from .plan import load_plan, normalize_plan, validate_plan
-from .preflight import preflight_multi_run
+from .preflight import freeze_preflight_report, preflight_multi_run
 from .runner import execute_plan_run
 from .summary import write_multi_run_summary
 from .terminal import style_status_text, style_text
@@ -166,20 +166,20 @@ def write_blocked_run_state(
     run_id: str,
     concurrency: int,
     plan_specs: list[PlanSpec],
-    preflight_report: Any,
+    preflight_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
     run_data: dict[str, Any] = {
         "run_id": run_id,
         "plans_dir": str(plans_dir.resolve()),
-        "repo": str(preflight_report.repo_root) if preflight_report.repo_root is not None else None,
-        "artifact_storage_mode": preflight_report.environment["storage_mode"],
+        "repo": str(preflight_snapshot.get("repo_root")) if preflight_snapshot.get("repo_root") is not None else None,
+        "artifact_storage_mode": preflight_snapshot["environment"]["storage_mode"],
         "artifact_root_path": str(run_root.parent),
         "stream_log_path": str(run_root / "stream.log"),
         "status": "blocked",
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "ended_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": str(preflight_snapshot["captured_at"]),
+        "ended_at": str(preflight_snapshot["captured_at"]),
         "concurrency": concurrency,
-        "preflight": preflight_report.to_dict(),
+        "preflight": preflight_snapshot,
         "plans": [
             {
                 "plan_id": spec.plan_id,
@@ -188,8 +188,8 @@ def write_blocked_run_state(
                 "status": "blocked",
                 "current_step": spec.step_ids[0] if spec.step_ids else None,
                 "step_statuses": {},
-                "worktree_path": str((preflight_report.worktree_root / spec.plan_id).resolve())
-                if preflight_report.worktree_root is not None
+                "worktree_path": str((Path(str(preflight_snapshot["worktree_root"])) / spec.plan_id).resolve())
+                if preflight_snapshot.get("worktree_root") is not None
                 else None,
                 "branch_name": build_branch_name(run_id, spec.plan_id),
                 "run_output_dir": str((run_root / spec.plan_id).resolve()),
@@ -224,6 +224,12 @@ def run_many_plans(
         plan_specs=plan_specs,
         normalized_plans=normalized_plans,
     )
+    preflight_captured_at = datetime.now(timezone.utc).isoformat()
+    preflight_snapshot = freeze_preflight_report(
+        preflight_report,
+        captured_at=preflight_captured_at,
+        source="launch",
+    )
     if not preflight_report.ok:
         if preflight_report.run_root is not None:
             try:
@@ -234,7 +240,7 @@ def run_many_plans(
                     run_id=run_id,
                     concurrency=concurrency,
                     plan_specs=plan_specs,
-                    preflight_report=preflight_report,
+                    preflight_snapshot=preflight_snapshot,
                 )
             except OSError:
                 pass
@@ -257,7 +263,7 @@ def run_many_plans(
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "concurrency": concurrency,
-        "preflight": preflight_report.to_dict(),
+        "preflight": preflight_snapshot,
         "plans": [
             {
                 "plan_id": spec.plan_id,

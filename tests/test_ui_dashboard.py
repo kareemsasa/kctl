@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kctl_pkg.ui_dashboard import DashboardApp, build_dashboard_access_urls, check_repo_path, list_plans_in_directory
+from kctl_pkg.ui_dashboard import (
+    DashboardApp,
+    build_dashboard_access_urls,
+    check_repo_path,
+    list_plans_in_directory,
+    summarize_preflight_for_dashboard,
+)
 from kctl_pkg.ui_index import default_db_path, index_repository_state
 from tests.test_ui_index import init_git_repo, write_sample_plan_run
 
@@ -37,6 +43,24 @@ class UIDashboardTests(unittest.TestCase):
             self.assertEqual(status, "ok")
             self.assertIn("Found 2 plan file(s)", message)
             self.assertEqual(plans, ["001-first.yaml", "002-second.yml"])
+
+    def test_summarize_preflight_for_dashboard_surfaces_ready_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            plans_dir = repo_path / ".kctl" / "plans"
+            init_git_repo(repo_path)
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / "001-first.yaml").write_text(
+                f"repo: {repo_path}\nobjective: x\nsteps:\n  - id: implement\n    prompt: x\n"
+            )
+
+            summary = summarize_preflight_for_dashboard(str(repo_path), str(plans_dir))
+
+            self.assertIn(summary["status"], {"pass", "block"})
+            self.assertIn("repo", summary["items"])
+            self.assertIn("binaries", summary["items"])
+            self.assertIn("writable_paths", summary["items"])
+            self.assertIn("required_env", summary["items"])
 
     def test_build_dashboard_access_urls_prefers_announce_url(self) -> None:
         urls = build_dashboard_access_urls(
@@ -101,8 +125,14 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("/api/check-repo", html)
             self.assertIn("plans_dir_preview", html)
             self.assertIn("/api/list-plans", html)
+            self.assertIn("/api/preflight", html)
             self.assertIn("selected_plans", html)
             self.assertIn("Plan File Detail", html)
+            self.assertIn("Launch Preflight", html)
+            self.assertIn("run_many_preflight", html)
+            self.assertIn("preflight-badge", html)
+            self.assertIn("run_many_launch_decision", html)
+            self.assertIn("PASS", html)
 
     def test_dashboard_attention_queue_surfaces_blocked_and_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -331,6 +361,42 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("live_output_stream", html)
             self.assertIn("[001-review] starting plan", html)
             self.assertIn("/api/run-output", html)
+
+    def test_dashboard_renders_saved_run_preflight_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            run_root = repo_path / ".kctl" / "runs" / run_id
+            run_data = json.loads((run_root / "run.json").read_text())
+            run_data["preflight"] = {
+                "captured_at": "2026-04-12T05:07:33.958781+00:00",
+                "source": "launch",
+                "repo_root": str(repo_path.resolve()),
+                "run_root": str(run_root.resolve()),
+                "worktree_root": str((repo_path / ".kctl" / "worktrees" / run_id).resolve()),
+                "required_binaries": ["codex", "git"],
+                "required_env": ["OPENAI_API_KEY"],
+                "issues": [
+                    {
+                        "code": "missing_env",
+                        "message": "Required environment variable 'OPENAI_API_KEY' is not defined.",
+                        "fix": "Set 'OPENAI_API_KEY' in the shell or service environment before starting the run.",
+                    }
+                ],
+            }
+            (run_root / "run.json").write_text(json.dumps(run_data) + "\n")
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            html = app.render_page(run_id=run_id)
+
+            self.assertIn("Launch Snapshot", html)
+            self.assertIn("captured_at=2026-04-12T05:07:33.958781+00:00", html)
+            self.assertIn("OPENAI_API_KEY", html)
+            self.assertIn("Fix:", html)
+            self.assertIn("BLOCK", html)
+            self.assertIn("Copy env", html)
 
     def test_create_plan_writes_template_based_plan_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

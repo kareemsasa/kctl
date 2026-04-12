@@ -58,6 +58,18 @@ class PreflightReport:
         ]
 
 
+def freeze_preflight_report(
+    report: PreflightReport,
+    *,
+    captured_at: str,
+    source: str,
+) -> dict[str, Any]:
+    data = report.to_dict()
+    data["captured_at"] = captured_at
+    data["source"] = source
+    return data
+
+
 def collect_required_env(plan: dict[str, Any]) -> list[str]:
     values: list[str] = []
     for key in ("required_env",):
