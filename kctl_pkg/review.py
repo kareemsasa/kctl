@@ -158,6 +158,7 @@ def run_step_reviews(
     verbose: bool,
     print_review_summary: Any,
     output_sink: OutputSink,
+    provider: str = "codex",
 ) -> list[dict[str, Any]]:
     review_content = build_review_content(repo_path, new_changed_files)
     verify_summary = build_verify_summary(verify_result)
@@ -171,34 +172,46 @@ def run_step_reviews(
             review_content=review_content,
             verify_summary=verify_summary,
         )
-        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as output_file:
-            output_path = Path(output_file.name)
-        try:
+        reviewer_prefix = f"{reviewer}: "
+        if provider == "claude":
             review_result = run_streaming_command(
-                [
-                    "codex",
-                    "exec",
-                    "review",
-                    "--uncommitted",
-                    "--full-auto",
-                    "-o",
-                    str(output_path),
-                    review_prompt,
-                ],
+                ["claude", "--permission-mode", "plan", "-p", review_prompt],
                 cwd=repo_path,
-                stdout_prefix=f"{reviewer}: ",
-                stderr_prefix=f"{reviewer}: ",
+                stdout_prefix=reviewer_prefix,
+                stderr_prefix=reviewer_prefix,
                 filter_stream=not verbose,
                 output_sink=output_sink,
             )
-            review_output = output_path.read_text().strip()
-        finally:
-            output_path.unlink(missing_ok=True)
+            review_output = review_result.stdout.strip()
+        else:
+            with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as output_file:
+                output_path = Path(output_file.name)
+            try:
+                review_result = run_streaming_command(
+                    [
+                        "codex",
+                        "exec",
+                        "review",
+                        "--uncommitted",
+                        "--full-auto",
+                        "-o",
+                        str(output_path),
+                        review_prompt,
+                    ],
+                    cwd=repo_path,
+                    stdout_prefix=reviewer_prefix,
+                    stderr_prefix=reviewer_prefix,
+                    filter_stream=not verbose,
+                    output_sink=output_sink,
+                )
+                review_output = output_path.read_text().strip()
+            finally:
+                output_path.unlink(missing_ok=True)
         if review_result.exit_code != 0:
             message = review_result.stderr.strip() or review_result.stdout.strip() or UNKNOWN_REVIEWER_ERROR
             raise PlanError(f"{reviewer} failed: {message}")
         parsed_review = parse_review_result(review_output, reviewer)
-        parsed_review["codex"] = {
+        parsed_review["agent"] = {
             "command": review_result.command,
             "cwd": review_result.cwd,
             "exit_code": review_result.exit_code,

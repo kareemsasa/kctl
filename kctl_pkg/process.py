@@ -4,7 +4,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .output import ConsoleOutputSink, OutputSink
 from .terminal import CODEX_STREAM_PREFIX, should_display_codex_line, style_text, supports_color
@@ -36,8 +36,10 @@ def run_streaming_command(
     filter_stream: bool = False,
     hidden_lines: set[str] | None = None,
     output_sink: OutputSink | None = None,
+    display_filter: Callable[[str], bool] | None = None,
 ) -> CommandResult:
     output_sink = output_sink or ConsoleOutputSink()
+    _display_filter = display_filter if display_filter is not None else should_display_codex_line
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -57,11 +59,11 @@ def run_streaming_command(
             rendered_line = f"{prefix}{line}" if prefix else line
             if hidden_lines is not None and line.strip() in hidden_lines:
                 continue
-            if not filter_stream or should_display_codex_line(line):
+            if not filter_stream or _display_filter(line):
                 if filter_stream and rendered_line == last_displayed_line:
                     continue
                 display_line = rendered_line
-                if prefix == CODEX_STREAM_PREFIX:
+                if prefix:
                     terminal_stream = sys.stderr if sink_name == "stderr" else sys.stdout
                     if supports_color(terminal_stream):
                         display_line = style_text(prefix, stream=terminal_stream, dim=True) + line

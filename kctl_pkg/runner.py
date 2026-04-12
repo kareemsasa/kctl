@@ -22,15 +22,17 @@ from .git import (
     switch_to_branch,
 )
 from .output import ConsoleOutputSink, OutputSink
-from .plan import build_codex_prompt, get_step_kind, load_plan, normalize_plan, validate_plan
+from .plan import build_agent_prompt, get_step_kind, load_plan, normalize_plan, resolve_provider_config, validate_plan
 from .preflight import freeze_preflight_report, preflight_single_run
 from .process import run_command, run_streaming_command
 from .review import run_step_reviews, should_print_diff_stat
 from .summary import write_single_run_summary
 from .terminal import (
     ANSI_CYAN,
+    CLAUDE_STREAM_PREFIX,
     CODEX_STREAM_PREFIX,
     is_meaningful_summary_line,
+    should_display_claude_line,
     style_status_text,
     style_text,
 )
@@ -68,7 +70,7 @@ def extract_verify_data(
     return data
 
 
-def build_synthetic_codex_summary(
+def build_synthetic_agent_summary(
     status: str,
     changed_files: list[str],
     verify_result: CommandResult | dict[str, Any] | None,
@@ -85,7 +87,7 @@ def build_synthetic_codex_summary(
     return f"status={status}; changed_files={changed_files_text}; verify={verify_text}"
 
 
-def extract_codex_summary(
+def extract_agent_summary(
     stdout: str,
     status: str,
     changed_files: list[str],
@@ -96,7 +98,7 @@ def extract_codex_summary(
     ):
         if is_meaningful_summary_line(line):
             return line[:200]
-    return build_synthetic_codex_summary(status, changed_files, verify_result)
+    return build_synthetic_agent_summary(status, changed_files, verify_result)
 
 
 def shorten_summary(text: str, limit: int = 200) -> str:
@@ -106,10 +108,10 @@ def shorten_summary(text: str, limit: int = 200) -> str:
 
 
 def extract_compact_step_summary(step_result: dict[str, Any]) -> str:
-    codex_summary = step_result.get("codex_summary")
-    if codex_summary:
-        return shorten_summary(codex_summary)
-    return build_synthetic_codex_summary(
+    agent_summary = step_result.get("agent_summary")
+    if agent_summary:
+        return shorten_summary(agent_summary)
+    return build_synthetic_agent_summary(
         status=step_result["status"],
         changed_files=step_result["changed_files"],
         verify_result=step_result["verify"],
@@ -321,7 +323,7 @@ def write_raw_output_artifact(
     run_output_dir: Path,
     step_index: int,
     step_id: str,
-    codex_result: CommandResult,
+    agent_result: CommandResult,
 ) -> Path:
     raw_path = run_output_dir / f"{build_step_file_prefix(step_index)}-raw.md"
     content = "\n".join(
@@ -329,18 +331,18 @@ def write_raw_output_artifact(
             f"# Step {step_index:02d} Raw Output",
             "",
             f"- Step id: `{step_id}`",
-            f"- Codex exit code: `{codex_result.exit_code}`",
+            f"- Agent exit code: `{agent_result.exit_code}`",
             "",
             "## stdout",
             "",
             "```text",
-            codex_result.stdout.rstrip(),
+            agent_result.stdout.rstrip(),
             "```",
             "",
             "## stderr",
             "",
             "```text",
-            codex_result.stderr.rstrip(),
+            agent_result.stderr.rstrip(),
             "```",
             "",
         ]
@@ -516,7 +518,7 @@ def build_verify_artifact(
 def build_step_result(
     step_id: str,
     step_prompt: str,
-    codex_prompt: str,
+    agent_prompt: str,
     started_at: str,
     ended_at: str,
     expect_clean_diff: bool,
@@ -528,7 +530,7 @@ def build_step_result(
     baseline_changed_files: list[str],
     new_changed_files: list[str],
     changed_files: list[str],
-    codex_result: CommandResult,
+    agent_result: CommandResult,
     verify_result: CommandResult | None,
     reviews: list[dict[str, Any]] | None,
     raw_artifact_path: Path | None,
@@ -540,15 +542,17 @@ def build_step_result(
     review_info: dict[str, Any] | None,
     mode_info: dict[str, Any] | None,
     verify_info: dict[str, Any] | None,
+    provider: str = "codex",
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     verify_data = extract_verify_data(verify_result, verify_environment)
-    codex_summary = extract_codex_summary(
-        codex_result.stdout, status, changed_files, verify_result
+    agent_summary = extract_agent_summary(
+        agent_result.stdout, status, changed_files, verify_result
     )
     return {
         "id": step_id,
         "prompt": step_prompt,
-        "codex_prompt": codex_prompt,
+        "agent_prompt": agent_prompt,
         "started_at": started_at,
         "ended_at": ended_at,
         "expect_clean_diff": expect_clean_diff,
@@ -573,13 +577,15 @@ def build_step_result(
         "new_changed_files": new_changed_files,
         "changed_files": changed_files,
         "changed_files_count": len(changed_files),
-        "codex_summary": codex_summary,
-        "codex": {
-            "command": codex_result.command,
-            "cwd": codex_result.cwd,
-            "exit_code": codex_result.exit_code,
-            "stdout": codex_result.stdout,
-            "stderr": codex_result.stderr,
+        "agent_summary": agent_summary,
+        "provider": provider,
+        "permission_mode": permission_mode,
+        "agent": {
+            "command": agent_result.command,
+            "cwd": agent_result.cwd,
+            "exit_code": agent_result.exit_code,
+            "stdout": agent_result.stdout,
+            "stderr": agent_result.stderr,
         },
         "verify": verify_data,
         "verify_environment": verify_environment,
@@ -595,6 +601,12 @@ def build_step_result(
     }
 
 
+def _build_claude_command(prompt: str, effective_permission_mode: str) -> list[str]:
+    if effective_permission_mode == "bypassPermissions":
+        return ["claude", "--dangerously-skip-permissions", "-p", prompt]
+    return ["claude", "--permission-mode", effective_permission_mode, "-p", prompt]
+
+
 def execute_agent_step(
     repo_path: Path,
     objective: str,
@@ -603,26 +615,45 @@ def execute_agent_step(
     prior_artifacts: dict[str, dict[str, Any]],
     verbose: bool,
     output_sink: OutputSink,
+    provider: str = "codex",
+    permission_mode: str = "auto",
 ) -> tuple[str, CommandResult]:
-    codex_prompt = build_codex_prompt(
+    agent_prompt = build_agent_prompt(
         objective,
         prior_summaries,
         step,
         prior_artifacts=prior_artifacts,
     )
     prompt_lines_to_hide = {
-        line.strip() for line in codex_prompt.splitlines() if line.strip()
+        line.strip() for line in agent_prompt.splitlines() if line.strip()
     }
-    codex_result = run_streaming_command(
-        ["codex", "exec", "--full-auto", "--cd", str(repo_path), codex_prompt],
-        cwd=repo_path,
-        stdout_prefix=CODEX_STREAM_PREFIX,
-        stderr_prefix=CODEX_STREAM_PREFIX,
-        filter_stream=not verbose,
-        hidden_lines=prompt_lines_to_hide if not verbose else None,
-        output_sink=output_sink,
-    )
-    return codex_prompt, codex_result
+    if provider == "claude":
+        effective_step_type = ((step.get("_kctl_step_type") or {}).get("effective_type")) or "change"
+        if effective_step_type in {"analyze", "review"}:
+            effective_permission_mode = "plan"
+        else:
+            effective_permission_mode = permission_mode
+        agent_result = run_streaming_command(
+            _build_claude_command(agent_prompt, effective_permission_mode),
+            cwd=repo_path,
+            stdout_prefix=CLAUDE_STREAM_PREFIX,
+            stderr_prefix=CLAUDE_STREAM_PREFIX,
+            filter_stream=not verbose,
+            hidden_lines=prompt_lines_to_hide if not verbose else None,
+            output_sink=output_sink,
+            display_filter=should_display_claude_line,
+        )
+    else:
+        agent_result = run_streaming_command(
+            ["codex", "exec", "--full-auto", "--cd", str(repo_path), agent_prompt],
+            cwd=repo_path,
+            stdout_prefix=CODEX_STREAM_PREFIX,
+            stderr_prefix=CODEX_STREAM_PREFIX,
+            filter_stream=not verbose,
+            hidden_lines=prompt_lines_to_hide if not verbose else None,
+            output_sink=output_sink,
+        )
+    return agent_prompt, agent_result
 
 
 def resolve_verify_commands(
@@ -660,7 +691,7 @@ def resolve_verify_commands(
 def maybe_collect_phase_artifact(
     step: dict[str, Any],
     effective_step_type: str,
-    codex_result: CommandResult,
+    agent_result: CommandResult,
     run_output_dir: Path,
     step_index: int,
 ) -> tuple[dict[str, str], dict[str, dict[str, Any]], str | None, str | None]:
@@ -672,7 +703,7 @@ def maybe_collect_phase_artifact(
 
     if effective_step_type not in {"analyze", "change", "review"}:
         return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
-    if codex_result.exit_code != 0:
+    if agent_result.exit_code != 0:
         return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
     if not isinstance(output_info, dict):
         return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
@@ -681,7 +712,7 @@ def maybe_collect_phase_artifact(
         return structured_artifacts, next_artifacts, artifact_parse_error, failure_reason
 
     try:
-        artifact_data = parse_structured_artifact(schema_name, codex_result.stdout)
+        artifact_data = parse_structured_artifact(schema_name, agent_result.stdout)
         artifact_path = write_structured_artifact(
             run_output_dir=run_output_dir,
             step_index=step_index,
@@ -854,11 +885,12 @@ def execute_step(
                 dim=True,
             )
         )
+    provider, permission_mode = resolve_provider_config(defaults)
     started_at = datetime.now(timezone.utc).isoformat()
     before_status = get_git_status(repo_path)
-    codex_prompt = ""
+    agent_prompt = ""
     if effective_step_type in {"analyze", "change", "review"}:
-        codex_prompt, codex_result = execute_agent_step(
+        agent_prompt, agent_result = execute_agent_step(
             repo_path=repo_path,
             objective=objective,
             prior_summaries=prior_summaries,
@@ -866,9 +898,11 @@ def execute_step(
             prior_artifacts=prior_artifacts,
             verbose=verbose,
             output_sink=output_sink,
+            provider=provider,
+            permission_mode=permission_mode,
         )
     elif effective_step_type == "verify":
-        codex_result = CommandResult(
+        agent_result = CommandResult(
             command=[],
             cwd=str(repo_path),
             exit_code=0,
@@ -881,7 +915,7 @@ def execute_step(
         run_output_dir=run_output_dir,
         step_index=step_index,
         step_id=step_id,
-        codex_result=codex_result,
+        agent_result=agent_result,
     )
     ended_at = datetime.now(timezone.utc).isoformat()
     after_status = get_git_status(repo_path)
@@ -912,9 +946,9 @@ def execute_step(
     artifact_parse_error: str | None = None
     next_artifacts: dict[str, dict[str, Any]] = {}
 
-    if codex_result.exit_code != 0:
+    if agent_result.exit_code != 0:
         status = "failure"
-        failure_reason = "codex_failed"
+        failure_reason = "agent_failed"
     if effective_mode == "read-only" and new_changed_files:
         status = "failure"
         failure_reason = "expected_clean_diff"
@@ -922,7 +956,7 @@ def execute_step(
     phase_artifacts, phase_next_artifacts, artifact_parse_error, artifact_failure_reason = maybe_collect_phase_artifact(
         step=step,
         effective_step_type=effective_step_type,
-        codex_result=codex_result,
+        agent_result=agent_result,
         run_output_dir=run_output_dir,
         step_index=step_index,
     )
@@ -972,6 +1006,7 @@ def execute_step(
                 review_step_id, review_items, output_sink
             ),
             output_sink=output_sink,
+            provider=provider,
         )
         review_status, review_failure_reason = apply_review_policy(reviews, review_info)
         if review_status is not None:
@@ -981,7 +1016,7 @@ def execute_step(
     step_result = build_step_result(
         step_id=step_id,
         step_prompt=step.get("prompt", ""),
-        codex_prompt=codex_prompt,
+        agent_prompt=agent_prompt,
         started_at=started_at,
         ended_at=ended_at,
         expect_clean_diff=expect_clean_diff,
@@ -993,7 +1028,7 @@ def execute_step(
         baseline_changed_files=baseline_changed_files,
         new_changed_files=new_changed_files,
         changed_files=changed_files,
-        codex_result=codex_result,
+        agent_result=agent_result,
         verify_result=verify_result,
         reviews=reviews,
         raw_artifact_path=raw_artifact_path,
@@ -1005,6 +1040,8 @@ def execute_step(
         review_info=review_info,
         mode_info=mode_info,
         verify_info=verify_info,
+        provider=provider,
+        permission_mode=permission_mode,
     )
     if should_print_diff_stat(diff_stat.stdout, verbose):
         output_sink.write_line(style_text("git diff --stat:", bold=True))
@@ -1167,7 +1204,7 @@ def execute_plan_run(
             "artifact_parse_failed",
             "expected_clean_diff",
             "review_blocked",
-        } or (stop_on_failure and failure_reason in {"verify_failed", "codex_failed"})
+        } or (stop_on_failure and failure_reason in {"verify_failed", "agent_failed"})
         if step_result["status"] == "paused":
             if prompt_to_continue_after_review(
                 step_result["id"], step_result["reviews"], interactive
@@ -1193,6 +1230,7 @@ def execute_plan_run(
             commit_sha = create_commit(repo_path, commit_message)
             commit_created = True
     branch_after = get_current_branch(repo_path)
+    plan_provider, plan_permission_mode = resolve_provider_config(defaults)
     run_data = {
         "started_at": started_at,
         "ended_at": datetime.now(timezone.utc).isoformat(),
@@ -1200,6 +1238,8 @@ def execute_plan_run(
         "repo": str(repo_path),
         "objective": plan["objective"],
         "defaults": defaults,
+        "provider": plan_provider,
+        "permission_mode": plan_permission_mode,
         "review_enabled": review_enabled,
         "repo_dirty_at_start": repo_dirty_at_start,
         "branch_before": branch_before,

@@ -7,6 +7,7 @@ from typing import Any
 
 COLOR_ENABLED = False
 CODEX_STREAM_PREFIX = "codex: "
+CLAUDE_STREAM_PREFIX = "claude: "
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_DIM = "\033[2m"
@@ -283,6 +284,31 @@ def should_display_codex_line(line: str) -> bool:
     if stripped.startswith("- Keep changes scoped to the current step."):
         return False
     if stripped.startswith("- In your final response, summarize what you changed and any verification you ran."):
+        return False
+    return looks_like_natural_language_line(stripped)
+
+
+def should_display_claude_line(line: str) -> bool:
+    stripped = line.strip()
+    lower = stripped.lower()
+    if not stripped:
+        return False
+    # Hide kctl prompt sections echoed back in output
+    if stripped in {"Constraints:", "Overall objective:", "Prior step summaries:"}:
+        return False
+    if stripped.startswith(("Current step id:", "Current step prompt:")):
+        return False
+    if stripped.startswith("- Work only in the current repository."):
+        return False
+    if stripped.startswith("- Keep changes scoped to the current step."):
+        return False
+    if stripped.startswith("- In your final response, summarize what you changed and any verification you ran."):
+        return False
+    if stripped.startswith(CLAUDE_STREAM_PREFIX):
+        return should_display_claude_line(stripped[len(CLAUDE_STREAM_PREFIX):])
+    if is_important_output_line(stripped):
+        return True
+    if "token" in lower and ("input" in lower or "output" in lower or "total" in lower):
         return False
     return looks_like_natural_language_line(stripped)
 

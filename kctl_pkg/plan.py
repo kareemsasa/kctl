@@ -14,6 +14,8 @@ STRUCTURED_OUTPUT_SCHEMAS = {"inspect_v1", "plan_v1", "review_v1"}
 REVIEW_POLICIES = {"advisory", "blocking", "manual"}
 STEP_MODES = {"default", "read-only"}
 VERIFY_MODES = {"legacy", "full"}
+PROVIDERS = {"codex", "claude"}
+PERMISSION_MODES = {"auto", "bypassPermissions", "plan"}
 
 
 def _yaml_module() -> Any:
@@ -102,6 +104,14 @@ def validate_plan(plan: dict[str, Any]) -> None:
     verify_mode = defaults.get("verify_mode")
     if verify_mode is not None and verify_mode not in VERIFY_MODES:
         raise PlanError("defaults.verify_mode must be one of: legacy, full.")
+    provider = defaults.get("provider")
+    if provider is not None and provider not in PROVIDERS:
+        raise PlanError("defaults.provider must be one of: codex, claude.")
+    permission_mode = defaults.get("permission_mode")
+    if permission_mode is not None and permission_mode not in PERMISSION_MODES:
+        raise PlanError("defaults.permission_mode must be one of: auto, bypassPermissions, plan.")
+    if permission_mode is not None and provider == "codex":
+        raise PlanError("defaults.permission_mode is only applicable when defaults.provider is claude.")
 
     stop_on_failure = defaults.get("stop_on_failure")
     if stop_on_failure is not None and not isinstance(stop_on_failure, bool):
@@ -351,9 +361,22 @@ def normalize_step(step: dict[str, Any], defaults: dict[str, Any] | None = None)
     return normalized_step
 
 
+def resolve_provider_config(defaults: dict[str, Any]) -> tuple[str, str]:
+    """Return (provider, permission_mode) with appropriate defaults applied."""
+    provider = defaults.get("provider") or "codex"
+    if provider == "claude":
+        permission_mode = defaults.get("permission_mode") or "auto"
+    else:
+        permission_mode = defaults.get("permission_mode") or "auto"
+    return provider, permission_mode
+
+
 def normalize_plan(plan: dict[str, Any]) -> dict[str, Any]:
     normalized_plan = dict(plan)
     defaults = normalized_plan.get("defaults") or {}
+    provider, permission_mode = resolve_provider_config(defaults)
+    normalized_plan["_kctl_provider"] = provider
+    normalized_plan["_kctl_permission_mode"] = permission_mode
     normalized_plan["steps"] = [normalize_step(step, defaults) for step in plan["steps"]]
     return normalized_plan
 
@@ -486,7 +509,7 @@ def build_verify_instruction() -> str:
     )
 
 
-def build_codex_prompt(
+def build_agent_prompt(
     objective: str,
     prior_summaries: list[str],
     step: dict[str, Any],
@@ -522,7 +545,7 @@ def build_codex_prompt(
         "Constraints:\n"
         "- Work only in the current repository.\n"
         "- Keep changes scoped to the current step.\n"
-        "- Assume each step is a fresh Codex invocation with no hidden memory from prior steps.\n"
+        "- Assume each step is a fresh agent invocation with no hidden memory from prior steps.\n"
         "- In your final response, summarize what you changed and any verification you ran."
     )
     return "\n\n".join(sections)

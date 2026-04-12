@@ -10,6 +10,7 @@ from typing import Any
 
 from .artifacts import multi_run_dir, resolve_storage, single_run_dir, worktree_run_root
 from .git import ensure_git_repo, get_repo_root, resolve_repo
+from .plan import resolve_provider_config
 from .types import PlanError
 
 
@@ -122,10 +123,11 @@ def collect_required_binaries(plan: dict[str, Any]) -> list[str]:
         default_verify_binary = extract_command_binary(default_verify)
         if default_verify_binary:
             binaries.add(default_verify_binary)
+    provider, _ = resolve_provider_config(defaults)
     for step in steps:
         effective_type = ((step.get("_kctl_step_type") or {}).get("effective_type")) or ""
         if effective_type in {"analyze", "change", "review"}:
-            binaries.add("codex")
+            binaries.add(provider)
         step_verify = step.get("verify")
         step_verify_shell = step.get("verify_shell")
         if isinstance(step_verify, str) and step_verify.strip():
@@ -178,7 +180,7 @@ def _check_binaries(required_binaries: list[str], path_value: str, issues: list[
             issues,
             "missing_path",
             "PATH is empty.",
-            "Set PATH for the launching shell or systemd user service so kctl can resolve codex, git, and verification tools.",
+            "Set PATH for the launching shell or systemd user service so kctl can resolve the agent binary (codex or claude), git, and verification tools.",
         )
         return
     for binary in required_binaries:
