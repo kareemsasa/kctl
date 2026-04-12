@@ -464,7 +464,9 @@ class MultiPlanTests(unittest.TestCase):
                 + "\n"
             )
 
-            with patch.dict(os.environ, {"KCTL_ARTIFACT_STORAGE": "external", "KCTL_HOME": str(kctl_home)}, clear=False):
+            env = {"KCTL_ARTIFACT_STORAGE": "external", "KCTL_HOME": str(kctl_home)}
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("KCTL_ARTIFACT_ROOT", None)
                 with patch("kctl_pkg.runner.run_streaming_command", side_effect=AssertionError("agent should not run")):
                     run_data = execute_plan_run(
                         plan_path=plan_path,
@@ -574,7 +576,9 @@ class MultiPlanTests(unittest.TestCase):
                     "log_path": str(run_output_dir / "run.json"),
                 }
 
-            with patch.dict(os.environ, {"KCTL_ARTIFACT_STORAGE": "external", "KCTL_HOME": str(kctl_home)}, clear=False):
+            env = {"KCTL_ARTIFACT_STORAGE": "external", "KCTL_HOME": str(kctl_home)}
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("KCTL_ARTIFACT_ROOT", None)
                 with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=fake_create_workspace), patch(
                     "kctl_pkg.multi.execute_plan_run", side_effect=fake_execute_plan_run
                 ):
@@ -1040,10 +1044,13 @@ class MultiPlanTests(unittest.TestCase):
                     "log_path": str(run_output_dir / "run.json"),
                 }
 
-            with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=fake_create_workspace), patch(
-                "kctl_pkg.multi.execute_plan_run", side_effect=fake_execute_plan_run
-            ):
-                exit_code = run_many_plans(plans_dir, concurrency=2, verbose=False)
+            env = {"KCTL_ARTIFACT_STORAGE": "in_repo"}
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("KCTL_ARTIFACT_ROOT", None)
+                with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=fake_create_workspace), patch(
+                    "kctl_pkg.multi.execute_plan_run", side_effect=fake_execute_plan_run
+                ):
+                    exit_code = run_many_plans(plans_dir, concurrency=2, verbose=False)
 
             self.assertEqual(exit_code, 0)
             self.assertLessEqual(max_active, 2)
@@ -1056,8 +1063,8 @@ class MultiPlanTests(unittest.TestCase):
             self.assertIn("## Plans", summary_text)
             self.assertIn("- 001-plan: passed (verification: not-run)", summary_text)
             stream_text = (run_logs[-1].parent / "stream.log").read_text()
-            self.assertIn("Multi-plan run:", stream_text)
-            self.assertIn("Plan summary:", stream_text)
+            self.assertIn("Run:", stream_text)
+            self.assertIn("Summary", stream_text)
 
     def test_run_many_plans_blocks_before_launch_when_preflight_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
