@@ -171,6 +171,44 @@ def write_sample_plan_run(repo_path: Path) -> tuple[str, Path]:
 
 
 class UIIndexTests(unittest.TestCase):
+    def test_default_db_path_uses_custom_root_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            artifact_root = Path(tmpdir) / "visible-runs"
+            init_git_repo(repo_path)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "KCTL_ARTIFACT_ROOT": str(artifact_root),
+                    "KCTL_ARTIFACT_STORAGE": "external",
+                    "KCTL_HOME": str(Path(tmpdir) / "ignored-home"),
+                },
+                clear=False,
+            ):
+                db_path = default_db_path(repo_path)
+
+            self.assertTrue(str(db_path).startswith(str(artifact_root.resolve())))
+
+    def test_default_db_path_falls_back_to_repo_when_external_root_is_unwritable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "KCTL_ARTIFACT_ROOT": "/root/blocked",
+                    "KCTL_ARTIFACT_STORAGE": "external",
+                    "KCTL_HOME": "/root/ignored-home",
+                },
+                clear=False,
+            ):
+                with patch("kctl_pkg.artifacts._storage_root_is_writable", return_value=False):
+                    db_path = default_db_path(repo_path)
+
+            self.assertEqual(db_path, repo_path.resolve() / ".kctl" / "ui-state.db")
+
     def test_index_repository_state_populates_sqlite_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"

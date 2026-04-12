@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kctl_pkg.artifacts import single_run_dir
+from kctl_pkg.artifacts import resolve_storage, single_run_dir
 from kctl_pkg.multi import discover_plan_files, run_many_plans
 from kctl_pkg.plan import normalize_plan
 from kctl_pkg.runner import execute_plan_run
@@ -33,6 +33,32 @@ def init_git_repo(repo_path: Path) -> None:
 
 
 class MultiPlanTests(unittest.TestCase):
+    def test_resolve_storage_prefers_custom_root_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            custom_root = Path(tmpdir) / "visible-runs"
+            env = {
+                "KCTL_ARTIFACT_ROOT": str(custom_root),
+                "KCTL_ARTIFACT_STORAGE": "external",
+                "KCTL_HOME": str(Path(tmpdir) / "ignored-home"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                storage = resolve_storage()
+
+            self.assertEqual(storage.mode, "custom_root")
+            self.assertEqual(storage.root, custom_root.resolve())
+
+    def test_resolve_storage_falls_back_to_in_repo_when_external_roots_are_unwritable(self) -> None:
+        env = {
+            "KCTL_ARTIFACT_ROOT": "/root/blocked",
+            "KCTL_ARTIFACT_STORAGE": "external",
+            "KCTL_HOME": "/root/ignored-home",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with patch("kctl_pkg.artifacts._storage_root_is_writable", return_value=False):
+                storage = resolve_storage()
+
+        self.assertEqual(storage.mode, "in_repo")
+
     def test_discover_plan_files_sorted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             plans_dir = Path(tmpdir)

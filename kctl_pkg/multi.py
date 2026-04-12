@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .artifacts import multi_run_dir, resolve_storage_mode, worktree_run_root, discover_multi_run_logs
+from .artifacts import discover_multi_run_logs, multi_run_dir, resolve_storage, worktree_run_root
 from .git import create_isolated_workspace, ensure_git_repo, get_repo_root, resolve_repo
 from .output import ConsoleOutputSink, OutputSink
 from .plan import load_plan, validate_plan
@@ -121,7 +121,8 @@ def run_many_plans(
     plan_specs = load_plan_specs(plans_dir)
     repo_root = plan_specs[0].repo_path
     run_id = build_multi_run_id()
-    artifact_storage_mode = resolve_storage_mode()
+    storage = resolve_storage()
+    artifact_storage_mode = storage.mode
     run_root = multi_run_dir(repo_root, run_id, storage_mode=artifact_storage_mode)
     worktree_root = worktree_run_root(repo_root, run_id, storage_mode=artifact_storage_mode)
     output_sink = ConsoleOutputSink()

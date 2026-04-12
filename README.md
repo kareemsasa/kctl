@@ -81,7 +81,7 @@ python3 kctl.py ui dashboard /path/to/repo
 
 `kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
 
-When `KCTL_ARTIFACT_STORAGE=external` is set, `kctl` stores run metadata outside the target repository. `KCTL_HOME` controls the external root and defaults to `~/.kctl`. When `KCTL_ARTIFACT_ROOT` is set, it takes precedence over both in-repo storage and `KCTL_HOME` and uses the same external artifact layout under the configured root.
+When `KCTL_ARTIFACT_STORAGE=external` is set, `kctl` stores run metadata outside the target repository. `KCTL_HOME` controls the external root and defaults to `~/.kctl`. When `KCTL_ARTIFACT_ROOT` is set and writable, `kctl` resolves storage as `custom_root` and uses the same external artifact layout under that configured root. If the configured external root cannot be created or written, `kctl` falls back to repo-local storage instead of failing path resolution up front.
 
 Example from outside this repository:
 
@@ -254,6 +254,16 @@ This keeps inspection and debugging straightforward while both layouts are suppo
 
 `in_repo` remains the default initially. `external` is opt-in first. `custom_root` is selected automatically when `KCTL_ARTIFACT_ROOT` is set. The default should change only after the external path has been validated across normal runs, multi-plan runs, and UI/index reads.
 
+### Resolution Rules
+
+Storage resolution currently works in this order:
+
+1. If `KCTL_ARTIFACT_ROOT` is set and writable, use `custom_root`.
+2. Otherwise, if `KCTL_ARTIFACT_STORAGE=external` and the resolved `KCTL_HOME` root is writable, use `external`.
+3. Otherwise, if `KCTL_ARTIFACT_STORAGE=in_repo` or no usable external root is available, use `in_repo`.
+
+This same resolved mode is used for single-run logs, multi-run state, worktree placement, and UI index state.
+
 ## Post-Migration Status
 
 ### Explicit Fields
@@ -286,7 +296,7 @@ This keeps inspection and debugging straightforward while both layouts are suppo
 
 ### Storage Status
 
-- Modes: `in_repo` (default), `external` (opt-in via `KCTL_ARTIFACT_STORAGE`), `custom_root` (selected automatically when `KCTL_ARTIFACT_ROOT` is set)
+- Modes: `in_repo` (default), `external` (opt-in via `KCTL_ARTIFACT_STORAGE` when the resolved `KCTL_HOME` root is writable), `custom_root` (selected automatically when `KCTL_ARTIFACT_ROOT` is set and writable)
 - Dual-read is supported; no migration or conversion is required
 - Run metadata records `artifact_storage_mode` and `artifact_root_path`
 

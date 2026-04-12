@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .artifacts import discover_multi_run_logs, discover_single_run_logs, ui_state_db_path
+from .artifacts import discover_multi_run_logs, discover_single_run_logs, resolve_storage, ui_state_db_path
 from .git import ensure_git_repo, get_current_branch, get_repo_root
 from .terminal import style_status_text, style_text
 from .types import PlanError
@@ -31,7 +31,8 @@ def sanitize_slug(value: str) -> str:
 
 
 def default_db_path(repo_root: Path) -> Path:
-    preferred_path = ui_state_db_path(repo_root)
+    storage = resolve_storage()
+    preferred_path = ui_state_db_path(repo_root, storage_mode=storage.mode)
     try:
         preferred_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:

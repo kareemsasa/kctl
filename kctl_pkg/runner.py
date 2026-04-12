@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .artifacts import resolve_storage_mode, single_run_dir
+from .artifacts import resolve_storage, single_run_dir
 from .git import (
     create_commit,
     detect_new_changes,
@@ -1064,7 +1064,8 @@ def execute_plan_run(
     run_status = "success"
     started_at = datetime.now(timezone.utc).isoformat()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    artifact_storage_mode = resolve_storage_mode()
+    storage = resolve_storage()
+    artifact_storage_mode = storage.mode
     run_output_dir = run_output_dir_override or ensure_run_output_dir(
         repo_path, run_id, storage_mode=artifact_storage_mode
     )
