@@ -3,3 +3,4 @@ plans/
 __pycache__/
 .venv/
 .kctl-runs/
+.codex
