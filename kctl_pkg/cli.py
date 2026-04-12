@@ -12,6 +12,14 @@ from .terminal import set_color_enabled, style_status_text
 from .types import PlanError
 from .ui_dashboard import serve_dashboard
 from .ui_index import index_repository_state, print_ui_run_detail, print_ui_runs, print_ui_workspaces
+from .ui_service import (
+    default_service_name,
+    default_service_path,
+    ensure_systemctl_success,
+    install_dashboard_service,
+    render_dashboard_service,
+    run_systemctl_user,
+)
 
 
 def add_run_options(parser: argparse.ArgumentParser) -> None:
@@ -166,6 +174,97 @@ def build_parser() -> argparse.ArgumentParser:
     ui_dashboard_parser.add_argument(
         "--announce-url",
         help="Optional public URL to print alongside the local bind address.",
+    )
+
+    ui_service_parser = ui_subparsers.add_parser("service", help="Print or install a user systemd service for the dashboard.")
+    ui_service_subparsers = ui_service_parser.add_subparsers(dest="ui_service_command", required=True)
+
+    ui_service_print_parser = ui_service_subparsers.add_parser("print", help="Print the dashboard service unit.")
+    ui_service_print_parser.add_argument("repo", help="Repository root to inspect.")
+    ui_service_print_parser.add_argument(
+        "--db-path",
+        help="Optional path to the SQLite state database.",
+    )
+    ui_service_print_parser.add_argument(
+        "--name",
+        default=default_service_name(),
+        help="Systemd unit base name.",
+    )
+    ui_service_print_parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host interface to bind.",
+    )
+    ui_service_print_parser.add_argument(
+        "--port",
+        type=int,
+        default=8421,
+        help="Port to listen on.",
+    )
+    ui_service_print_parser.add_argument(
+        "--no-tailscale",
+        dest="tailscale",
+        action="store_false",
+        default=True,
+        help="Do not include --tailscale in the service command.",
+    )
+    ui_service_print_parser.add_argument(
+        "--announce-url",
+        help="Optional public URL to print alongside the local bind address.",
+    )
+    ui_service_print_parser.add_argument(
+        "--python",
+        dest="python_executable",
+        help="Python executable to run inside the service.",
+    )
+
+    ui_service_install_parser = ui_service_subparsers.add_parser("install", help="Install and optionally start the dashboard service.")
+    ui_service_install_parser.add_argument("repo", help="Repository root to inspect.")
+    ui_service_install_parser.add_argument(
+        "--db-path",
+        help="Optional path to the SQLite state database.",
+    )
+    ui_service_install_parser.add_argument(
+        "--name",
+        default=default_service_name(),
+        help="Systemd unit base name.",
+    )
+    ui_service_install_parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host interface to bind.",
+    )
+    ui_service_install_parser.add_argument(
+        "--port",
+        type=int,
+        default=8421,
+        help="Port to listen on.",
+    )
+    ui_service_install_parser.add_argument(
+        "--no-tailscale",
+        dest="tailscale",
+        action="store_false",
+        default=True,
+        help="Do not include --tailscale in the service command.",
+    )
+    ui_service_install_parser.add_argument(
+        "--announce-url",
+        help="Optional public URL to print alongside the local bind address.",
+    )
+    ui_service_install_parser.add_argument(
+        "--python",
+        dest="python_executable",
+        help="Python executable to run inside the service.",
+    )
+    ui_service_install_parser.add_argument(
+        "--no-enable",
+        action="store_true",
+        help="Install the service file without enabling it.",
+    )
+    ui_service_install_parser.add_argument(
+        "--no-start",
+        action="store_true",
+        help="Install the service file without starting it.",
     )
 
     init_parser = subparsers.add_parser("init", help="Materialize a YAML plan from a named template.")
@@ -334,6 +433,38 @@ def main(argv: list[str] | None = None) -> int:
                     announce_url=args.announce_url,
                     tailscale=args.tailscale,
                 )
+            if args.ui_command == "service":
+                service_path = default_service_path(args.name)
+                service_text = render_dashboard_service(
+                    repo_path=repo_path,
+                    host=args.host,
+                    port=args.port,
+                    tailscale=args.tailscale,
+                    announce_url=args.announce_url,
+                    db_path=db_path,
+                    python_executable=args.python_executable,
+                )
+                if args.ui_service_command == "print":
+                    print(service_text, end="", flush=True)
+                    return 0
+                if args.ui_service_command == "install":
+                    install_dashboard_service(service_path, service_text)
+                    ensure_systemctl_success(run_systemctl_user("daemon-reload"), "daemon-reload")
+                    unit_name = service_path.name
+                    if not args.no_enable:
+                        ensure_systemctl_success(run_systemctl_user("enable", unit_name), "enable")
+                    if not args.no_start:
+                        ensure_systemctl_success(run_systemctl_user("restart", unit_name), "restart")
+                    print(
+                        style_status_text(
+                            f"Installed dashboard service at {service_path}",
+                            "success",
+                            bold=True,
+                        ),
+                        flush=True,
+                    )
+                    print(f"Manage with: systemctl --user status {service_path.name}", flush=True)
+                    return 0
         except PlanError as exc:
             print(style_status_text(f"Error: {exc}", "error", stream=sys.stderr, bold=True), file=sys.stderr)
             return 2
