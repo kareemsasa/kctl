@@ -210,6 +210,7 @@ def run_many_plans(
     verbose: bool = False,
     selected_plan_names: list[str] | None = None,
     run_id_override: str | None = None,
+    provider_override: str | None = None,
 ) -> int:
     if concurrency < 1:
         raise PlanError("--concurrency must be at least 1.")
@@ -341,6 +342,7 @@ def run_many_plans(
             interactive=False,
             run_output_dir_override=run_root / spec.plan_id,
             status_callback=status_callback,
+            provider_override=provider_override,
         )
         final_status = run_data_result["status"]
         verify_result = "not-run"

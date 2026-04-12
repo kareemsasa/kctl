@@ -1071,6 +1071,7 @@ def execute_plan_run(
     interactive: bool = True,
     run_output_dir_override: Path | None = None,
     status_callback: Callable[[dict[str, Any]], None] | None = None,
+    provider_override: str | None = None,
 ) -> dict[str, Any]:
     output_sink = output_sink or ConsoleOutputSink()
     plan = load_plan(plan_path)
@@ -1138,7 +1139,13 @@ def execute_plan_run(
         )
     if commit and branch_after in {"main", "master"}:
         raise PlanError("--commit is not allowed on main or master.")
-    defaults = plan.get("defaults") or {}
+    defaults = dict(plan.get("defaults") or {})
+    if provider_override is not None:
+        defaults["provider"] = provider_override
+        if provider_override == "codex":
+            defaults.pop("permission_mode", None)
+        elif "permission_mode" not in defaults:
+            defaults["permission_mode"] = "auto"
     stop_on_failure = bool(defaults.get("stop_on_failure", False))
     prior_summaries: list[str] = []
     prior_artifacts: dict[str, dict[str, Any]] = {}

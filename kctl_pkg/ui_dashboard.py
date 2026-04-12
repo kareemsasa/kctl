@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import shutil
 import socket
 import threading
 from dataclasses import dataclass
@@ -76,6 +77,30 @@ def check_repo_path(path_value: str) -> tuple[str, str]:
     if not candidate.is_dir():
         return "not_dir", f"Not a directory: {candidate}"
     return "ok", f"Exists: {candidate.resolve()}"
+
+
+def available_providers() -> list[tuple[str, str]]:
+    """Return (value, label) pairs for agent providers found in PATH."""
+    providers = []
+    if shutil.which("codex") is not None:
+        providers.append(("codex", "Codex"))
+    if shutil.which("claude") is not None:
+        providers.append(("claude", "Claude"))
+    return providers
+
+
+def _provider_select_html(field_name: str, providers: list[tuple[str, str]]) -> str:
+    options = "<option value=''>Default (from plan)</option>"
+    options += "".join(
+        f"<option value='{_escape(value)}'>{_escape(label)}</option>"
+        for value, label in providers
+    )
+    return (
+        f"<label for='{field_name}'><strong>Provider Override</strong></label>"
+        f"<select id='{field_name}' name='{field_name}'>{options}</select>"
+        "<div class='help'>Override the agent provider for this run. "
+        "Leave as Default to use whatever each plan specifies.</div>"
+    )
 
 
 def list_plans_in_directory(path_value: str) -> tuple[str, str, list[str]]:
@@ -323,7 +348,7 @@ def _operator_action_label(action: str) -> str:
     }.get(action, action)
 
 
-def _render_attention_card(item: AttentionItem) -> str:
+def _render_attention_card(item: AttentionItem, providers: list[tuple[str, str]] | None = None) -> str:
     link_href = _link({}, run_id=item.run_id, plan_execution_id=item.plan_execution_id)
     action_label = _operator_action_label(item.operator_action)
     parts = [
@@ -336,10 +361,12 @@ def _render_attention_card(item: AttentionItem) -> str:
         parts.append(f"<div>reason={_escape(item.failure_reason)}</div>")
     parts.append("</a>")
     if item.operator_action == "safe_rerun" and item.plan_file_path:
+        provider_html = _provider_select_html("provider_override", providers) if providers else ""
         parts.append(
             f"<form method='post' action='/actions/rerun-plan'>"
             f"<input type='hidden' name='plan_file_path' value='{_escape(item.plan_file_path)}'>"
             f"<input type='hidden' name='run_id' value='{_escape(item.run_id)}'>"
+            f"{provider_html}"
             f"<button type='submit'>Rerun</button>"
             f"</form>"
         )
@@ -373,6 +400,7 @@ class DashboardState:
     repo_root: str
     action_message: str | None
     plan_templates: list[tuple[str, str | None]]
+    available_providers: list[tuple[str, str]]
     overview: RepositoryOverview
     attention_items: list[AttentionItem]
     workspaces: list[WorkspaceSummary]
@@ -546,6 +574,7 @@ class DashboardApp:
             repo_root=repository.root_path,
             action_message=action_message,
             plan_templates=plan_templates,
+            available_providers=available_providers(),
             overview=overview,
             attention_items=attention_items,
             workspaces=workspaces,
@@ -647,7 +676,13 @@ class DashboardApp:
         output_path.write_text(yaml.safe_dump(plan, sort_keys=False))
         return output_path
 
-    def start_run_many(self, plans_dir: Path, concurrency: int, selected_plan_names: list[str] | None = None) -> str:
+    def start_run_many(
+        self,
+        plans_dir: Path,
+        concurrency: int,
+        selected_plan_names: list[str] | None = None,
+        provider_override: str | None = None,
+    ) -> str:
         run_id = build_multi_run_id()
 
         def _run() -> None:
@@ -657,6 +692,7 @@ class DashboardApp:
                 verbose=False,
                 selected_plan_names=selected_plan_names,
                 run_id_override=run_id,
+                provider_override=provider_override,
             )
             index_repository_state(self.repo_path, db_path=self.db_path)
 
@@ -736,7 +772,7 @@ class DashboardApp:
         )
 
         attention_items_html = "".join(
-            _render_attention_card(item) for item in state.attention_items
+            _render_attention_card(item, providers=state.available_providers) for item in state.attention_items
         ) or "<div class='empty'>No attention items.</div>"
 
         action_panel_html = (
@@ -774,7 +810,8 @@ class DashboardApp:
                 "<label for='concurrency'><strong>Concurrency</strong></label>"
                 "<input id='concurrency' name='concurrency' type='number' min='1' value='1'>"
                 "<div class='help'>How many plans can run at the same time. Use 1 for the safest option.</div>"
-                "<button type='submit'>Run Plans</button>"
+                + (_provider_select_html("provider_override", state.available_providers) if state.available_providers else "")
+                + "<button type='submit'>Run Plans</button>"
                 "</form>"
                 "<form method='post' action='/actions/create-plan'>"
                 f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
@@ -1565,7 +1602,8 @@ def serve_dashboard(
                         raise PlanError(f"Plan file not found: {plan_path}")
                     plans_dir = plan_path.parent
                     plan_file_name = plan_path.name
-                    run_id = app.start_run_many(plans_dir, concurrency=1, selected_plan_names=[plan_file_name])
+                    provider_override = form_data.get("provider_override", [""])[0].strip() or None
+                    run_id = app.start_run_many(plans_dir, concurrency=1, selected_plan_names=[plan_file_name], provider_override=provider_override)
                     message = f"Rerun started for {plan_file_name}."
                     plan_execution_id = None
                 elif parsed.path == "/actions/index":
@@ -1604,7 +1642,8 @@ def serve_dashboard(
                     if concurrency < 1:
                         raise PlanError("Concurrency must be at least 1.")
                     selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
-                    run_id = app.start_run_many(plans_dir, concurrency, selected_plan_names=selected_plan_names or None)
+                    provider_override = form_data.get("provider_override", [""])[0].strip() or None
+                    run_id = app.start_run_many(plans_dir, concurrency, selected_plan_names=selected_plan_names or None, provider_override=provider_override)
                     message = f"Started run-many for {plans_dir}."
             except (PlanError, ValueError) as exc:
                 message = str(exc)
