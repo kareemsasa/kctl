@@ -61,6 +61,13 @@ def render_dashboard_service(
         existing = path_value.split(":") if path_value else []
         if npm_global_str not in existing:
             path_value = npm_global_str + (":" + path_value if path_value else "")
+    env_lines = [_systemd_environment_line("PATH", path_value)]
+    ssh_auth_sock = os.environ.get("SSH_AUTH_SOCK", "")
+    if ssh_auth_sock:
+        env_lines.append(_systemd_environment_line("SSH_AUTH_SOCK", ssh_auth_sock))
+    artifact_root = os.environ.get("KCTL_ARTIFACT_ROOT", "")
+    if artifact_root:
+        env_lines.append(_systemd_environment_line("KCTL_ARTIFACT_ROOT", artifact_root))
     return "\n".join(
         [
             "[Unit]",
@@ -71,7 +78,7 @@ def render_dashboard_service(
             "[Service]",
             "Type=simple",
             f"WorkingDirectory={working_directory}",
-            _systemd_environment_line("PATH", path_value),
+            *env_lines,
             f"ExecStart={quoted_command}",
             "Restart=on-failure",
             "RestartSec=3",

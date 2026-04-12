@@ -13,7 +13,7 @@ from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .multi import build_multi_run_id, load_normalized_multi_plans, resolve_multi_run_log, run_many_plans
-from .git import ensure_git_repo, get_repo_root
+from .git import check_remote_connectivity, ensure_git_repo, get_project_git_detail, get_project_git_summary, get_repo_root
 from .plan import build_plan_from_template, load_plan_templates
 from .paths import project_root
 from .preflight import preflight_multi_run
@@ -741,23 +741,193 @@ label {
 }
 .project-item {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
   border: 1px solid #ddd;
   border-radius: 6px;
   margin-bottom: 8px;
   background: white;
 }
-.project-item code {
-  flex: 1;
-  min-width: 0;
+.project-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.project-name {
+  font-weight: 600;
+  font-size: 1em;
+}
+a.project-name:hover {
+  text-decoration: underline !important;
+}
+.project-path {
+  font-size: 0.85em;
+  color: #666;
   overflow-wrap: anywhere;
 }
-.project-item form {
+.project-header form {
   margin: 0;
   flex-shrink: 0;
+}
+.project-git {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85em;
+}
+.git-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+.git-branch {
+  background: #e8f0fe;
+  color: #1a56db;
+}
+.git-clean {
+  background: #ecfdf5;
+  color: #166534;
+}
+.git-dirty {
+  background: #fef2f2;
+  color: #991b1b;
+}
+.git-ahead {
+  background: #f0fdf4;
+  color: #166534;
+}
+.git-behind {
+  background: #fffbeb;
+  color: #92400e;
+}
+.git-synced {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.git-commit {
+  color: #6b7280;
+  font-size: 0.9em;
+}
+.git-unavailable {
+  color: #9ca3af;
+  font-style: italic;
+  font-size: 0.9em;
+}
+.back-link {
+  display: inline-block;
+  margin-bottom: 8px;
+  font-size: 0.9em;
+  color: #2563eb;
+  text-decoration: none;
+}
+.back-link:hover {
+  text-decoration: underline;
+}
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 700px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.detail-section h3 {
+  margin: 0 0 8px;
+  font-size: 1em;
+}
+.remote-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 0.9em;
+}
+.remote-row:last-child {
+  border-bottom: none;
+}
+.remote-name {
+  font-weight: 600;
+  min-width: 60px;
+}
+.remote-url {
+  font-family: monospace;
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+.remote-direction {
+  color: #6b7280;
+  font-size: 0.85em;
+  min-width: 50px;
+}
+.ssh-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+.ssh-ok {
+  background: #ecfdf5;
+  color: #166534;
+}
+.ssh-fail {
+  background: #fef2f2;
+  color: #991b1b;
+}
+.ssh-pending {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.branch-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.branch-list li {
+  padding: 4px 0;
+  font-size: 0.9em;
+  font-family: monospace;
+}
+.branch-current {
+  font-weight: 600;
+  color: #1a56db;
+}
+.commit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88em;
+}
+.commit-table th, .commit-table td {
+  padding: 5px 8px;
+  text-align: left;
+  border-bottom: 1px solid #f0f0f0;
+}
+.commit-table th {
+  font-weight: 600;
+  color: #374151;
+}
+.commit-sha {
+  font-family: monospace;
+  color: #2563eb;
 }
 @media (max-width: 860px) {
   body {
@@ -1504,18 +1674,306 @@ window.addEventListener('DOMContentLoaded', () => {
 """
         return self._page_shell(active_nav="Actions", body=body, extra_script=actions_script)
 
-    def render_projects_page(self, *, action_message: str | None = None) -> str:
-        tracked_projects = self.load_tracked_projects()
-        tracked_json = json.dumps(tracked_projects)
-        notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
-        project_items_html = "".join(
-            "<div class='project-item'>"
-            f"<code>{_escape(project_path)}</code>"
+    def render_project_detail_page(self, project_path: str) -> str:
+        resolved = str(Path(project_path).expanduser().resolve())
+        tracked = self.load_tracked_projects()
+        if resolved not in tracked:
+            return self._page_shell(
+                active_nav="Projects",
+                body=(
+                    "<main class='single-column'><div class='column'>"
+                    "<a class='back-link' href='/projects'>&larr; All Projects</a>"
+                    f"<section class='panel'><div class='empty'>Project not tracked: {_escape(resolved)}</div></section>"
+                    "</div></main>"
+                ),
+            )
+        detail = get_project_git_detail(Path(resolved))
+        name = _escape(str(detail.get("name", Path(resolved).name)))
+
+        if not detail.get("available"):
+            return self._page_shell(
+                active_nav="Projects",
+                body=(
+                    "<main class='single-column'><div class='column'>"
+                    "<a class='back-link' href='/projects'>&larr; All Projects</a>"
+                    f"<section class='panel'><h2>{name}</h2>"
+                    f"<div class='git-unavailable'>{_escape(str(detail.get('error', 'unavailable')))}</div>"
+                    "</section></div></main>"
+                ),
+            )
+
+        # Branch + status badges
+        branch = detail.get("branch")
+        dirty = detail.get("dirty")
+        changed = detail.get("changed_count", 0)
+        ahead_behind = detail.get("ahead_behind")
+
+        status_badges: list[str] = []
+        if branch:
+            status_badges.append(f"<span class='git-badge git-branch'>{_escape(str(branch))}</span>")
+        if dirty:
+            label = f"{changed} changed file{'s' if changed != 1 else ''}" if changed else "dirty"
+            status_badges.append(f"<span class='git-badge git-dirty'>{_escape(label)}</span>")
+        elif dirty is not None:
+            status_badges.append("<span class='git-badge git-clean'>clean</span>")
+        if isinstance(ahead_behind, (list, tuple)) and len(ahead_behind) == 2:
+            ahead, behind = ahead_behind
+            if ahead and behind:
+                status_badges.append(f"<span class='git-badge git-ahead'>&uarr;{ahead}</span>")
+                status_badges.append(f"<span class='git-badge git-behind'>&darr;{behind}</span>")
+            elif ahead:
+                status_badges.append(f"<span class='git-badge git-ahead'>&uarr;{ahead} ahead</span>")
+            elif behind:
+                status_badges.append(f"<span class='git-badge git-behind'>&darr;{behind} behind</span>")
+            else:
+                status_badges.append("<span class='git-badge git-synced'>in sync</span>")
+
+        header_html = (
+            "<a class='back-link' href='/projects'>&larr; All Projects</a>"
+            "<section class='panel'>"
+            "<div class='detail-header'>"
+            f"<h2 style='margin:0'>{name}</h2>"
+            f"<div class='project-git'>{''.join(status_badges)}</div>"
+            "</div>"
+            f"<div class='project-path' style='margin-top:4px'><code>{_escape(resolved)}</code></div>"
+            "</section>"
+        )
+
+        # Remotes
+        remotes = detail.get("remotes") or []
+        if remotes:
+            remote_names: set[str] = set()
+            remote_rows = ""
+            for r in remotes:
+                url = str(r.get("url", ""))
+                name = str(r.get("name", ""))
+                if name:
+                    remote_names.add(name)
+                remote_rows += (
+                    "<div class='remote-row'>"
+                    f"<span class='remote-name'>{_escape(name)}</span>"
+                    f"<span class='remote-url'>{_escape(url)}</span>"
+                    f"<span class='remote-direction'>{_escape(str(r.get('direction', '')))}</span>"
+                    "</div>"
+                )
+            connectivity_html = (
+                "<div id='remote_status' style='margin-top:8px'>"
+                "<span class='ssh-status ssh-pending'>checking remote connectivity&hellip;</span>"
+                "</div>"
+            ) if remote_names else ""
+            remotes_html = (
+                "<section class='panel detail-section'>"
+                "<h3>Remotes</h3>"
+                f"{remote_rows}"
+                f"{connectivity_html}"
+                "</section>"
+            )
+        else:
+            remotes_html = (
+                "<section class='panel detail-section'>"
+                "<h3>Remotes</h3>"
+                "<div class='empty'>No remotes configured.</div>"
+                "</section>"
+            )
+
+        # Git status
+        status_output = str(detail.get("status_output", ""))
+        diff_stat = str(detail.get("diff_stat", ""))
+        if status_output:
+            status_html = (
+                "<section class='panel detail-section'>"
+                "<h3>Working Tree Status</h3>"
+                f"<pre class='code-block'>{_escape(status_output)}</pre>"
+                + (f"<pre class='code-block'>{_escape(diff_stat)}</pre>" if diff_stat else "")
+                + "</section>"
+            )
+        else:
+            status_html = (
+                "<section class='panel detail-section'>"
+                "<h3>Working Tree Status</h3>"
+                "<div class='empty'>Clean working tree.</div>"
+                "</section>"
+            )
+
+        # Branches
+        branches = detail.get("branches") or []
+        if branches:
+            branch_items = ""
+            for b in branches:
+                is_current = str(b.get("current", "false")) == "true"
+                cls = " class='branch-current'" if is_current else ""
+                prefix = "* " if is_current else ""
+                branch_items += f"<li{cls}>{prefix}{_escape(str(b.get('name', '')))}</li>"
+            branches_html = (
+                "<section class='panel detail-section'>"
+                f"<h3>Local Branches ({len(branches)})</h3>"
+                f"<ul class='branch-list'>{branch_items}</ul>"
+                "</section>"
+            )
+        else:
+            branches_html = (
+                "<section class='panel detail-section'>"
+                "<h3>Local Branches</h3>"
+                "<div class='empty'>No branches found.</div>"
+                "</section>"
+            )
+
+        # Stash
+        stash_list = detail.get("stash_list") or []
+        if stash_list:
+            stash_items = "".join(f"<li>{_escape(s)}</li>" for s in stash_list)
+            stash_html = (
+                "<section class='panel detail-section'>"
+                f"<h3>Stash ({len(stash_list)})</h3>"
+                f"<ul class='branch-list'>{stash_items}</ul>"
+                "</section>"
+            )
+        else:
+            stash_html = ""
+
+        # Recent commits
+        commits = detail.get("recent_commits") or []
+        if commits:
+            commit_rows = ""
+            for c in commits:
+                commit_rows += (
+                    "<tr>"
+                    f"<td class='commit-sha'>{_escape(str(c.get('sha', '')))}</td>"
+                    f"<td>{_escape(str(c.get('subject', '')))}</td>"
+                    f"<td>{_escape(str(c.get('author', '')))}</td>"
+                    f"<td style='white-space:nowrap'>{_escape(str(c.get('date', '')))}</td>"
+                    "</tr>"
+                )
+            commits_html = (
+                "<section class='panel'>"
+                f"<h3>Recent Commits ({len(commits)})</h3>"
+                "<div class='table-scroll'>"
+                "<table class='commit-table'>"
+                "<thead><tr><th>sha</th><th>message</th><th>author</th><th>when</th></tr></thead>"
+                f"<tbody>{commit_rows}</tbody>"
+                "</table></div></section>"
+            )
+        else:
+            commits_html = ""
+
+        remote_names_for_detail: set[str] = set()
+        for r in remotes:
+            name = str(r.get("name", ""))
+            if name:
+                remote_names_for_detail.add(name)
+        remote_names_json = json.dumps(sorted(remote_names_for_detail))
+        project_path_json = json.dumps(resolved)
+
+        detail_script = f"""\
+window.addEventListener('DOMContentLoaded', async () => {{
+  const remoteNames = {remote_names_json};
+  const projectPath = {project_path_json};
+  const container = document.getElementById('remote_status');
+  if (!container || remoteNames.length === 0) return;
+  const results = [];
+  for (const name of remoteNames) {{
+    try {{
+      const params = new URLSearchParams({{ path: projectPath, remote: name }});
+      const resp = await fetch('/api/project-remote-check?' + params.toString());
+      const data = await resp.json();
+      results.push(data);
+    }} catch (e) {{
+      results.push({{ remote: name, ok: false, message: 'fetch error' }});
+    }}
+  }}
+  let html = '';
+  for (const r of results) {{
+    const cls = r.ok ? 'ssh-ok' : 'ssh-fail';
+    const label = r.ok ? 'connected' : 'unreachable';
+    const proto = r.protocol ? ' (' + esc(r.protocol) + ')' : '';
+    const remote = r.remote ? esc(r.remote) : '';
+    const msg = (!r.ok && r.message && r.message !== 'connected') ? ' &mdash; ' + esc(r.message) : '';
+    html += `<div class="ssh-status ${{cls}}">${{remote}}${{proto}}: ${{label}}${{msg}}</div>`;
+    if (r.hint) {{
+      html += `<div class="help" style="margin-top:4px;font-size:0.85em">${{esc(r.hint)}}</div>`;
+    }}
+  }}
+  container.innerHTML = html;
+}});
+function esc(s) {{
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}}
+"""
+
+        body = (
+            "<main class='single-column'><div class='column'>"
+            f"{header_html}"
+            "<div class='detail-grid'>"
+            f"{remotes_html}"
+            f"{branches_html}"
+            f"{stash_html}"
+            "</div>"
+            f"{status_html}"
+            f"{commits_html}"
+            "</div></main>"
+        )
+        return self._page_shell(active_nav="Projects", body=body, extra_script=detail_script)
+
+    def _render_project_card(self, project_path: str, summary: dict[str, object]) -> str:
+        name = Path(project_path).name
+        detail_url = "/projects/detail?" + urlencode({"path": project_path})
+        header = (
+            "<div class='project-header'>"
+            f"<a class='project-name' href='{_escape(detail_url)}' style='color:inherit;text-decoration:none'>{_escape(name)}</a>"
             f"<form method='post' action='/actions/remove-project'>"
             f"<input type='hidden' name='project_path' value='{_escape(project_path)}'>"
             f"<button type='submit'>Remove</button>"
             f"</form>"
             "</div>"
+            f"<div class='project-path'><code>{_escape(project_path)}</code></div>"
+        )
+        if not summary.get("available"):
+            error = summary.get("error", "unavailable")
+            git_html = f"<div class='git-unavailable'>{_escape(str(error))}</div>"
+            return f"<div class='project-item' data-project='{_escape(project_path)}'>{header}<div class='project-git'>{git_html}</div></div>"
+
+        badges: list[str] = []
+        branch = summary.get("branch")
+        if branch:
+            badges.append(f"<span class='git-badge git-branch'>{_escape(str(branch))}</span>")
+
+        dirty = summary.get("dirty")
+        changed = summary.get("changed_count", 0)
+        if dirty:
+            label = f"{changed} changed file{'s' if changed != 1 else ''}" if changed else "dirty"
+            badges.append(f"<span class='git-badge git-dirty'>{_escape(label)}</span>")
+        elif dirty is not None:
+            badges.append("<span class='git-badge git-clean'>clean</span>")
+
+        ahead_behind = summary.get("ahead_behind")
+        if isinstance(ahead_behind, (list, tuple)) and len(ahead_behind) == 2:
+            ahead, behind = ahead_behind
+            if ahead and behind:
+                badges.append(f"<span class='git-badge git-ahead'>&uarr;{ahead}</span>")
+                badges.append(f"<span class='git-badge git-behind'>&darr;{behind}</span>")
+            elif ahead:
+                badges.append(f"<span class='git-badge git-ahead'>&uarr;{ahead} ahead</span>")
+            elif behind:
+                badges.append(f"<span class='git-badge git-behind'>&darr;{behind} behind</span>")
+            else:
+                badges.append("<span class='git-badge git-synced'>in sync</span>")
+
+        last_commit = summary.get("last_commit")
+        if last_commit:
+            badges.append(f"<span class='git-commit'>{_escape(str(last_commit))}</span>")
+
+        git_html = "".join(badges)
+        return f"<div class='project-item' data-project='{_escape(project_path)}'>{header}<div class='project-git'>{git_html}</div></div>"
+
+    def render_projects_page(self, *, action_message: str | None = None) -> str:
+        tracked_projects = self.load_tracked_projects()
+        tracked_json = json.dumps(tracked_projects)
+        notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
+        summaries = {p: get_project_git_summary(Path(p)) for p in tracked_projects}
+        project_items_html = "".join(
+            self._render_project_card(project_path, summaries[project_path])
             for project_path in tracked_projects
         ) or "<div class='empty'>No tracked projects yet.</div>"
         body = (
@@ -1523,9 +1981,12 @@ window.addEventListener('DOMContentLoaded', () => {
             f"<div class='column'>"
             f"{notice_html}"
             f"<section class='panel'>"
-            f"<h2>Tracked Projects</h2>"
+            f"<div style='display:flex;align-items:center;justify-content:space-between'>"
+            f"<h2 style='margin:0'>Tracked Projects</h2>"
+            f"<button id='refresh_git_btn' type='button' style='font-size:0.85em'>Refresh</button>"
+            f"</div>"
             f"<div class='help'>Local repo paths used for cross-project plan runs.</div>"
-            f"{project_items_html}"
+            f"<div id='projects_list'>{project_items_html}</div>"
             f"</section>"
             f"<section class='panel'>"
             f"<h2>Add Project</h2>"
@@ -1548,36 +2009,98 @@ window.addEventListener('DOMContentLoaded', () => {{
   const input = document.getElementById('project_path');
   const dupStatus = document.getElementById('project_path_duplicate');
   const addButton = document.getElementById('add_project_button');
-  if (!input || !dupStatus || !addButton) return;
-  let timer = null;
-  async function checkDuplicate() {{
-    const value = input.value.trim();
-    if (!value) {{
-      dupStatus.textContent = '';
-      dupStatus.dataset.status = '';
-      addButton.disabled = false;
-      return;
+  if (input && dupStatus && addButton) {{
+    let timer = null;
+    async function checkDuplicate() {{
+      const value = input.value.trim();
+      if (!value) {{
+        dupStatus.textContent = '';
+        dupStatus.dataset.status = '';
+        addButton.disabled = false;
+        return;
+      }}
+      const params = new URLSearchParams({{ path: value }});
+      const response = await fetch('/api/resolve-path?' + params.toString());
+      const data = await response.json();
+      const resolved = data.resolved || '';
+      if (resolved && trackedProjects.includes(resolved)) {{
+        dupStatus.dataset.status = 'empty';
+        dupStatus.textContent = 'Already tracked: ' + resolved;
+        addButton.disabled = true;
+      }} else {{
+        dupStatus.textContent = '';
+        dupStatus.dataset.status = '';
+        addButton.disabled = false;
+      }}
     }}
-    const params = new URLSearchParams({{ path: value }});
-    const response = await fetch('/api/resolve-path?' + params.toString());
-    const data = await response.json();
-    const resolved = data.resolved || '';
-    if (resolved && trackedProjects.includes(resolved)) {{
-      dupStatus.dataset.status = 'empty';
-      dupStatus.textContent = 'Already tracked: ' + resolved;
-      addButton.disabled = true;
-    }} else {{
-      dupStatus.textContent = '';
-      dupStatus.dataset.status = '';
-      addButton.disabled = false;
+    function scheduleCheck() {{
+      clearTimeout(timer);
+      timer = setTimeout(checkDuplicate, 150);
     }}
+    input.addEventListener('input', scheduleCheck);
+    checkDuplicate();
   }}
-  function scheduleCheck() {{
-    clearTimeout(timer);
-    timer = setTimeout(checkDuplicate, 150);
+
+  function renderBadges(d) {{
+    let h = '';
+    if (d.branch) h += `<span class="git-badge git-branch">${{esc(d.branch)}}</span>`;
+    if (d.dirty) {{
+      const n = d.changed_count || 0;
+      const label = n ? n + ' changed file' + (n !== 1 ? 's' : '') : 'dirty';
+      h += `<span class="git-badge git-dirty">${{esc(label)}}</span>`;
+    }} else if (d.dirty === false) {{
+      h += '<span class="git-badge git-clean">clean</span>';
+    }}
+    const ab = d.ahead_behind;
+    if (Array.isArray(ab) && ab.length === 2) {{
+      const [ahead, behind] = ab;
+      if (ahead && behind) {{
+        h += `<span class="git-badge git-ahead">&uarr;${{ahead}}</span>`;
+        h += `<span class="git-badge git-behind">&darr;${{behind}}</span>`;
+      }} else if (ahead) {{
+        h += `<span class="git-badge git-ahead">&uarr;${{ahead}} ahead</span>`;
+      }} else if (behind) {{
+        h += `<span class="git-badge git-behind">&darr;${{behind}} behind</span>`;
+      }} else {{
+        h += '<span class="git-badge git-synced">in sync</span>';
+      }}
+    }}
+    if (d.last_commit) h += `<span class="git-commit">${{esc(d.last_commit)}}</span>`;
+    return h;
   }}
-  input.addEventListener('input', scheduleCheck);
-  checkDuplicate();
+  function esc(s) {{
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }}
+
+  const refreshBtn = document.getElementById('refresh_git_btn');
+  if (refreshBtn) {{
+    refreshBtn.addEventListener('click', async () => {{
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = 'Refreshing\u2026';
+      for (const project of trackedProjects) {{
+        const card = document.querySelector(`[data-project="${{CSS.escape(project)}}"]`);
+        if (!card) continue;
+        const gitDiv = card.querySelector('.project-git');
+        if (!gitDiv) continue;
+        try {{
+          const params = new URLSearchParams({{ path: project }});
+          const resp = await fetch('/api/project-git-status?' + params.toString());
+          const data = await resp.json();
+          if (!data.available) {{
+            gitDiv.innerHTML = `<span class="git-unavailable">${{esc(data.error || 'unavailable')}}</span>`;
+          }} else {{
+            gitDiv.innerHTML = renderBadges(data);
+          }}
+        }} catch (e) {{
+          gitDiv.innerHTML = '<span class="git-unavailable">fetch error</span>';
+        }}
+      }}
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = 'Refresh';
+    }});
+  }}
 }});
 """
         return self._page_shell(active_nav="Projects", body=body, extra_script=projects_script)
@@ -1890,7 +2413,35 @@ def serve_dashboard(
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if parsed.path not in {"/", "/actions", "/projects"}:
+            if parsed.path == "/api/project-git-status":
+                params = parse_qs(parsed.query)
+                path_value = params.get("path", [""])[0].strip()
+                if path_value:
+                    summary = get_project_git_summary(Path(path_value).expanduser().resolve())
+                else:
+                    summary = {"path": "", "available": False, "error": "no path provided"}
+                body = json.dumps(summary).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/api/project-remote-check":
+                params = parse_qs(parsed.query)
+                path_value = params.get("path", [""])[0].strip()
+                remote_name = params.get("remote", ["origin"])[0].strip()
+                if path_value:
+                    repo = Path(path_value).expanduser().resolve()
+                    result = check_remote_connectivity(repo, remote_name)
+                else:
+                    result = {"ok": False, "remote": remote_name, "message": "no path provided"}
+                body = json.dumps(result).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path not in {"/", "/actions", "/projects", "/projects/detail"}:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
             params = parse_qs(parsed.query)
@@ -1898,6 +2449,9 @@ def serve_dashboard(
             try:
                 if parsed.path == "/actions":
                     body = app.render_actions_page(action_message=action_message)
+                elif parsed.path == "/projects/detail":
+                    project_path = params.get("path", [""])[0]
+                    body = app.render_project_detail_page(project_path)
                 elif parsed.path == "/projects":
                     body = app.render_projects_page(action_message=action_message)
                 else:

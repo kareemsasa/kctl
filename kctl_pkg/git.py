@@ -142,6 +142,223 @@ def create_commit(repo_path: Path, commit_message: str) -> str:
     return sha_result.stdout.strip()
 
 
+def get_ahead_behind(repo_path: Path) -> tuple[int, int] | None:
+    """Return (ahead, behind) counts relative to the upstream tracking branch, or None if unavailable."""
+    result = run_command(["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"], cwd=repo_path)
+    if result.exit_code != 0:
+        return None
+    parts = result.stdout.strip().split()
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[1]), int(parts[0])
+    except ValueError:
+        return None
+
+
+def get_last_commit_summary(repo_path: Path) -> str | None:
+    """Return a short one-line summary of the most recent commit, or None on failure."""
+    result = run_command(["git", "log", "-1", "--format=%h %s (%ar)"], cwd=repo_path)
+    if result.exit_code != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def get_remotes(repo_path: Path) -> list[dict[str, str]]:
+    """Return parsed output of ``git remote -v`` as a list of dicts with name, url, and direction."""
+    result = run_command(["git", "remote", "-v"], cwd=repo_path)
+    if result.exit_code != 0:
+        return []
+    remotes: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for line in result.stdout.strip().splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        name, url = parts[0], parts[1]
+        direction = parts[2].strip("()")
+        key = (name, url, direction)
+        if key not in seen:
+            seen.add(key)
+            remotes.append({"name": name, "url": url, "direction": direction})
+    return remotes
+
+
+def get_recent_commits(repo_path: Path, count: int = 15) -> list[dict[str, str]]:
+    """Return the most recent commits as dicts with sha, subject, author, and relative date."""
+    fmt = "%h%x00%s%x00%an%x00%ar"
+    result = run_command(["git", "log", f"-{count}", f"--format={fmt}"], cwd=repo_path)
+    if result.exit_code != 0:
+        return []
+    commits: list[dict[str, str]] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\x00")
+        if len(parts) < 4:
+            continue
+        commits.append({"sha": parts[0], "subject": parts[1], "author": parts[2], "date": parts[3]})
+    return commits
+
+
+def get_local_branches(repo_path: Path) -> list[dict[str, str]]:
+    """Return local branches with name and whether each is the current branch."""
+    result = run_command(["git", "branch", "--format=%(HEAD) %(refname:short)"], cwd=repo_path)
+    if result.exit_code != 0:
+        return []
+    branches: list[dict[str, str]] = []
+    for line in result.stdout.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        current = line.startswith("* ")
+        name = line[2:].strip() if current else line.strip()
+        branches.append({"name": name, "current": "true" if current else "false"})
+    return branches
+
+
+def get_stash_list(repo_path: Path) -> list[str]:
+    result = run_command(["git", "stash", "list"], cwd=repo_path)
+    if result.exit_code != 0:
+        return []
+    return [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+
+
+def _summarize_remote_error(raw_output: str, exit_code: int) -> str:
+    """Extract a concise error from verbose git ls-remote output."""
+    lines = [line.strip() for line in raw_output.splitlines() if line.strip()]
+    for line in lines:
+        lower = line.lower()
+        if "permission denied" in lower:
+            return line
+        if "could not resolve" in lower:
+            return line
+        if "connection refused" in lower:
+            return line
+        if "no such device or address" in lower:
+            return line
+        if "repository not found" in lower:
+            return line
+    if lines:
+        return lines[0]
+    return f"exit code {exit_code}"
+
+
+def check_remote_connectivity(repo_path: Path, remote_name: str = "origin") -> dict[str, object]:
+    """Test connectivity to a git remote using ``git ls-remote``.
+
+    This goes through git's own transport layer so it correctly handles SSH host
+    aliases, key selection via ``~/.ssh/config``, and credential helpers for HTTPS.
+    """
+    import os
+    import subprocess
+
+    url_result = run_command(["git", "remote", "get-url", remote_name], cwd=repo_path)
+    if url_result.exit_code != 0:
+        return {"remote": remote_name, "ok": False, "message": f"remote '{remote_name}' not found"}
+    url = url_result.stdout.strip()
+    is_ssh = url.startswith("git@") or "ssh://" in url
+    protocol = "ssh" if is_ssh else "https" if url.startswith("https://") else "other"
+
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "SSH_ASKPASS": "", "SSH_ASKPASS_REQUIRE": "never"}
+    env.pop("DISPLAY", None)
+    if is_ssh:
+        env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5"
+
+    try:
+        completed = subprocess.run(
+            ["git", "ls-remote", "--exit-code", "--heads", remote_name],
+            cwd=str(repo_path), capture_output=True, text=True, timeout=15, env=env,
+        )
+        if completed.returncode == 0 or completed.returncode == 2:
+            return {"remote": remote_name, "url": url, "protocol": protocol, "ok": True, "message": "connected"}
+        output = (completed.stderr + completed.stdout).strip()
+        short_message = _summarize_remote_error(output, completed.returncode)
+        result: dict[str, object] = {"remote": remote_name, "url": url, "protocol": protocol, "ok": False, "message": short_message}
+        if is_ssh and "permission denied" in output.lower():
+            host = url.split("@", 1)[1].split(":", 1)[0] if "@" in url else url
+            result["hint"] = f"SSH key for {host} may not be loaded in the agent or configured in ~/.ssh/config"
+        return result
+    except subprocess.TimeoutExpired:
+        return {"remote": remote_name, "url": url, "protocol": protocol, "ok": False, "message": "connection timed out"}
+    except FileNotFoundError:
+        return {"remote": remote_name, "url": url, "protocol": protocol, "ok": False, "message": "git binary not found"}
+    except Exception as exc:
+        return {"remote": remote_name, "url": url, "protocol": protocol, "ok": False, "message": str(exc)}
+
+
+def get_project_git_detail(repo_path: Path) -> dict[str, object]:
+    """Collect comprehensive git state for a project detail page."""
+    path = Path(repo_path)
+    detail: dict[str, object] = {"path": str(path), "available": False}
+    if not path.exists() or not path.is_dir():
+        detail["error"] = "path not found"
+        return detail
+
+    root_result = run_command(["git", "rev-parse", "--show-toplevel"], cwd=path)
+    if root_result.exit_code != 0:
+        detail["error"] = "not a git repo"
+        return detail
+
+    detail["available"] = True
+    detail["name"] = path.resolve().name
+
+    branch_result = run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path)
+    detail["branch"] = branch_result.stdout.strip() if branch_result.exit_code == 0 else None
+
+    status_result = get_git_status(path)
+    if status_result.exit_code == 0:
+        detail["status_output"] = status_result.stdout.strip("\n")
+        files = parse_changed_files(status_result.stdout)
+        detail["dirty"] = len(files) > 0
+        detail["changed_count"] = len(files)
+    else:
+        detail["status_output"] = ""
+        detail["dirty"] = None
+        detail["changed_count"] = 0
+
+    detail["ahead_behind"] = get_ahead_behind(path)
+    detail["remotes"] = get_remotes(path)
+    detail["recent_commits"] = get_recent_commits(path)
+    detail["branches"] = get_local_branches(path)
+    detail["stash_list"] = get_stash_list(path)
+
+    diff_stat_result = get_git_diff_stat(path)
+    detail["diff_stat"] = diff_stat_result.stdout.strip("\n") if diff_stat_result.exit_code == 0 else ""
+
+    return detail
+
+
+def get_project_git_summary(repo_path: Path) -> dict[str, object]:
+    """Collect git state for a tracked project. All fields degrade gracefully."""
+    path = Path(repo_path)
+    summary: dict[str, object] = {"path": str(path), "available": False}
+    if not path.exists() or not path.is_dir():
+        summary["error"] = "path not found"
+        return summary
+
+    root_result = run_command(["git", "rev-parse", "--show-toplevel"], cwd=path)
+    if root_result.exit_code != 0:
+        summary["error"] = "not a git repo"
+        return summary
+
+    summary["available"] = True
+
+    branch_result = run_command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path)
+    summary["branch"] = branch_result.stdout.strip() if branch_result.exit_code == 0 else None
+
+    status_result = get_git_status(path)
+    if status_result.exit_code == 0:
+        files = parse_changed_files(status_result.stdout)
+        summary["dirty"] = len(files) > 0
+        summary["changed_count"] = len(files)
+    else:
+        summary["dirty"] = None
+        summary["changed_count"] = 0
+
+    summary["ahead_behind"] = get_ahead_behind(path)
+    summary["last_commit"] = get_last_commit_summary(path)
+    return summary
+
+
 def probe_workspace_dirty(workspace_path: str | None) -> bool | None:
     """Return True if the workspace has uncommitted changes, False if clean, None if the path is unavailable."""
     if not workspace_path:
