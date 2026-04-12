@@ -55,6 +55,12 @@ def render_dashboard_service(
     quoted_command = shlex.join(command)
     working_directory = project_root().resolve()
     path_value = os.environ.get("PATH", "")
+    npm_global_bin = Path("~/.npm-global/bin").expanduser().resolve()
+    if npm_global_bin.is_dir():
+        npm_global_str = str(npm_global_bin)
+        existing = path_value.split(":") if path_value else []
+        if npm_global_str not in existing:
+            path_value = npm_global_str + (":" + path_value if path_value else "")
     return "\n".join(
         [
             "[Unit]",
