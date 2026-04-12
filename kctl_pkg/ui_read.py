@@ -122,6 +122,25 @@ class WorkspaceDetail:
 
 
 @dataclass(frozen=True)
+class WorkspaceSummary:
+    id: str
+    repository_id: str
+    plan_execution_id: str
+    run_id: str
+    plan_slug: str
+    path: str
+    branch_name: str | None
+    base_ref: str | None
+    status: str
+    lifecycle: str
+    current_step_key: str | None
+    verify_status: str
+    failure_reason: str | None
+    created_at: str
+    released_at: str | None
+
+
+@dataclass(frozen=True)
 class AttentionItem:
     kind: str
     status: str
@@ -444,12 +463,59 @@ def get_workspace(plan_execution_id: str, repo_id: str | Path, db_path: Path | N
     )
 
 
+def derive_workspace_lifecycle(
+    workspace_status: str,
+    plan_status: str,
+    released_at: str | None,
+) -> str:
+    if workspace_status == "active" and plan_status == "running" and released_at is None:
+        return "active"
+    if released_at is not None or workspace_status == "ready":
+        return "released"
+    if workspace_status == "active" and plan_status != "running":
+        return "stale"
+    return workspace_status or "unknown"
+
+
+def list_workspaces(repo_id: str | Path, db_path: Path | None = None) -> list[WorkspaceSummary]:
+    repository = get_repository(repo_id, db_path=db_path)
+    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    store = _open_store(resolved_db_path)
+    try:
+        rows = store.list_workspaces_for_repository(repository.id)
+    finally:
+        store.close()
+    return [
+        WorkspaceSummary(
+            id=row["id"],
+            repository_id=row["repository_id"],
+            plan_execution_id=row["plan_execution_id"],
+            run_id=row["run_id_value"],
+            plan_slug=row["slug"],
+            path=row["path"],
+            branch_name=row["branch_name"],
+            base_ref=row["base_ref"],
+            status=row["status"],
+            lifecycle=derive_workspace_lifecycle(
+                workspace_status=row["status"],
+                plan_status=row["plan_status"],
+                released_at=row["released_at"],
+            ),
+            current_step_key=row["current_step_key"],
+            verify_status=row["verify_status"],
+            failure_reason=row["failure_reason"],
+            created_at=row["created_at"],
+            released_at=row["released_at"],
+        )
+        for row in rows
+    ]
+
+
 def get_repository_overview(repo_id: str | Path, db_path: Path | None = None) -> RepositoryOverview:
     runs = list_runs(repo_id, db_path=db_path)
     plan_executions = list_repository_plan_executions(repo_id, db_path=db_path)
-    stale_workspace_count = sum(
-        1 for plan in plan_executions if plan.status == "running" and plan.worktree_path and not plan.ended_at
-    )
+    workspaces = list_workspaces(repo_id, db_path=db_path)
+    stale_workspace_count = sum(1 for workspace in workspaces if workspace.lifecycle == "stale")
     recent_failure_count = sum(1 for plan in plan_executions if plan.status in {"failed", "blocked"})
     return RepositoryOverview(
         run_count=len(runs),

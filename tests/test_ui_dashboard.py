@@ -24,6 +24,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("kctl Dashboard", html)
             self.assertIn("Overview", html)
             self.assertIn("Attention Queue", html)
+            self.assertIn("Workspaces", html)
             self.assertIn("Runs", html)
             self.assertIn("Run Detail", html)
             self.assertIn("Plan Executions", html)
@@ -34,6 +35,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("001-add-ui", html)
             self.assertIn("verify", html)
             self.assertIn(".kctl/worktrees/", html)
+            self.assertIn("lifecycle=released", html)
 
     def test_dashboard_attention_queue_surfaces_blocked_and_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -50,6 +52,16 @@ class UIDashboardTests(unittest.TestCase):
                     UPDATE plan_executions
                     SET status = 'blocked', failure_reason = 'review_blocked'
                     WHERE run_id = ?
+                    """,
+                    (run_id,),
+                )
+                connection.execute(
+                    """
+                    UPDATE workspaces
+                    SET status = 'active', released_at = NULL
+                    WHERE plan_execution_id = (
+                        SELECT id FROM plan_executions WHERE run_id = ?
+                    )
                     """,
                     (run_id,),
                 )
@@ -144,6 +156,8 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("active_workspace", html)
             self.assertIn("review_blocked", html)
             self.assertIn("running-plan", html)
+            self.assertIn("lifecycle=stale", html)
+            self.assertIn("lifecycle=active", html)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from .ui_read import (
     RunListItem,
     StepTimelineItem,
     WorkspaceDetail,
+    WorkspaceSummary,
     get_plan_execution,
     get_repository_overview,
     get_repository,
@@ -26,6 +27,7 @@ from .ui_read import (
     list_plan_executions,
     list_runs,
     list_step_executions,
+    list_workspaces,
 )
 
 
@@ -60,6 +62,7 @@ class DashboardState:
     repo_root: str
     overview: RepositoryOverview
     attention_items: list[AttentionItem]
+    workspaces: list[WorkspaceSummary]
     runs: list[RunListItem]
     selected_run: RunDetail | None
     plan_cards: list[PlanExecutionCard]
@@ -77,6 +80,7 @@ class DashboardApp:
         repository = get_repository(self.repo_path, db_path=self.db_path)
         overview = get_repository_overview(self.repo_path, db_path=self.db_path)
         attention_items = list_attention_items(self.repo_path, db_path=self.db_path)
+        workspaces = list_workspaces(self.repo_path, db_path=self.db_path)
         runs = list_runs(self.repo_path, db_path=self.db_path)
         selected_run: RunDetail | None = None
         plan_cards: list[PlanExecutionCard] = []
@@ -102,6 +106,7 @@ class DashboardApp:
             repo_root=repository.root_path,
             overview=overview,
             attention_items=attention_items,
+            workspaces=workspaces,
             runs=runs,
             selected_run=selected_run,
             plan_cards=plan_cards,
@@ -149,6 +154,18 @@ class DashboardApp:
             )
             for item in state.attention_items
         ) or "<div class='empty'>No attention items.</div>"
+
+        workspace_items_html = "".join(
+            (
+                f"<a class='card {_status_class(workspace.lifecycle)}' href='{_escape(_link({}, run_id=workspace.run_id, plan_execution_id=workspace.plan_execution_id))}'>"
+                f"<div><strong>{_escape(workspace.plan_slug)}</strong> lifecycle={_escape(workspace.lifecycle)}</div>"
+                f"<div>status={_escape(workspace.status)} step={_escape(workspace.current_step_key)}</div>"
+                f"<div>verify={_escape(workspace.verify_status)} failure_reason={_escape(workspace.failure_reason)}</div>"
+                f"<div>path={_escape(workspace.path)}</div>"
+                "</a>"
+            )
+            for workspace in state.workspaces
+        ) or "<div class='empty'>No workspaces.</div>"
 
         plan_items = "".join(
             (
@@ -309,6 +326,10 @@ class DashboardApp:
               <section class="panel">
                 <h2>Attention Queue</h2>
                 {attention_items_html}
+              </section>
+              <section class="panel">
+                <h2>Workspaces</h2>
+                {workspace_items_html}
               </section>
               <section class="panel">
                 <h2>Runs</h2>

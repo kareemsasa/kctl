@@ -381,3 +381,26 @@ def print_ui_run_detail(repo_path: Path, run_id: str, db_path: Path | None = Non
                 flush=True,
             )
     return 0
+
+
+def print_ui_workspaces(repo_path: Path, db_path: Path | None = None) -> int:
+    from .ui_read import list_workspaces
+
+    repo_root = get_repo_root(repo_path)
+    workspaces = list_workspaces(repo_root, db_path=db_path)
+    print(style_text(f"UI workspaces for {repo_root}", bold=True), flush=True)
+    if not workspaces:
+        print("No indexed workspaces.", flush=True)
+        return 0
+    for workspace in workspaces:
+        status = workspace.lifecycle
+        print(
+            style_status_text(
+                f"- plan={workspace.plan_slug} lifecycle={workspace.lifecycle} status={workspace.status} "
+                f"run={workspace.run_id} step={workspace.current_step_key or '-'} verify={workspace.verify_status} "
+                f"path={workspace.path}",
+                "success" if status == "released" else "running" if status == "active" else "failure",
+            ),
+            flush=True,
+        )
+    return 0

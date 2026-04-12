@@ -11,7 +11,7 @@ from .runner import run_plan
 from .terminal import set_color_enabled, style_status_text
 from .types import PlanError
 from .ui_dashboard import serve_dashboard
-from .ui_index import index_repository_state, print_ui_run_detail, print_ui_runs
+from .ui_index import index_repository_state, print_ui_run_detail, print_ui_runs, print_ui_workspaces
 
 
 def add_run_options(parser: argparse.ArgumentParser) -> None:
@@ -130,6 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
     ui_run_parser.add_argument("repo", help="Repository root to inspect.")
     ui_run_parser.add_argument("run_id", help="Run id to inspect.")
     ui_run_parser.add_argument(
+        "--db-path",
+        help="Optional path to the SQLite state database.",
+    )
+
+    ui_workspaces_parser = ui_subparsers.add_parser("workspaces", help="List indexed workspaces for a repository.")
+    ui_workspaces_parser.add_argument("repo", help="Repository root to inspect.")
+    ui_workspaces_parser.add_argument(
         "--db-path",
         help="Optional path to the SQLite state database.",
     )
@@ -306,6 +313,8 @@ def main(argv: list[str] | None = None) -> int:
                 return print_ui_runs(repo_path, db_path=db_path)
             if args.ui_command == "run":
                 return print_ui_run_detail(repo_path, args.run_id, db_path=db_path)
+            if args.ui_command == "workspaces":
+                return print_ui_workspaces(repo_path, db_path=db_path)
             if args.ui_command == "dashboard":
                 return serve_dashboard(repo_path, host=args.host, port=args.port, db_path=db_path)
         except PlanError as exc:

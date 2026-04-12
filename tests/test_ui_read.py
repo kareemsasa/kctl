@@ -6,6 +6,7 @@ from pathlib import Path
 
 from kctl_pkg.ui_index import default_db_path, index_repository_state
 from kctl_pkg.ui_read import (
+    derive_workspace_lifecycle,
     get_plan_execution,
     get_repository_overview,
     get_repository,
@@ -19,6 +20,7 @@ from kctl_pkg.ui_read import (
     list_repositories,
     list_runs,
     list_step_executions,
+    list_workspaces,
 )
 from kctl_pkg.ui_store import UIStateStore
 from tests.test_ui_index import init_git_repo, write_sample_plan_run
@@ -75,6 +77,9 @@ class UIReadTests(unittest.TestCase):
             assert workspace is not None
             self.assertIn(".kctl/worktrees/", workspace.path)
             self.assertTrue(workspace.branch_name)
+            workspaces = list_workspaces(repo_path)
+            self.assertEqual(len(workspaces), 1)
+            self.assertEqual(workspaces[0].lifecycle, "released")
 
     def test_agent_queries_work_when_tables_are_empty_or_populated(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -197,6 +202,21 @@ class UIReadTests(unittest.TestCase):
                     ["id"],
                 )
                 store.upsert(
+                    "workspaces",
+                    {
+                        "id": f"{run_id}:001-add-ui",
+                        "repository_id": str(repo_path.resolve()),
+                        "plan_execution_id": existing_plan_execution_id,
+                        "path": str((repo_path / ".kctl" / "worktrees" / run_id / "001-add-ui").resolve()),
+                        "branch_name": "kctl/test",
+                        "base_ref": "main",
+                        "status": "active",
+                        "created_at": "2026-03-25T12:00:00+00:00",
+                        "released_at": None,
+                    },
+                    ["id"],
+                )
+                store.upsert(
                     "plan_executions",
                     {
                         "id": "run-running:running-plan",
@@ -215,6 +235,21 @@ class UIReadTests(unittest.TestCase):
                     },
                     ["id"],
                 )
+                store.upsert(
+                    "workspaces",
+                    {
+                        "id": "workspace-running",
+                        "repository_id": str(repo_path.resolve()),
+                        "plan_execution_id": "run-running:running-plan",
+                        "path": str((repo_path / ".kctl" / "worktrees" / "run-running" / "running-plan").resolve()),
+                        "branch_name": "kctl/run-running/running-plan",
+                        "base_ref": "main",
+                        "status": "active",
+                        "created_at": "2026-03-25T13:00:00+00:00",
+                        "released_at": None,
+                    },
+                    ["id"],
+                )
                 store.commit()
             finally:
                 store.close()
@@ -228,11 +263,22 @@ class UIReadTests(unittest.TestCase):
             self.assertEqual(overview.blocked_plan_count, 1)
             self.assertEqual(overview.running_plan_count, 1)
             self.assertEqual(overview.recent_failure_count, 1)
+            self.assertEqual(overview.stale_workspace_count, 1)
 
             attention_items = list_attention_items(repo_path)
             kinds = {item.kind for item in attention_items}
             self.assertIn("failed_verify", kinds)
             self.assertIn("active_workspace", kinds)
+
+            workspaces = list_workspaces(repo_path)
+            lifecycle_by_plan = {workspace.plan_slug: workspace.lifecycle for workspace in workspaces}
+            self.assertEqual(lifecycle_by_plan["001-add-ui"], "stale")
+            self.assertEqual(lifecycle_by_plan["running-plan"], "active")
+
+    def test_workspace_lifecycle_derivation_is_conservative(self) -> None:
+        self.assertEqual(derive_workspace_lifecycle("active", "running", None), "active")
+        self.assertEqual(derive_workspace_lifecycle("ready", "passed", "2026-03-25T12:00:00+00:00"), "released")
+        self.assertEqual(derive_workspace_lifecycle("active", "blocked", None), "stale")
 
 
 if __name__ == "__main__":

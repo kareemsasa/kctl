@@ -339,6 +339,28 @@ class UIStateStore:
         )
         return cursor.fetchone()
 
+    def list_workspaces_for_repository(self, repository_id: str) -> list[sqlite3.Row]:
+        cursor = self.connection.execute(
+            """
+            SELECT
+                workspaces.*,
+                plan_executions.status AS plan_status,
+                plan_executions.current_step_key,
+                plan_executions.verify_status,
+                plan_executions.failure_reason,
+                plan_definitions.slug,
+                runs.id AS run_id_value
+            FROM workspaces
+            JOIN plan_executions ON plan_executions.id = workspaces.plan_execution_id
+            JOIN plan_definitions ON plan_definitions.id = plan_executions.plan_definition_id
+            JOIN runs ON runs.id = plan_executions.run_id
+            WHERE workspaces.repository_id = ?
+            ORDER BY workspaces.created_at DESC, plan_definitions.slug ASC
+            """,
+            (repository_id,),
+        )
+        return list(cursor.fetchall())
+
     def list_agent_profiles(self) -> list[sqlite3.Row]:
         cursor = self.connection.execute(
             """

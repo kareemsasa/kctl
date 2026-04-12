@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kctl_pkg.artifacts import single_run_dir
-from kctl_pkg.ui_index import default_db_path, index_repository_state, print_ui_run_detail, print_ui_runs
+from kctl_pkg.ui_index import default_db_path, index_repository_state, print_ui_run_detail, print_ui_runs, print_ui_workspaces
 
 
 def run_checked(command: list[str], cwd: Path) -> None:
@@ -258,6 +258,13 @@ class UIIndexTests(unittest.TestCase):
             output = detail_buffer.getvalue()
             self.assertIn("plan=001-add-ui", output)
             self.assertIn("step[2] key=verify", output)
+
+            workspaces_buffer = io.StringIO()
+            with redirect_stdout(workspaces_buffer):
+                print_ui_workspaces(repo_path)
+            workspace_output = workspaces_buffer.getvalue()
+            self.assertIn("plan=001-add-ui", workspace_output)
+            self.assertIn("lifecycle=released", workspace_output)
 
     def test_index_repository_state_reads_external_single_run_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
