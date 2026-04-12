@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from .git import ensure_git_repo, get_repo_root
+from .git import ensure_git_repo, get_repo_root, probe_workspace_dirty
 from .types import PlanError
 from .ui_index import default_db_path
 from .ui_store import UIStateStore
+
+
+STALE_RUNNING_THRESHOLD_SECONDS = 1800
 
 
 @dataclass(frozen=True)
@@ -144,13 +148,16 @@ class WorkspaceSummary:
 class AttentionItem:
     kind: str
     status: str
+    operator_action: str  # "active" | "safe_rerun" | "review_workspace" | "fix_config" | "investigate_stale"
     plan_execution_id: str
     run_id: str
     plan_slug: str
+    plan_file_path: str | None
     current_step_key: str | None
     failure_reason: str | None
     verify_status: str
     workspace_path: str | None
+    started_at: str
 
 
 @dataclass(frozen=True)
@@ -529,69 +536,78 @@ def get_repository_overview(repo_id: str | Path, db_path: Path | None = None) ->
     )
 
 
+def classify_operator_action(
+    plan_status: str,
+    failure_reason: str | None,
+    workspace_is_dirty: bool | None,
+    started_at: str,
+    now_utc: datetime | None = None,
+) -> str:
+    """Classify what operator action is appropriate for a non-passing plan execution.
+
+    Returns one of:
+      "active"            — currently running, no sign of staleness
+      "investigate_stale" — running but no progress for >STALE_RUNNING_THRESHOLD_SECONDS
+      "fix_config"        — blocked by preflight (env, binary, path)
+      "review_workspace"  — workspace has uncommitted changes; human must decide before retry
+      "safe_rerun"        — failed cleanly; can be relaunched immediately
+    """
+    if plan_status == "running":
+        if now_utc is not None:
+            try:
+                started = datetime.fromisoformat(started_at)
+                elapsed = (now_utc - started).total_seconds()
+                if elapsed > STALE_RUNNING_THRESHOLD_SECONDS:
+                    return "investigate_stale"
+            except (ValueError, TypeError):
+                pass
+        return "active"
+    if failure_reason == "preflight_failed":
+        return "fix_config"
+    if workspace_is_dirty is True:
+        return "review_workspace"
+    return "safe_rerun"
+
+
 def list_attention_items(repo_id: str | Path, db_path: Path | None = None) -> list[AttentionItem]:
     plan_executions = list_repository_plan_executions(repo_id, db_path=db_path)
+    now_utc = datetime.now(timezone.utc)
     items: list[AttentionItem] = []
     for plan in plan_executions:
         if plan.verify_status == "failed":
-            items.append(
-                AttentionItem(
-                    kind="failed_verify",
-                    status=plan.status,
-                    plan_execution_id=plan.id,
-                    run_id=plan.run_id,
-                    plan_slug=plan.plan_slug,
-                    current_step_key=plan.current_step_key,
-                    failure_reason=plan.failure_reason,
-                    verify_status=plan.verify_status,
-                    workspace_path=plan.worktree_path,
-                )
-            )
+            kind = "failed_verify"
+        elif plan.status == "blocked":
+            kind = "blocked_plan"
+        elif plan.status == "failed":
+            kind = "failed_plan"
+        elif plan.status == "running" and plan.worktree_path:
+            kind = "active_workspace"
+        else:
             continue
-        if plan.status == "blocked":
-            items.append(
-                AttentionItem(
-                    kind="blocked_plan",
-                    status=plan.status,
-                    plan_execution_id=plan.id,
-                    run_id=plan.run_id,
-                    plan_slug=plan.plan_slug,
-                    current_step_key=plan.current_step_key,
-                    failure_reason=plan.failure_reason,
-                    verify_status=plan.verify_status,
-                    workspace_path=plan.worktree_path,
-                )
+        workspace_is_dirty = probe_workspace_dirty(plan.worktree_path)
+        operator_action = classify_operator_action(
+            plan_status=plan.status,
+            failure_reason=plan.failure_reason,
+            workspace_is_dirty=workspace_is_dirty,
+            started_at=plan.started_at,
+            now_utc=now_utc,
+        )
+        items.append(
+            AttentionItem(
+                kind=kind,
+                status=plan.status,
+                operator_action=operator_action,
+                plan_execution_id=plan.id,
+                run_id=plan.run_id,
+                plan_slug=plan.plan_slug,
+                plan_file_path=plan.plan_file_path,
+                current_step_key=plan.current_step_key,
+                failure_reason=plan.failure_reason,
+                verify_status=plan.verify_status,
+                workspace_path=plan.worktree_path,
+                started_at=plan.started_at,
             )
-            continue
-        if plan.status == "failed":
-            items.append(
-                AttentionItem(
-                    kind="failed_plan",
-                    status=plan.status,
-                    plan_execution_id=plan.id,
-                    run_id=plan.run_id,
-                    plan_slug=plan.plan_slug,
-                    current_step_key=plan.current_step_key,
-                    failure_reason=plan.failure_reason,
-                    verify_status=plan.verify_status,
-                    workspace_path=plan.worktree_path,
-                )
-            )
-            continue
-        if plan.status == "running" and plan.worktree_path:
-            items.append(
-                AttentionItem(
-                    kind="active_workspace",
-                    status=plan.status,
-                    plan_execution_id=plan.id,
-                    run_id=plan.run_id,
-                    plan_slug=plan.plan_slug,
-                    current_step_key=plan.current_step_key,
-                    failure_reason=plan.failure_reason,
-                    verify_status=plan.verify_status,
-                    workspace_path=plan.worktree_path,
-                )
-            )
+        )
     return items
 
 

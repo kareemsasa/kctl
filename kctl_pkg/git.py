@@ -142,6 +142,19 @@ def create_commit(repo_path: Path, commit_message: str) -> str:
     return sha_result.stdout.strip()
 
 
+def probe_workspace_dirty(workspace_path: str | None) -> bool | None:
+    """Return True if the workspace has uncommitted changes, False if clean, None if the path is unavailable."""
+    if not workspace_path:
+        return None
+    path = Path(workspace_path)
+    if not path.exists() or not path.is_dir():
+        return None
+    result = get_git_status(path)
+    if result.exit_code != 0:
+        return None
+    return bool(result.stdout.strip())
+
+
 def create_isolated_workspace(
     repo_path: Path,
     workspace_path: Path,

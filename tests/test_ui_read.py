@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from kctl_pkg.ui_index import default_db_path, index_repository_state
 from kctl_pkg.ui_read import (
+    STALE_RUNNING_THRESHOLD_SECONDS,
+    classify_operator_action,
     derive_workspace_lifecycle,
     get_plan_execution,
     get_repository_overview,
@@ -279,6 +282,191 @@ class UIReadTests(unittest.TestCase):
         self.assertEqual(derive_workspace_lifecycle("active", "running", None), "active")
         self.assertEqual(derive_workspace_lifecycle("ready", "passed", "2026-03-25T12:00:00+00:00"), "released")
         self.assertEqual(derive_workspace_lifecycle("active", "blocked", None), "stale")
+
+    def test_attention_items_include_operator_action_and_plan_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            db_path = default_db_path(repo_path)
+            store = UIStateStore(db_path)
+            try:
+                store.initialize()
+                plan_def_id = list_plan_executions(repo_path, run_id)[0].plan_definition_id
+                existing_plan_execution_id = list_plan_executions(repo_path, run_id)[0].id
+                # failed plan, clean workspace (path doesn't exist) → safe_rerun
+                store.upsert(
+                    "plan_executions",
+                    {
+                        "id": existing_plan_execution_id,
+                        "run_id": run_id,
+                        "plan_definition_id": plan_def_id,
+                        "status": "failed",
+                        "current_step_key": "implement",
+                        "verify_status": "not_run",
+                        "started_at": "2026-03-25T12:00:00+00:00",
+                        "ended_at": "2026-03-25T12:05:00+00:00",
+                        "worktree_path": None,
+                        "branch_name": "kctl/test",
+                        "log_path": None,
+                        "changed_files_count": 0,
+                        "failure_reason": "run_failed",
+                    },
+                    ["id"],
+                )
+                store.commit()
+            finally:
+                store.close()
+
+            items = list_attention_items(repo_path)
+            failed_items = [item for item in items if item.kind == "failed_plan"]
+            self.assertEqual(len(failed_items), 1)
+            self.assertEqual(failed_items[0].operator_action, "safe_rerun")
+            self.assertIsNotNone(failed_items[0].plan_file_path)
+            self.assertIsNotNone(failed_items[0].started_at)
+
+    def test_attention_item_operator_action_is_fix_config_for_preflight_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            db_path = default_db_path(repo_path)
+            store = UIStateStore(db_path)
+            try:
+                store.initialize()
+                plan_def_id = list_plan_executions(repo_path, run_id)[0].plan_definition_id
+                existing_plan_execution_id = list_plan_executions(repo_path, run_id)[0].id
+                store.upsert(
+                    "plan_executions",
+                    {
+                        "id": existing_plan_execution_id,
+                        "run_id": run_id,
+                        "plan_definition_id": plan_def_id,
+                        "status": "blocked",
+                        "current_step_key": "implement",
+                        "verify_status": "not_run",
+                        "started_at": "2026-03-25T12:00:00+00:00",
+                        "ended_at": "2026-03-25T12:00:00+00:00",
+                        "worktree_path": None,
+                        "branch_name": None,
+                        "log_path": None,
+                        "changed_files_count": 0,
+                        "failure_reason": "preflight_failed",
+                    },
+                    ["id"],
+                )
+                store.commit()
+            finally:
+                store.close()
+
+            items = list_attention_items(repo_path)
+            blocked_items = [item for item in items if item.kind == "blocked_plan"]
+            self.assertEqual(len(blocked_items), 1)
+            self.assertEqual(blocked_items[0].operator_action, "fix_config")
+
+    def test_attention_item_operator_action_is_review_workspace_when_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+
+            # create an actual worktree-like directory with an untracked file
+            workspace_path = repo_path / ".kctl" / "worktrees" / run_id / "001-add-ui"
+            workspace_path.mkdir(parents=True, exist_ok=True)
+            import subprocess
+            subprocess.run(["git", "worktree", "add", "-b", f"kctl/{run_id}/test", str(workspace_path), "HEAD"], cwd=str(repo_path), check=True, capture_output=True)
+            (workspace_path / "dirty.txt").write_text("uncommitted\n")
+
+            index_repository_state(repo_path)
+
+            db_path = default_db_path(repo_path)
+            store = UIStateStore(db_path)
+            try:
+                store.initialize()
+                plan_def_id = list_plan_executions(repo_path, run_id)[0].plan_definition_id
+                existing_plan_execution_id = list_plan_executions(repo_path, run_id)[0].id
+                store.upsert(
+                    "plan_executions",
+                    {
+                        "id": existing_plan_execution_id,
+                        "run_id": run_id,
+                        "plan_definition_id": plan_def_id,
+                        "status": "failed",
+                        "current_step_key": "implement",
+                        "verify_status": "not_run",
+                        "started_at": "2026-03-25T12:00:00+00:00",
+                        "ended_at": "2026-03-25T12:05:00+00:00",
+                        "worktree_path": str(workspace_path),
+                        "branch_name": f"kctl/{run_id}/test",
+                        "log_path": None,
+                        "changed_files_count": 1,
+                        "failure_reason": "run_failed",
+                    },
+                    ["id"],
+                )
+                store.commit()
+            finally:
+                store.close()
+
+            items = list_attention_items(repo_path)
+            failed_items = [item for item in items if item.kind == "failed_plan"]
+            self.assertEqual(len(failed_items), 1)
+            self.assertEqual(failed_items[0].operator_action, "review_workspace")
+
+
+class ClassifyOperatorActionTests(unittest.TestCase):
+    def test_running_plan_within_threshold_is_active(self) -> None:
+        now = datetime(2026, 4, 12, 5, 10, tzinfo=timezone.utc)
+        started = "2026-04-12T05:05:00+00:00"  # 5 min ago
+        action = classify_operator_action("running", None, None, started, now_utc=now)
+        self.assertEqual(action, "active")
+
+    def test_running_plan_past_threshold_is_investigate_stale(self) -> None:
+        now = datetime(2026, 4, 12, 5, 0, tzinfo=timezone.utc)
+        started = "2026-04-12T00:00:00+00:00"  # 5 hours ago
+        action = classify_operator_action("running", None, None, started, now_utc=now)
+        self.assertEqual(action, "investigate_stale")
+
+    def test_running_plan_without_now_utc_is_active(self) -> None:
+        # when now_utc is not provided, stale detection is skipped
+        action = classify_operator_action("running", None, None, "2026-01-01T00:00:00+00:00", now_utc=None)
+        self.assertEqual(action, "active")
+
+    def test_preflight_failed_is_fix_config_regardless_of_workspace(self) -> None:
+        for dirty in (True, False, None):
+            with self.subTest(dirty=dirty):
+                action = classify_operator_action("blocked", "preflight_failed", dirty, "2026-04-12T05:00:00+00:00")
+                self.assertEqual(action, "fix_config")
+
+    def test_dirty_workspace_is_review_workspace(self) -> None:
+        action = classify_operator_action("failed", "run_failed", True, "2026-04-12T05:00:00+00:00")
+        self.assertEqual(action, "review_workspace")
+
+    def test_clean_workspace_is_safe_rerun(self) -> None:
+        action = classify_operator_action("failed", "run_failed", False, "2026-04-12T05:00:00+00:00")
+        self.assertEqual(action, "safe_rerun")
+
+    def test_missing_workspace_is_safe_rerun(self) -> None:
+        action = classify_operator_action("failed", "run_failed", None, "2026-04-12T05:00:00+00:00")
+        self.assertEqual(action, "safe_rerun")
+
+    def test_stale_threshold_boundary(self) -> None:
+        now = datetime(2026, 4, 12, 5, 0, tzinfo=timezone.utc)
+        just_under = datetime(2026, 4, 12, 4, 30, 1, tzinfo=timezone.utc)
+        just_over = datetime(2026, 4, 12, 4, 29, 59, tzinfo=timezone.utc)
+        self.assertEqual(
+            classify_operator_action("running", None, None, just_under.isoformat(), now_utc=now),
+            "active",
+        )
+        self.assertEqual(
+            classify_operator_action("running", None, None, just_over.isoformat(), now_utc=now),
+            "investigate_stale",
+        )
+        self.assertEqual(STALE_RUNNING_THRESHOLD_SECONDS, 1800)
 
 
 if __name__ == "__main__":

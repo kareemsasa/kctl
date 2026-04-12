@@ -19,6 +19,7 @@ from .ui_index import index_repository_state
 
 from .types import PlanError
 from .ui_read import (
+    STALE_RUNNING_THRESHOLD_SECONDS,
     AttentionItem,
     PlanExecutionCard,
     RepositoryOverview,
@@ -310,6 +311,52 @@ def summarize_preflight_for_dashboard(
             ),
         },
     }
+
+
+def _operator_action_label(action: str) -> str:
+    return {
+        "active": "Running",
+        "safe_rerun": "Safe to Rerun",
+        "review_workspace": "Review Workspace",
+        "fix_config": "Fix Config",
+        "investigate_stale": "Stale — Investigate",
+    }.get(action, action)
+
+
+def _render_attention_card(item: AttentionItem) -> str:
+    link_href = _link({}, run_id=item.run_id, plan_execution_id=item.plan_execution_id)
+    action_label = _operator_action_label(item.operator_action)
+    parts = [
+        f"<div class='card {_status_class(item.status)}'>",
+        f"<a href='{_escape(link_href)}'>",
+        f"<div><strong>{_escape(action_label)}</strong> — {_escape(item.plan_slug)}</div>",
+        f"<div>step={_escape(item.current_step_key)} verify={_escape(item.verify_status)}</div>",
+    ]
+    if item.failure_reason:
+        parts.append(f"<div>reason={_escape(item.failure_reason)}</div>")
+    parts.append("</a>")
+    if item.operator_action == "safe_rerun" and item.plan_file_path:
+        parts.append(
+            f"<form method='post' action='/actions/rerun-plan'>"
+            f"<input type='hidden' name='plan_file_path' value='{_escape(item.plan_file_path)}'>"
+            f"<input type='hidden' name='run_id' value='{_escape(item.run_id)}'>"
+            f"<button type='submit'>Rerun</button>"
+            f"</form>"
+        )
+    elif item.operator_action == "review_workspace" and item.workspace_path:
+        parts.append(
+            f"<div class='help'>Workspace has uncommitted changes. Review before retrying.</div>"
+            f"<button type='button' class='mini-button' data-copy='{_escape(item.workspace_path)}'>Copy workspace path</button>"
+        )
+    elif item.operator_action == "fix_config":
+        parts.append("<div class='help'>Blocked at launch. Fix preflight issues and rerun.</div>")
+    elif item.operator_action == "investigate_stale":
+        stale_minutes = STALE_RUNNING_THRESHOLD_SECONDS // 60
+        parts.append(
+            f"<div class='help'>Running since {_escape(item.started_at)} (no completion after {stale_minutes}+ min).</div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def read_plan_file(plan_path: Path) -> tuple[str, str]:
@@ -689,15 +736,7 @@ class DashboardApp:
         )
 
         attention_items_html = "".join(
-            (
-                f"<a class='card {_status_class(item.status)}' href='{_escape(_link({}, run_id=item.run_id, plan_execution_id=item.plan_execution_id))}'>"
-                f"<div><strong>{_escape(item.kind)}</strong> plan={_escape(item.plan_slug)}</div>"
-                f"<div>status={_escape(item.status)} step={_escape(item.current_step_key)}</div>"
-                f"<div>verify={_escape(item.verify_status)} failure_reason={_escape(item.failure_reason)}</div>"
-                f"<div>workspace={_escape(item.workspace_path)}</div>"
-                "</a>"
-            )
-            for item in state.attention_items
+            _render_attention_card(item) for item in state.attention_items
         ) or "<div class='empty'>No attention items.</div>"
 
         action_panel_html = (
@@ -1509,7 +1548,7 @@ def serve_dashboard(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/actions/index", "/actions/run-many", "/actions/create-plan"}:
+            if parsed.path not in {"/actions/index", "/actions/run-many", "/actions/create-plan", "/actions/rerun-plan"}:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -1517,7 +1556,19 @@ def serve_dashboard(
             run_id = form_data.get("run_id", [""])[0] or None
             plan_execution_id = form_data.get("plan_execution_id", [""])[0] or None
             try:
-                if parsed.path == "/actions/index":
+                if parsed.path == "/actions/rerun-plan":
+                    plan_file_path_value = form_data.get("plan_file_path", [""])[0].strip()
+                    if not plan_file_path_value:
+                        raise PlanError("Plan file path is required.")
+                    plan_path = Path(plan_file_path_value)
+                    if not plan_path.exists():
+                        raise PlanError(f"Plan file not found: {plan_path}")
+                    plans_dir = plan_path.parent
+                    plan_file_name = plan_path.name
+                    run_id = app.start_run_many(plans_dir, concurrency=1, selected_plan_names=[plan_file_name])
+                    message = f"Rerun started for {plan_file_name}."
+                    plan_execution_id = None
+                elif parsed.path == "/actions/index":
                     app.run_index_now()
                     message = "Index refreshed."
                 elif parsed.path == "/actions/create-plan":

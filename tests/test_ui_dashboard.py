@@ -249,8 +249,9 @@ class UIDashboardTests(unittest.TestCase):
 
             self.assertIn("blocked_plans=1", html)
             self.assertIn("running_plans=1", html)
-            self.assertIn("blocked_plan", html)
-            self.assertIn("active_workspace", html)
+            # operator action labels replace raw kind names in attention cards
+            self.assertIn("Review Workspace", html)
+            self.assertIn("Stale — Investigate", html)
             self.assertIn("review_blocked", html)
             self.assertIn("running-plan", html)
             self.assertIn("lifecycle=stale", html)
@@ -397,6 +398,96 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Fix:", html)
             self.assertIn("BLOCK", html)
             self.assertIn("Copy env", html)
+
+    def test_attention_queue_shows_operator_action_labels_and_rerun_button(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            from kctl_pkg.ui_read import list_plan_executions as _list_plan_executions
+            from kctl_pkg.ui_store import UIStateStore
+            db_path = default_db_path(repo_path)
+            plan_exec = _list_plan_executions(repo_path, run_id)[0]
+            store = UIStateStore(db_path)
+            try:
+                store.initialize()
+                # make it a safe-rerun failed plan (no worktree, so workspace_is_dirty=None)
+                store.upsert(
+                    "plan_executions",
+                    {
+                        "id": plan_exec.id,
+                        "run_id": run_id,
+                        "plan_definition_id": plan_exec.plan_definition_id,
+                        "status": "failed",
+                        "current_step_key": "implement",
+                        "verify_status": "not_run",
+                        "started_at": "2026-03-25T12:00:00+00:00",
+                        "ended_at": "2026-03-25T12:05:00+00:00",
+                        "worktree_path": None,
+                        "branch_name": None,
+                        "log_path": None,
+                        "changed_files_count": 0,
+                        "failure_reason": "run_failed",
+                    },
+                    ["id"],
+                )
+                store.commit()
+            finally:
+                store.close()
+
+            app = DashboardApp(repo_path)
+            html = app.render_page()
+
+            self.assertIn("Safe to Rerun", html)
+            self.assertIn("/actions/rerun-plan", html)
+            self.assertIn("Rerun", html)
+            self.assertNotIn("Fix Config", html)
+
+    def test_attention_queue_shows_fix_config_label_for_preflight_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            from kctl_pkg.ui_read import list_plan_executions as _list_plan_executions
+            from kctl_pkg.ui_store import UIStateStore
+            db_path = default_db_path(repo_path)
+            plan_exec = _list_plan_executions(repo_path, run_id)[0]
+            store = UIStateStore(db_path)
+            try:
+                store.initialize()
+                store.upsert(
+                    "plan_executions",
+                    {
+                        "id": plan_exec.id,
+                        "run_id": run_id,
+                        "plan_definition_id": plan_exec.plan_definition_id,
+                        "status": "blocked",
+                        "current_step_key": "implement",
+                        "verify_status": "not_run",
+                        "started_at": "2026-03-25T12:00:00+00:00",
+                        "ended_at": "2026-03-25T12:00:00+00:00",
+                        "worktree_path": None,
+                        "branch_name": None,
+                        "log_path": None,
+                        "changed_files_count": 0,
+                        "failure_reason": "preflight_failed",
+                    },
+                    ["id"],
+                )
+                store.commit()
+            finally:
+                store.close()
+
+            app = DashboardApp(repo_path)
+            html = app.render_page()
+
+            self.assertIn("Fix Config", html)
+            self.assertIn("Blocked at launch", html)
+            self.assertNotIn("/actions/rerun-plan", html)
 
     def test_create_plan_writes_template_based_plan_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
