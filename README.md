@@ -356,6 +356,8 @@ Multi-plan run state is written under `.kctl/runs/<run-id>/run.json`, with a sib
 
 For phone access over Tailscale, use `kctl ui dashboard <repo> --tailscale`. That binds on `0.0.0.0`, prints a localhost URL plus a hostname-based URL hint, and keeps the default local-only behavior unless you opt in. If you already know the exact MagicDNS name or public tailnet URL you want to use, pass it with `--announce-url`.
 
+The dashboard also includes an Actions panel. From there you can refresh the index immediately or start `plans run-many` for a plans directory. Run-many launches in a background thread and reindexes the repository when it completes so new runs show up in the UI.
+
 For a long-running background service on Linux, use `kctl ui service install <repo> --announce-url http://...`. That writes a user-level systemd unit under `~/.config/systemd/user/`, reloads the user daemon, enables the service, and restarts it. Manage it with `systemctl --user status kctl-dashboard.service` and `systemctl --user restart kctl-dashboard.service`.
 
 ## Run Logs

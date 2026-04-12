@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import html
 import socket
+import threading
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
+
+from .multi import run_many_plans
+from .ui_index import index_repository_state
 
 from .types import PlanError
 from .ui_read import (
@@ -61,6 +65,7 @@ def _link(base_params: dict[str, str], **updates: str | None) -> str:
 class DashboardState:
     repo_name: str
     repo_root: str
+    action_message: str | None
     overview: RepositoryOverview
     attention_items: list[AttentionItem]
     workspaces: list[WorkspaceSummary]
@@ -102,7 +107,12 @@ class DashboardApp:
         self.repo_path = repo_path.resolve()
         self.db_path = db_path.resolve() if db_path is not None else None
 
-    def load_state(self, run_id: str | None = None, plan_execution_id: str | None = None) -> DashboardState:
+    def load_state(
+        self,
+        run_id: str | None = None,
+        plan_execution_id: str | None = None,
+        action_message: str | None = None,
+    ) -> DashboardState:
         repository = get_repository(self.repo_path, db_path=self.db_path)
         overview = get_repository_overview(self.repo_path, db_path=self.db_path)
         attention_items = list_attention_items(self.repo_path, db_path=self.db_path)
@@ -130,6 +140,7 @@ class DashboardApp:
         return DashboardState(
             repo_name=repository.name,
             repo_root=repository.root_path,
+            action_message=action_message,
             overview=overview,
             attention_items=attention_items,
             workspaces=workspaces,
@@ -141,8 +152,23 @@ class DashboardApp:
             workspace=workspace,
         )
 
-    def render_page(self, run_id: str | None = None, plan_execution_id: str | None = None) -> str:
-        state = self.load_state(run_id=run_id, plan_execution_id=plan_execution_id)
+    def run_index_now(self) -> None:
+        index_repository_state(self.repo_path, db_path=self.db_path)
+
+    def start_run_many(self, plans_dir: Path, concurrency: int) -> None:
+        def _run() -> None:
+            run_many_plans(plans_dir.resolve(), concurrency=concurrency, verbose=False)
+            index_repository_state(self.repo_path, db_path=self.db_path)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def render_page(
+        self,
+        run_id: str | None = None,
+        plan_execution_id: str | None = None,
+        action_message: str | None = None,
+    ) -> str:
+        state = self.load_state(run_id=run_id, plan_execution_id=plan_execution_id, action_message=action_message)
         base_params = {}
         if state.selected_run is not None:
             base_params["run_id"] = state.selected_run.id
@@ -180,6 +206,31 @@ class DashboardApp:
             )
             for item in state.attention_items
         ) or "<div class='empty'>No attention items.</div>"
+
+        action_panel_html = (
+            "<section class='panel'>"
+            "<h2>Actions</h2>"
+            + (
+                f"<div class='notice'>{_escape(state.action_message)}</div>"
+                if state.action_message
+                else ""
+            )
+            + (
+                f"<form method='post' action='/actions/index'>"
+                f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
+                "<button type='submit'>Refresh Index</button>"
+                "</form>"
+                "<form method='post' action='/actions/run-many'>"
+                f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
+                "<label for='plans_dir'><strong>Plans Dir</strong></label>"
+                "<input id='plans_dir' name='plans_dir' type='text' placeholder='/path/to/plans' required>"
+                "<label for='concurrency'><strong>Concurrency</strong></label>"
+                "<input id='concurrency' name='concurrency' type='number' min='1' value='1'>"
+                "<button type='submit'>Run Plans</button>"
+                "</form>"
+            )
+            + "</section>"
+        )
 
         workspace_items_html = "".join(
             (
@@ -295,6 +346,26 @@ class DashboardApp:
       border-radius: 6px;
       padding: 16px;
     }}
+    form {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 12px;
+    }}
+    input, button {{
+      font: inherit;
+      padding: 8px 10px;
+    }}
+    button {{
+      cursor: pointer;
+    }}
+    .notice {{
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+    }}
     .list-item, .card {{
       display: block;
       text-decoration: none;
@@ -349,6 +420,7 @@ class DashboardApp:
   <main>
             <div class="column">
               {overview_html}
+              {action_panel_html}
               <section class="panel">
                 <h2>Attention Queue</h2>
                 {attention_items_html}
@@ -421,8 +493,9 @@ def serve_dashboard(
             params = parse_qs(parsed.query)
             run_id = params.get("run_id", [None])[0]
             plan_execution_id = params.get("plan_execution_id", [None])[0]
+            action_message = params.get("message", [None])[0]
             try:
-                body = app.render_page(run_id=run_id, plan_execution_id=plan_execution_id)
+                body = app.render_page(run_id=run_id, plan_execution_id=plan_execution_id, action_message=action_message)
             except PlanError as exc:
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -438,6 +511,41 @@ def serve_dashboard(
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(body.encode("utf-8"))
+
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path not in {"/actions/index", "/actions/run-many"}:
+                self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                return
+            content_length = int(self.headers.get("Content-Length", "0"))
+            form_data = parse_qs(self.rfile.read(content_length).decode("utf-8"))
+            run_id = form_data.get("run_id", [""])[0] or None
+            plan_execution_id = form_data.get("plan_execution_id", [""])[0] or None
+            try:
+                if parsed.path == "/actions/index":
+                    app.run_index_now()
+                    message = "Index refreshed."
+                else:
+                    plans_dir_value = form_data.get("plans_dir", [""])[0].strip()
+                    if not plans_dir_value:
+                        raise PlanError("Plans directory is required.")
+                    concurrency_value = form_data.get("concurrency", ["1"])[0].strip() or "1"
+                    concurrency = int(concurrency_value)
+                    if concurrency < 1:
+                        raise PlanError("Concurrency must be at least 1.")
+                    app.start_run_many(Path(plans_dir_value).expanduser(), concurrency)
+                    message = f"Started run-many for {plans_dir_value}."
+            except (PlanError, ValueError) as exc:
+                message = str(exc)
+            location = _link(
+                {},
+                run_id=run_id,
+                plan_execution_id=plan_execution_id,
+                message=message,
+            )
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", location)
+            self.end_headers()
 
         def log_message(self, format: str, *args: object) -> None:
             return
