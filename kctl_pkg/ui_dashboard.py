@@ -364,6 +364,7 @@ class DashboardApp:
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>kctl Dashboard</title>
   <style>
     body {{
@@ -383,6 +384,7 @@ class DashboardApp:
       grid-template-columns: 320px 1fr;
       gap: 16px;
       padding: 16px;
+      align-items: start;
     }}
     .column {{
       display: flex;
@@ -433,6 +435,7 @@ class DashboardApp:
       padding: 12px;
       margin-bottom: 8px;
       background: white;
+      overflow-wrap: anywhere;
     }}
     .list-item:hover, .card:hover {{
       border-color: #999;
@@ -453,12 +456,18 @@ class DashboardApp:
       width: 100%;
       border-collapse: collapse;
       background: white;
+      min-width: 760px;
     }}
     th, td {{
       text-align: left;
       padding: 8px;
       border-bottom: 1px solid #e5e7eb;
       vertical-align: top;
+      overflow-wrap: anywhere;
+    }}
+    .table-scroll {{
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
     }}
     .empty {{
       color: #666;
@@ -467,6 +476,40 @@ class DashboardApp:
     code {{
       font-family: monospace;
       font-size: 0.95em;
+    }}
+    header div, .panel div {{
+      overflow-wrap: anywhere;
+    }}
+    @media (max-width: 900px) {{
+      main {{
+        grid-template-columns: 1fr;
+        padding: 12px;
+      }}
+      header {{
+        padding: 14px 16px;
+      }}
+      .panel {{
+        padding: 14px;
+      }}
+    }}
+    @media (max-width: 640px) {{
+      body {{
+        font-size: 15px;
+      }}
+      main {{
+        gap: 12px;
+        padding: 10px;
+      }}
+      .column {{
+        gap: 12px;
+      }}
+      .list-item, .card {{
+        padding: 10px;
+      }}
+      input, button, select {{
+        width: 100%;
+        box-sizing: border-box;
+      }}
     }}
   </style>
 </head>
@@ -501,24 +544,26 @@ class DashboardApp:
       {selected_plan_html}
       <section class="panel">
         <h2>Step Timeline</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>step</th>
-              <th>kind</th>
-              <th>status</th>
-              <th>verify</th>
-              <th>changed</th>
-              <th>duration_ms</th>
-              <th>output_path</th>
-              <th>artifact_path</th>
-            </tr>
-          </thead>
-          <tbody>
-            {timeline_rows}
-          </tbody>
-        </table>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>step</th>
+                <th>kind</th>
+                <th>status</th>
+                <th>verify</th>
+                <th>changed</th>
+                <th>duration_ms</th>
+                <th>output_path</th>
+                <th>artifact_path</th>
+              </tr>
+            </thead>
+            <tbody>
+              {timeline_rows}
+            </tbody>
+          </table>
+        </div>
       </section>
       <section class="panel">
         <h2>Workspace</h2>

@@ -64,6 +64,9 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Refresh Index", html)
             self.assertIn("Create Plan", html)
             self.assertIn("template_name", html)
+            self.assertIn('name="viewport"', html)
+            self.assertIn("table-scroll", html)
+            self.assertIn("@media (max-width: 900px)", html)
 
     def test_dashboard_attention_queue_surfaces_blocked_and_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
