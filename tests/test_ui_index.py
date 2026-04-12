@@ -256,15 +256,15 @@ class UIIndexTests(unittest.TestCase):
             with redirect_stdout(detail_buffer):
                 print_ui_run_detail(repo_path, run_id)
             output = detail_buffer.getvalue()
-            self.assertIn("plan=001-add-ui", output)
-            self.assertIn("step[2] key=verify", output)
+            self.assertIn("001-add-ui", output)
+            self.assertIn("verify", output)
 
             workspaces_buffer = io.StringIO()
             with redirect_stdout(workspaces_buffer):
                 print_ui_workspaces(repo_path)
             workspace_output = workspaces_buffer.getvalue()
-            self.assertIn("plan=001-add-ui", workspace_output)
-            self.assertIn("lifecycle=released", workspace_output)
+            self.assertIn("001-add-ui", workspace_output)
+            self.assertIn("released", workspace_output)
 
     def test_index_repository_state_reads_external_single_run_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

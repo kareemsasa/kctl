@@ -156,19 +156,19 @@ def get_verify_label(verify_result: dict[str, Any] | None) -> str:
 
 
 def print_step_footer(step_result: dict[str, Any], output_sink: OutputSink) -> None:
-    footer = (
-        f"Step {step_result['id']} | status={step_result['status']} | "
-        f"duration={format_duration_seconds(step_result['started_at'], step_result['ended_at'])} | "
-        f"verify={get_verify_label(step_result['verify'])} | "
-        f"baseline_changed_files={len(step_result['baseline_changed_files'])} | "
-        f"new_changed_files={len(step_result['new_changed_files'])}"
-    )
+    duration = format_duration_seconds(step_result["started_at"], step_result["ended_at"])
+    verify_label = get_verify_label(step_result["verify"])
+    new_count = len(step_result["new_changed_files"])
+    files_part = f"  +{new_count} files" if new_count else ""
+    footer = f"  {step_result['id']}: {step_result['status']}  ({duration})  verify={verify_label}{files_part}"
     output_sink.write_line(style_status_text(footer, step_result["status"], bold=True))
-    if 0 < len(step_result["new_changed_files"]) <= 5:
-        output_sink.write_line(f"New: {', '.join(step_result['new_changed_files'])}")
+    if 0 < new_count <= 5:
+        output_sink.write_line(
+            style_text(f"  new: {', '.join(step_result['new_changed_files'])}", dim=True)
+        )
     artifact_error = step_result.get("artifact_parse_error")
     if artifact_error:
-        output_sink.write_line(style_status_text(f"Artifact error: {artifact_error}", "failure"))
+        output_sink.write_line(style_status_text(f"  artifact error: {artifact_error}", "failure"))
 
 
 def prompt_to_continue(interactive: bool) -> bool:
@@ -201,16 +201,17 @@ def prompt_to_continue_after_review(
 
 def print_command_result(label: str, result: CommandResult, output_sink: OutputSink) -> None:
     status = "success" if result.exit_code == 0 else "failure"
-    output_sink.write_line(style_status_text(f"{label} exit code: {result.exit_code}", status))
+    output_sink.write_line(style_status_text(f"  {label}: exit {result.exit_code}", status))
     if result.stdout.strip():
-        output_sink.write_line(f"{label} stdout:")
-        output_sink.write_line(result.stdout.rstrip())
+        for line in result.stdout.rstrip().splitlines():
+            output_sink.write_line(f"    {line}")
     if result.stderr.strip():
         output_sink.write_line(
-            style_status_text(f"{label} stderr:", "failure", stream=sys.stderr),
+            style_status_text(f"  {label} stderr:", "failure", stream=sys.stderr),
             stream="stderr",
         )
-        output_sink.write_line(result.stderr.rstrip(), stream="stderr")
+        for line in result.stderr.rstrip().splitlines():
+            output_sink.write_line(f"    {line}", stream="stderr")
 
 
 def parse_verify_shell(verify_shell: str | None) -> list[str]:
@@ -299,7 +300,7 @@ def combine_verify_results(
 
 
 def print_review_summary(step_id: str, reviews: list[dict[str, Any]], output_sink: OutputSink) -> None:
-    summary_text = ", ".join(
+    summary_text = "  ".join(
         f"{review['reviewer']}={review['verdict']}" for review in reviews
     )
     if any(review["verdict"] == "block" for review in reviews):
@@ -309,14 +310,12 @@ def print_review_summary(step_id: str, reviews: list[dict[str, Any]], output_sin
     else:
         review_status = "success"
     output_sink.write_line(
-        style_status_text(
-            f"Review {step_id}: {summary_text}", review_status, bold=True
-        )
+        style_status_text(f"  review: {summary_text}", review_status, bold=True)
     )
     for review in reviews:
         output_sink.write_line(
             style_status_text(
-                f"- {review['reviewer']}: {review['summary']}", review["verdict"]
+                f"    {review['reviewer']}: {review['summary']}", review["verdict"]
             )
         )
 
@@ -868,68 +867,19 @@ def execute_step(
     mode_info = get_effective_mode_info(step)
     verify_info = get_effective_verify_info(step)
     output_sink.write_line(style_text(f"== Step {step_id} ==", color=ANSI_CYAN, bold=True))
-    if isinstance(step_type_info, dict):
-        declared_type = step_type_info.get("declared_type") or "-"
-        output_sink.write_line(
-            style_text(
-                "step type: "
-                f"effective={step_type_info.get('effective_type')} "
-                f"source={step_type_info.get('source')} "
-                f"declared={declared_type} "
-                f"inferred={step_type_info.get('inferred_type')}",
-                dim=True,
-            )
-        )
+    meta_parts: list[str] = []
+    if isinstance(step_type_info, dict) and step_type_info.get("effective_type"):
+        meta_parts.append(f"type={step_type_info['effective_type']}")
     if isinstance(output_info, dict) and output_info.get("effective_schema"):
-        declared_schema = output_info.get("declared_schema") or "-"
-        output_sink.write_line(
-            style_text(
-                "output schema: "
-                f"effective={output_info.get('effective_schema')} "
-                f"source={output_info.get('source')} "
-                f"declared={declared_schema} "
-                f"inferred={output_info.get('inferred_schema') or '-'}",
-                dim=True,
-            )
-        )
+        meta_parts.append(f"output={output_info['effective_schema']}")
     if isinstance(review_info, dict) and review_info.get("effective_policy"):
-        declared_policy = review_info.get("declared_policy") or "-"
-        output_sink.write_line(
-            style_text(
-                "review policy: "
-                f"effective={review_info.get('effective_policy')} "
-                f"source={review_info.get('source')} "
-                f"declared={declared_policy} "
-                f"inferred={review_info.get('inferred_policy') or '-'}",
-                dim=True,
-            )
-        )
-    if isinstance(mode_info, dict):
-        declared_mode = mode_info.get("declared_mode") or "-"
-        output_sink.write_line(
-            style_text(
-                "step mode: "
-                f"effective={mode_info.get('effective_mode')} "
-                f"source={mode_info.get('source')} "
-                f"declared={declared_mode} "
-                f"inferred={mode_info.get('inferred_mode')}",
-                dim=True,
-            )
-        )
-    if isinstance(verify_info, dict):
-        declared_verify_mode = verify_info.get("declared_mode") or "-"
-        default_verify_mode = verify_info.get("default_mode") or "-"
-        output_sink.write_line(
-            style_text(
-                "verify mode: "
-                f"effective={verify_info.get('effective_mode')} "
-                f"source={verify_info.get('source')} "
-                f"declared={declared_verify_mode} "
-                f"default={default_verify_mode} "
-                f"inferred={verify_info.get('inferred_mode')}",
-                dim=True,
-            )
-        )
+        meta_parts.append(f"review={review_info['effective_policy']}")
+    if isinstance(mode_info, dict) and mode_info.get("effective_mode") != "default":
+        meta_parts.append(f"mode={mode_info['effective_mode']}")
+    if isinstance(verify_info, dict) and verify_info.get("effective_mode") != "legacy":
+        meta_parts.append(f"verify_mode={verify_info['effective_mode']}")
+    if meta_parts:
+        output_sink.write_line(style_text("  " + "  ".join(meta_parts), dim=True))
     provider, permission_mode = resolve_provider_config(defaults)
     started_at = datetime.now(timezone.utc).isoformat()
     before_status = get_git_status(repo_path)
@@ -1019,8 +969,7 @@ def execute_step(
         verify_environment = collect_verify_environment(shell_parts, repo_path)
         output_sink.write_line(
             style_text(
-                "verify environment: "
-                + summarize_verify_environment(verify_environment),
+                "  verify env: " + summarize_verify_environment(verify_environment),
                 dim=True,
             )
         )
@@ -1095,8 +1044,9 @@ def execute_step(
         permission_mode=permission_mode,
     )
     if should_print_diff_stat(diff_stat.stdout, verbose):
-        output_sink.write_line(style_text("git diff --stat:", bold=True))
-        output_sink.write_line(diff_stat.stdout.rstrip())
+        output_sink.write_line(style_text("  diff:", dim=True))
+        for diff_line in diff_stat.stdout.rstrip().splitlines():
+            output_sink.write_line(f"    {diff_line}")
     print_step_footer(step_result, output_sink)
     return step_result, next_artifacts
 
@@ -1321,19 +1271,18 @@ def execute_plan_run(
     log_path = save_run_log(run_data, run_output_dir)
     run_data["log_path"] = str(log_path)
     output_sink.write_line("")
-    output_sink.write_line(style_text("Final summary:", bold=True))
+    output_sink.write_line(style_text("Summary", bold=True))
     for step_result in step_results:
         verify_label = "not-run"
         if step_result["verify"] is not None:
             verify_label = (
                 "passed" if step_result["verify"]["exit_code"] == 0 else "failed"
             )
-        summary_line = (
-            f"- {step_result['id']}: {step_result['status']}, "
-            f"verify={verify_label}, changed_files={step_result['changed_files_count']}"
-        )
+        files_count = step_result["changed_files_count"]
+        files_part = f"  {files_count} files" if files_count else ""
+        summary_line = f"  {step_result['id']}: {step_result['status']}  verify={verify_label}{files_part}"
         output_sink.write_line(style_status_text(summary_line, step_result["status"]))
-    output_sink.write_line(style_text(f"Run log: {log_path}", bold=True))
+    output_sink.write_line(style_text(f"Log: {log_path}", dim=True))
     if status_callback is not None:
         status_callback(
             {

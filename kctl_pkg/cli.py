@@ -327,14 +327,14 @@ def main(argv: list[str] | None = None) -> int:
                 repo_prefix = f"[{repo_name}] "
                 if args.output_mode == "stream":
                     console_sink.write_line(
-                        style_status_text(f"== Batch Repo: {repo_path} ==", "success", bold=True)
+                        style_status_text(f"== {repo_name} ==", "success", bold=True)
                     )
                     repo_sink = ConsoleOutputSink(prefix=repo_prefix)
                 elif args.output_mode == "grouped":
                     repo_sink = BufferedOutputSink(prefix=repo_prefix)
                 else:
                     console_sink.write_line(
-                        style_status_text(f"== Batch Repo: {repo_path} ==", "success", bold=True)
+                        style_status_text(f"== {repo_name} ==", "success", bold=True)
                     )
                     repo_sink = NullOutputSink()
                 repo_exit_code = run_plan(
@@ -352,16 +352,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if args.output_mode == "grouped":
                     console_sink.write_line(
-                        style_status_text(f"=== repo: {repo_name} ===", "success", bold=True)
+                        style_status_text(f"== {repo_name} ==", "success", bold=True)
                     )
                     repo_sink.flush_to(console_sink)
-                    console_sink.write_line(
-                        style_status_text(f"=== end repo: {repo_name} ===", "success", bold=True)
-                    )
+                    console_sink.write_line("")
                 repo_status = "success" if repo_exit_code == 0 else "failure"
                 console_sink.write_line(
                     style_status_text(
-                        f"Batch summary: repo={repo_path} exit_code={repo_exit_code}",
+                        f"  {repo_name}: exit {repo_exit_code}",
                         repo_status,
                         bold=True,
                     )
@@ -408,9 +406,10 @@ def main(argv: list[str] | None = None) -> int:
                 counts = index_repository_state(repo_path, db_path=db_path)
                 print(
                     style_status_text(
-                        "Indexed UI state: "
-                        f"runs={counts['runs']} plan_executions={counts['plan_executions']} "
-                        f"step_executions={counts['step_executions']} workspaces={counts['workspaces']}",
+                        f"Indexed: {counts['runs']} runs  "
+                        f"{counts['plan_executions']} plans  "
+                        f"{counts['step_executions']} steps  "
+                        f"{counts['workspaces']} workspaces",
                         "success",
                         bold=True,
                     ),

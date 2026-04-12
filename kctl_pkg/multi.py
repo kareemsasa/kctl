@@ -165,15 +165,15 @@ def resolve_multi_run_log(repo_root: Path, run_id: str) -> Path:
 
 def format_status_line(plan_state: dict[str, Any]) -> str:
     verify_result = plan_state.get("verify_result") or "not-run"
+    step = plan_state.get("current_step") or "-"
     return (
-        f"- {plan_state['plan_id']} ({plan_state['filename']}): "
-        f"step={plan_state.get('current_step') or '-'} "
-        f"status={plan_state['status']} verify={verify_result}"
+        f"  {plan_state['plan_id']}: {plan_state['status']}  "
+        f"step={step}  verify={verify_result}"
     )
 
 
 def print_run_summary(run_data: dict[str, Any], output_sink: OutputSink) -> None:
-    output_sink.write_line(style_text("Plan summary:", bold=True))
+    output_sink.write_line(style_text("Summary", bold=True))
     for plan_state in run_data["plans"]:
         status = plan_state["status"]
         rendered_status = "success" if status == "passed" else "failure" if status in {"failed", "blocked"} else status
@@ -410,7 +410,7 @@ def run_many_plans(
             except Exception as exc:
                 update_plan_state(plan_id, status="failed", failure_reason="plan_exception")
                 failures += 1
-                output_sink.write_line(style_status_text(f"[{plan_id}] failed: {exc}", "failure"))
+                output_sink.write_line(style_status_text(f"  [{plan_id}] failed: {exc}", "failure"))
                 continue
             if exit_code != 0:
                 failures += 1
@@ -418,7 +418,8 @@ def run_many_plans(
     run_data["ended_at"] = datetime.now(timezone.utc).isoformat()
     run_data["status"] = "failed" if failures else "passed"
     write_run_state(run_root, run_data)
-    output_sink.write_line(style_text(f"Multi-plan run: {run_root}", bold=True))
+    output_sink.write_line("")
+    output_sink.write_line(style_text(f"Run: {run_root}", dim=True))
     print_run_summary(run_data, output_sink)
     return 1 if failures else 0
 
@@ -449,6 +450,6 @@ def print_run_status(target: str) -> int:
     run_log = resolve_status_run_path(target)
     data = json.loads(run_log.read_text())
     output_sink = ConsoleOutputSink()
-    output_sink.write_line(style_text(f"Run: {run_log.parent}", bold=True))
+    output_sink.write_line(style_text(f"Run: {run_log.parent}", dim=True))
     print_run_summary(data, output_sink)
     return 0

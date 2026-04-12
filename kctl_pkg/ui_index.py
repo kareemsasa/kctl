@@ -329,16 +329,17 @@ def print_ui_runs(repo_path: Path, db_path: Path | None = None) -> int:
         rows = store.list_runs(repository_id)
     finally:
         store.close()
-    print(style_text(f"UI runs for {repo_root}", bold=True), flush=True)
+    print(style_text(f"Runs ({repo_root.name})", bold=True), flush=True)
     if not rows:
-        print("No indexed runs.", flush=True)
+        print("  (none)", flush=True)
         return 0
     for row in rows:
+        plans = row["plan_execution_count"]
+        status_str = "success" if row["status"] == "passed" else "failure" if row["status"] == "failed" else row["status"]
         print(
             style_status_text(
-                f"- {row['id']}: status={row['status']} plans={row['plan_execution_count']} "
-                f"concurrency={row['concurrency']} started_at={row['started_at']}",
-                "success" if row["status"] == "passed" else "failure" if row["status"] == "failed" else row["status"],
+                f"  {row['id']}  {row['status']}  {plans} plans  {row['started_at']}",
+                status_str,
             ),
             flush=True,
         )
@@ -362,22 +363,35 @@ def print_ui_run_detail(repo_path: Path, run_id: str, db_path: Path | None = Non
         }
     finally:
         store.close()
-    print(style_text(f"Indexed run {run_id}", bold=True), flush=True)
-    print(f"status={run_row['status']} concurrency={run_row['concurrency']} run_root={run_row['run_root_path']}", flush=True)
+    print(style_text(f"Run {run_id}", bold=True), flush=True)
+    print(
+        style_text(
+            f"  {run_row['status']}  concurrency={run_row['concurrency']}  {run_row['run_root_path']}",
+            dim=True,
+        ),
+        flush=True,
+    )
     for plan_row in plan_rows:
+        branch = plan_row["branch_name"] or "-"
+        status_str = "success" if plan_row["status"] == "passed" else "failure" if plan_row["status"] == "failed" else plan_row["status"]
         print(
             style_status_text(
-                f"- plan={plan_row['slug']} status={plan_row['status']} current_step={plan_row['current_step_key']} "
-                f"verify={plan_row['verify_status']} branch={plan_row['branch_name'] or '-'}",
-                "success" if plan_row["status"] == "passed" else "failure" if plan_row["status"] == "failed" else plan_row["status"],
+                f"  {plan_row['slug']}: {plan_row['status']}  "
+                f"step={plan_row['current_step_key']}  verify={plan_row['verify_status']}  "
+                f"branch={branch}",
+                status_str,
             ),
             flush=True,
         )
         for step_row in step_rows_by_plan[plan_row["id"]]:
+            files_count = step_row["changed_files_count"]
+            files_part = f"  {files_count} files" if files_count else ""
             print(
-                f"  step[{step_row['sequence_index']}] key={step_row['step_key']} "
-                f"kind={step_row['kind']} status={step_row['status']} verify={step_row['verify_status']} "
-                f"changed_files={step_row['changed_files_count']}",
+                style_text(
+                    f"    {step_row['sequence_index']}. {step_row['step_key']} ({step_row['kind']}): "
+                    f"{step_row['status']}  verify={step_row['verify_status']}{files_part}",
+                    dim=True,
+                ),
                 flush=True,
             )
     return 0
@@ -388,19 +402,21 @@ def print_ui_workspaces(repo_path: Path, db_path: Path | None = None) -> int:
 
     repo_root = get_repo_root(repo_path)
     workspaces = list_workspaces(repo_root, db_path=db_path)
-    print(style_text(f"UI workspaces for {repo_root}", bold=True), flush=True)
+    print(style_text(f"Workspaces ({repo_root.name})", bold=True), flush=True)
     if not workspaces:
-        print("No indexed workspaces.", flush=True)
+        print("  (none)", flush=True)
         return 0
     for workspace in workspaces:
-        status = workspace.lifecycle
+        lifecycle = workspace.lifecycle
+        step = workspace.current_step_key or "-"
+        lifecycle_status = "success" if lifecycle == "released" else "running" if lifecycle == "active" else "failure"
         print(
             style_status_text(
-                f"- plan={workspace.plan_slug} lifecycle={workspace.lifecycle} status={workspace.status} "
-                f"run={workspace.run_id} step={workspace.current_step_key or '-'} verify={workspace.verify_status} "
-                f"path={workspace.path}",
-                "success" if status == "released" else "running" if status == "active" else "failure",
+                f"  {workspace.plan_slug}: {workspace.lifecycle}  "
+                f"status={workspace.status}  step={step}  verify={workspace.verify_status}",
+                lifecycle_status,
             ),
             flush=True,
         )
+        print(style_text(f"    {workspace.path}", dim=True), flush=True)
     return 0
