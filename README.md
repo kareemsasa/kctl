@@ -347,7 +347,7 @@ Interactive prompts are not supported in batch mode. `--approve-each-step` will 
 
 Multi-plan run state is written under `.kctl/runs/<run-id>/run.json`, with a sibling `summary.md` and one per-plan subdirectory containing that plan's run log and step artifacts.
 
-`kctl ui index <repo>` builds a local SQLite index at `.kctl/ui-state.db` from existing `.kctl/runs`, `.kctl/worktrees`, and legacy `.kctl-runs` data. `kctl ui runs` and `kctl ui run` are read-only inspection commands over that index. `kctl ui dashboard` launches a minimal local web dashboard for browsing runs, plan executions, step timelines, and workspace details.
+`kctl ui index <repo>` builds a local SQLite index at `.kctl/ui-state.db` from existing `.kctl/runs`, `.kctl/worktrees`, and legacy `.kctl-runs` data. `kctl ui runs` and `kctl ui run` are read-only inspection commands over that index. `kctl ui dashboard` launches a minimal local web dashboard with repository overview counts, an attention queue, and drill-down views for runs, plan executions, step timelines, and workspace details.
 
 ## Run Logs
 

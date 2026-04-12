@@ -10,15 +10,19 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from .types import PlanError
 from .ui_read import (
+    AttentionItem,
     PlanExecutionCard,
+    RepositoryOverview,
     RunDetail,
     RunListItem,
     StepTimelineItem,
     WorkspaceDetail,
     get_plan_execution,
+    get_repository_overview,
     get_repository,
     get_run,
     get_workspace,
+    list_attention_items,
     list_plan_executions,
     list_runs,
     list_step_executions,
@@ -54,6 +58,8 @@ def _link(base_params: dict[str, str], **updates: str | None) -> str:
 class DashboardState:
     repo_name: str
     repo_root: str
+    overview: RepositoryOverview
+    attention_items: list[AttentionItem]
     runs: list[RunListItem]
     selected_run: RunDetail | None
     plan_cards: list[PlanExecutionCard]
@@ -69,6 +75,8 @@ class DashboardApp:
 
     def load_state(self, run_id: str | None = None, plan_execution_id: str | None = None) -> DashboardState:
         repository = get_repository(self.repo_path, db_path=self.db_path)
+        overview = get_repository_overview(self.repo_path, db_path=self.db_path)
+        attention_items = list_attention_items(self.repo_path, db_path=self.db_path)
         runs = list_runs(self.repo_path, db_path=self.db_path)
         selected_run: RunDetail | None = None
         plan_cards: list[PlanExecutionCard] = []
@@ -92,6 +100,8 @@ class DashboardApp:
         return DashboardState(
             repo_name=repository.name,
             repo_root=repository.root_path,
+            overview=overview,
+            attention_items=attention_items,
             runs=runs,
             selected_run=selected_run,
             plan_cards=plan_cards,
@@ -118,6 +128,27 @@ class DashboardApp:
             )
             for run in state.runs
         ) or "<div class='empty'>No indexed runs.</div>"
+
+        overview_html = (
+            "<section class='panel'>"
+            "<h2>Overview</h2>"
+            f"<div>runs={_escape(state.overview.run_count)} active_runs={_escape(state.overview.active_run_count)} failed_runs={_escape(state.overview.failed_run_count)}</div>"
+            f"<div>running_plans={_escape(state.overview.running_plan_count)} blocked_plans={_escape(state.overview.blocked_plan_count)} failed_plans={_escape(state.overview.failed_plan_count)}</div>"
+            f"<div>stale_workspaces={_escape(state.overview.stale_workspace_count)} recent_failures={_escape(state.overview.recent_failure_count)}</div>"
+            "</section>"
+        )
+
+        attention_items_html = "".join(
+            (
+                f"<a class='card {_status_class(item.status)}' href='{_escape(_link({}, run_id=item.run_id, plan_execution_id=item.plan_execution_id))}'>"
+                f"<div><strong>{_escape(item.kind)}</strong> plan={_escape(item.plan_slug)}</div>"
+                f"<div>status={_escape(item.status)} step={_escape(item.current_step_key)}</div>"
+                f"<div>verify={_escape(item.verify_status)} failure_reason={_escape(item.failure_reason)}</div>"
+                f"<div>workspace={_escape(item.workspace_path)}</div>"
+                "</a>"
+            )
+            for item in state.attention_items
+        ) or "<div class='empty'>No attention items.</div>"
 
         plan_items = "".join(
             (
@@ -273,10 +304,15 @@ class DashboardApp:
     <div>repository={_escape(state.repo_name)} root={_escape(state.repo_root)}</div>
   </header>
   <main>
-    <div class="column">
-      <section class="panel">
-        <h2>Runs</h2>
-        {run_items}
+            <div class="column">
+              {overview_html}
+              <section class="panel">
+                <h2>Attention Queue</h2>
+                {attention_items_html}
+              </section>
+              <section class="panel">
+                <h2>Runs</h2>
+                {run_items}
       </section>
     </div>
     <div class="column">

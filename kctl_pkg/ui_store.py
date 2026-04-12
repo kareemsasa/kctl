@@ -271,6 +271,29 @@ class UIStateStore:
         )
         return list(cursor.fetchall())
 
+    def list_plan_executions_for_repository(self, repository_id: str) -> list[sqlite3.Row]:
+        cursor = self.connection.execute(
+            """
+            SELECT
+                plan_executions.*,
+                plan_definitions.slug,
+                plan_definitions.title,
+                plan_definitions.file_path,
+                plan_definitions.objective,
+                plan_definitions.phase_name,
+                plan_definitions.group_name,
+                runs.repository_id,
+                runs.id AS run_id_value
+            FROM plan_executions
+            JOIN plan_definitions ON plan_definitions.id = plan_executions.plan_definition_id
+            JOIN runs ON runs.id = plan_executions.run_id
+            WHERE runs.repository_id = ?
+            ORDER BY plan_executions.started_at DESC, plan_definitions.slug ASC
+            """,
+            (repository_id,),
+        )
+        return list(cursor.fetchall())
+
     def get_plan_execution(self, plan_execution_id: str) -> sqlite3.Row | None:
         cursor = self.connection.execute(
             """

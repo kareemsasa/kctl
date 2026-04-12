@@ -52,6 +52,18 @@ class RunDetail:
 
 
 @dataclass(frozen=True)
+class RepositoryOverview:
+    run_count: int
+    active_run_count: int
+    failed_run_count: int
+    blocked_plan_count: int
+    failed_plan_count: int
+    running_plan_count: int
+    stale_workspace_count: int
+    recent_failure_count: int
+
+
+@dataclass(frozen=True)
 class PlanExecutionCard:
     id: str
     run_id: str
@@ -107,6 +119,19 @@ class WorkspaceDetail:
     status: str
     created_at: str
     released_at: str | None
+
+
+@dataclass(frozen=True)
+class AttentionItem:
+    kind: str
+    status: str
+    plan_execution_id: str
+    run_id: str
+    plan_slug: str
+    current_step_key: str | None
+    failure_reason: str | None
+    verify_status: str
+    workspace_path: str | None
 
 
 @dataclass(frozen=True)
@@ -291,6 +316,41 @@ def list_plan_executions(repo_id: str | Path, run_id: str, db_path: Path | None 
     ]
 
 
+def list_repository_plan_executions(repo_id: str | Path, db_path: Path | None = None) -> list[PlanExecutionCard]:
+    repository = get_repository(repo_id, db_path=db_path)
+    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    store = _open_store(resolved_db_path)
+    try:
+        rows = store.list_plan_executions_for_repository(repository.id)
+    finally:
+        store.close()
+    return [
+        PlanExecutionCard(
+            id=row["id"],
+            run_id=row["run_id_value"],
+            repository_id=repository.id,
+            plan_definition_id=row["plan_definition_id"],
+            plan_slug=row["slug"],
+            plan_title=row["title"],
+            plan_file_path=row["file_path"],
+            objective=row["objective"] if "objective" in row.keys() else "",
+            phase_name=row["phase_name"] if "phase_name" in row.keys() else None,
+            group_name=row["group_name"] if "group_name" in row.keys() else None,
+            status=row["status"],
+            current_step_key=row["current_step_key"],
+            verify_status=row["verify_status"],
+            started_at=row["started_at"],
+            ended_at=row["ended_at"],
+            worktree_path=row["worktree_path"],
+            branch_name=row["branch_name"],
+            log_path=row["log_path"],
+            changed_files_count=row["changed_files_count"],
+            failure_reason=row["failure_reason"],
+        )
+        for row in rows
+    ]
+
+
 def get_plan_execution(plan_execution_id: str, repo_id: str | Path, db_path: Path | None = None) -> PlanExecutionCard:
     repository = get_repository(repo_id, db_path=db_path)
     _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
@@ -382,6 +442,91 @@ def get_workspace(plan_execution_id: str, repo_id: str | Path, db_path: Path | N
         created_at=row["created_at"],
         released_at=row["released_at"],
     )
+
+
+def get_repository_overview(repo_id: str | Path, db_path: Path | None = None) -> RepositoryOverview:
+    runs = list_runs(repo_id, db_path=db_path)
+    plan_executions = list_repository_plan_executions(repo_id, db_path=db_path)
+    stale_workspace_count = sum(
+        1 for plan in plan_executions if plan.status == "running" and plan.worktree_path and not plan.ended_at
+    )
+    recent_failure_count = sum(1 for plan in plan_executions if plan.status in {"failed", "blocked"})
+    return RepositoryOverview(
+        run_count=len(runs),
+        active_run_count=sum(1 for run in runs if run.status == "running"),
+        failed_run_count=sum(1 for run in runs if run.status == "failed"),
+        blocked_plan_count=sum(1 for plan in plan_executions if plan.status == "blocked"),
+        failed_plan_count=sum(1 for plan in plan_executions if plan.status == "failed"),
+        running_plan_count=sum(1 for plan in plan_executions if plan.status == "running"),
+        stale_workspace_count=stale_workspace_count,
+        recent_failure_count=recent_failure_count,
+    )
+
+
+def list_attention_items(repo_id: str | Path, db_path: Path | None = None) -> list[AttentionItem]:
+    plan_executions = list_repository_plan_executions(repo_id, db_path=db_path)
+    items: list[AttentionItem] = []
+    for plan in plan_executions:
+        if plan.verify_status == "failed":
+            items.append(
+                AttentionItem(
+                    kind="failed_verify",
+                    status=plan.status,
+                    plan_execution_id=plan.id,
+                    run_id=plan.run_id,
+                    plan_slug=plan.plan_slug,
+                    current_step_key=plan.current_step_key,
+                    failure_reason=plan.failure_reason,
+                    verify_status=plan.verify_status,
+                    workspace_path=plan.worktree_path,
+                )
+            )
+            continue
+        if plan.status == "blocked":
+            items.append(
+                AttentionItem(
+                    kind="blocked_plan",
+                    status=plan.status,
+                    plan_execution_id=plan.id,
+                    run_id=plan.run_id,
+                    plan_slug=plan.plan_slug,
+                    current_step_key=plan.current_step_key,
+                    failure_reason=plan.failure_reason,
+                    verify_status=plan.verify_status,
+                    workspace_path=plan.worktree_path,
+                )
+            )
+            continue
+        if plan.status == "failed":
+            items.append(
+                AttentionItem(
+                    kind="failed_plan",
+                    status=plan.status,
+                    plan_execution_id=plan.id,
+                    run_id=plan.run_id,
+                    plan_slug=plan.plan_slug,
+                    current_step_key=plan.current_step_key,
+                    failure_reason=plan.failure_reason,
+                    verify_status=plan.verify_status,
+                    workspace_path=plan.worktree_path,
+                )
+            )
+            continue
+        if plan.status == "running" and plan.worktree_path:
+            items.append(
+                AttentionItem(
+                    kind="active_workspace",
+                    status=plan.status,
+                    plan_execution_id=plan.id,
+                    run_id=plan.run_id,
+                    plan_slug=plan.plan_slug,
+                    current_step_key=plan.current_step_key,
+                    failure_reason=plan.failure_reason,
+                    verify_status=plan.verify_status,
+                    workspace_path=plan.worktree_path,
+                )
+            )
+    return items
 
 
 def list_agent_profiles(repo_id: str | Path, db_path: Path | None = None) -> list[AgentProfileSummary]:
