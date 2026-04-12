@@ -69,6 +69,12 @@ def _link(base_params: dict[str, str], **updates: str | None) -> str:
     return f"/?{query}" if query else "/"
 
 
+def _page_link(path: str, **params: str | None) -> str:
+    filtered = {k: v for k, v in params.items() if v is not None}
+    query = urlencode(filtered)
+    return f"{path}?{query}" if query else path
+
+
 def check_repo_path(path_value: str) -> tuple[str, str]:
     trimmed = path_value.strip()
     if not trimmed:
@@ -422,6 +428,437 @@ def read_plan_file(plan_path: Path) -> tuple[str, str]:
     return plan_path.name, plan_path.read_text()
 
 
+_COMMON_STYLES = """\
+body {
+  font-family: sans-serif;
+  margin: 0;
+  padding: 16px;
+  background: #f5f5f5;
+  color: #111;
+  box-sizing: border-box;
+  overflow-x: hidden;
+}
+.page, main {
+  max-width: 1400px;
+  margin: 0 auto;
+  box-sizing: border-box;
+  width: 100%;
+}
+.page-header {
+  background: #1f2937;
+  color: white;
+  border-radius: 10px;
+  padding: 16px;
+}
+.header-path {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+.main-nav {
+  display: flex;
+  gap: 4px;
+  margin-top: 12px;
+}
+.nav-link {
+  padding: 8px 16px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: rgba(255,255,255,0.7);
+  font-weight: 500;
+  font-size: 0.95em;
+}
+.nav-link:hover {
+  background: rgba(255,255,255,0.1);
+  color: white;
+}
+.nav-link.active {
+  background: rgba(255,255,255,0.15);
+  color: white;
+}
+.overview-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 12px 16px;
+  margin-top: 12px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.95em;
+}
+.overview-bar span {
+  white-space: nowrap;
+}
+main {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 16px;
+  padding: 16px 0;
+  align-items: start;
+  min-width: 0;
+}
+main.single-column {
+  grid-template-columns: 1fr;
+  max-width: 900px;
+}
+.actions-details summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.actions-details summary::-webkit-details-marker {
+  display: none;
+}
+.actions-details summary::before {
+  content: "\\25B6";
+  font-size: 0.7em;
+  transition: transform 0.15s;
+}
+.actions-details[open] summary::before {
+  transform: rotate(90deg);
+}
+.inline-heading {
+  display: inline;
+  margin: 0;
+}
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.panel {
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 16px;
+  min-width: 0;
+}
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+input, button, textarea {
+  font: inherit;
+  padding: 8px 10px;
+}
+select {
+  font: inherit;
+  padding: 8px 10px;
+}
+button {
+  cursor: pointer;
+}
+textarea {
+  resize: vertical;
+  min-height: 120px;
+}
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.notice {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+}
+.help {
+  color: #4b5563;
+  font-size: 0.95em;
+  line-height: 1.4;
+}
+.repo-check {
+  font-size: 0.92em;
+  color: #4b5563;
+}
+.repo-check[data-status='ok'] {
+  color: #15803d;
+}
+.repo-check[data-status='missing'],
+.repo-check[data-status='not_dir'],
+.repo-check[data-status='empty'] {
+  color: #b91c1c;
+}
+.plans-preview {
+  color: #374151;
+  font-size: 0.92em;
+  line-height: 1.4;
+}
+.plans-preview ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.plans-preview label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+.preflight-summary {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.launch-decision {
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-weight: 700;
+}
+.launch-decision-pass {
+  background: #dcfce7;
+  color: #166534;
+}
+.launch-decision-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+.launch-decision-block {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.preflight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.preflight-item {
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 10px;
+  background: white;
+}
+.preflight-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.78em;
+  letter-spacing: 0.04em;
+}
+.preflight-badge-pass {
+  background: #dcfce7;
+  color: #166534;
+}
+.preflight-badge-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+.preflight-badge-block {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.mini-button {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-size: 0.85em;
+}
+.list-item, .card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  background: white;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.list-item:hover, .card:hover {
+  border-color: #999;
+}
+.code-block {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 12px;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+.live-output {
+  max-height: 420px;
+  overflow: auto;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+.status-success {
+  border-left: 4px solid #15803d;
+}
+.status-failure {
+  border-left: 4px solid #b91c1c;
+}
+.status-running {
+  border-left: 4px solid #1d4ed8;
+}
+.status-neutral {
+  border-left: 4px solid #6b7280;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+  min-width: 760px;
+}
+th, td {
+  text-align: left;
+  padding: 8px;
+  border-bottom: 1px solid #e5e7eb;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+.empty {
+  color: #666;
+  font-style: italic;
+}
+code {
+  font-family: monospace;
+  font-size: 0.95em;
+}
+header div, .panel div {
+  overflow-wrap: anywhere;
+}
+label {
+  overflow-wrap: anywhere;
+}
+.project-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  background: white;
+}
+.project-item code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.project-item form {
+  margin: 0;
+  flex-shrink: 0;
+}
+@media (max-width: 860px) {
+  body {
+    padding: 12px;
+  }
+  main {
+    grid-template-columns: 1fr;
+    padding: 12px 0 0;
+  }
+  .page-header {
+    padding: 14px 12px;
+  }
+  .panel {
+    padding: 14px;
+  }
+  .overview-bar {
+    margin-top: 10px;
+  }
+}
+@media (max-width: 640px) {
+  body {
+    font-size: 15px;
+    padding: 10px;
+  }
+  .page-header {
+    padding: 10px;
+  }
+  main {
+    gap: 12px;
+    padding: 10px 0 0;
+  }
+  .column {
+    gap: 12px;
+  }
+  .list-item, .card {
+    padding: 10px;
+  }
+  input, button, select, textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
+  }
+  table {
+    min-width: 640px;
+  }
+}
+"""
+
+
+_SHARED_SCRIPTS = """\
+function wireRepoCheck(inputId, statusId) {
+  const input = document.getElementById(inputId);
+  const status = document.getElementById(statusId);
+  if (!input || !status) return;
+  let timer = null;
+  async function refreshStatus() {
+    const params = new URLSearchParams({ path: input.value });
+    const response = await fetch(`/api/check-repo?${params.toString()}`);
+    const data = await response.json();
+    status.dataset.status = data.status;
+    status.textContent = data.message;
+  }
+  function scheduleRefresh() {
+    clearTimeout(timer);
+    timer = setTimeout(refreshStatus, 150);
+  }
+  input.addEventListener('input', scheduleRefresh);
+  refreshStatus();
+}
+function wireCopyButtons(root) {
+  (root || document).querySelectorAll('[data-copy]').forEach((node) => {
+    if (node.dataset.bound === '1') return;
+    node.dataset.bound = '1';
+    node.setAttribute('data-label', node.textContent || '');
+    node.addEventListener('click', async () => {
+      const value = node.getAttribute('data-copy') || '';
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+        node.textContent = 'Copied';
+        window.setTimeout(() => {
+          node.textContent = node.getAttribute('data-label') || '';
+        }, 1200);
+      } catch (_error) {
+        node.textContent = 'Copy failed';
+      }
+    });
+  });
+}
+"""
+
+
+def _render_nav_html(active: str) -> str:
+    items = [("Dashboard", "/"), ("Actions", "/actions"), ("Projects", "/projects")]
+    parts = []
+    for label, href in items:
+        cls = "nav-link active" if label == active else "nav-link"
+        parts.append(f"<a class='{cls}' href='{href}'>{_escape(label)}</a>")
+    return "<nav class='main-nav'>" + "".join(parts) + "</nav>"
+
+
 @dataclass(frozen=True)
 class DashboardState:
     repo_name: str
@@ -479,6 +916,29 @@ class DashboardApp:
         self.repo_path = repo_path.resolve()
         self.db_path = db_path.resolve() if db_path is not None else None
 
+    def _page_shell(self, *, active_nav: str, body: str, extra_script: str = "") -> str:
+        repo_name = _escape(self.repo_path.name)
+        repo_root = _escape(str(self.repo_path))
+        nav_html = _render_nav_html(active_nav)
+        return (
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n"
+            "  <meta charset=\"utf-8\">\n"
+            "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            f"  <title>kctl &mdash; {_escape(active_nav)}</title>\n"
+            f"  <style>\n{_COMMON_STYLES}  </style>\n"
+            f"  <script>\n{_SHARED_SCRIPTS}{extra_script}\n  </script>\n"
+            "</head>\n<body>\n"
+            "  <div class=\"page\">\n"
+            "    <header class=\"page-header\">\n"
+            "      <h1>kctl</h1>\n"
+            f"      <div>{repo_name} &mdash; <span class=\"header-path\">{repo_root}</span></div>\n"
+            f"      {nav_html}\n"
+            "    </header>\n"
+            f"    {body}\n"
+            "  </div>\n"
+            "</body>\n</html>"
+        )
+
     @property
     def default_plans_dir(self) -> Path:
         return self.repo_path / ".kctl" / "plans"
@@ -512,8 +972,11 @@ class DashboardApp:
     def add_tracked_project(self, project_path: Path) -> None:
         ensure_git_repo(project_path)
         repo_root = get_repo_root(project_path)
+        resolved = str(repo_root)
         projects = self.load_tracked_projects()
-        projects.append(str(repo_root))
+        if resolved in projects:
+            raise PlanError(f"Project already tracked: {resolved}")
+        projects.append(resolved)
         self.save_tracked_projects(projects)
 
     def remove_tracked_project(self, project_path: str) -> None:
@@ -804,6 +1267,321 @@ class DashboardApp:
         threading.Thread(target=_run, daemon=True).start()
         return run_id
 
+    def render_actions_page(self, *, action_message: str | None = None) -> str:
+        templates = load_plan_templates(project_root())
+        plan_templates = [
+            (template_name, template.get("description") if isinstance(template, dict) else None)
+            for template_name, template in templates.items()
+        ]
+        tracked_projects = self.load_tracked_projects()
+        providers = available_providers()
+        launch_preflight = summarize_preflight_for_dashboard(
+            str(self.repo_path),
+            str(self.default_plans_dir),
+            selected_plan_names=None,
+            provider_override=None,
+        )
+        preflight_items = launch_preflight.get("items", {})
+        preflight_html = "".join(
+            _render_preflight_item_html(label, item)
+            for label, item in (
+                ("Repo", preflight_items.get("repo") or {}),
+                ("Plans Dir", preflight_items.get("plans_dir") or {}),
+                ("Binaries", preflight_items.get("binaries") or {}),
+                ("Writable Paths", preflight_items.get("writable_paths") or {}),
+                ("Required Env", preflight_items.get("required_env") or {}),
+            )
+        )
+        tracked_projects_html = (
+            "".join(
+                f"<label class='checkbox'><input type='checkbox' name='project_paths' value='{_escape(p)}'> {_escape(p)}</label>"
+                for p in tracked_projects
+            )
+            if tracked_projects
+            else "<div class='help'>No tracked projects yet. <a href='/projects'>Manage projects</a></div>"
+        )
+        notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
+        body = (
+            f"<main class='single-column'>"
+            f"<div class='column'>"
+            f"{notice_html}"
+            f"<section class='panel'>"
+            f"<h2>Refresh Index</h2>"
+            f"<div class='help'>Refreshes the dashboard data from saved runs and workspaces on this machine.</div>"
+            f"<form method='post' action='/actions/index'>"
+            f"<button type='submit'>Refresh Index</button>"
+            f"</form>"
+            f"</section>"
+            f"<section class='panel'>"
+            f"<h2>Run Plans</h2>"
+            f"<div class='help'>Runs every plan in the plans folder for the target project.</div>"
+            f"<form method='post' action='/actions/run-many'>"
+            f"<label for='target_repo_run_many'><strong>Target Repo</strong></label>"
+            f"<input id='target_repo_run_many' name='target_repo' type='text' value='{_escape(self.repo_path)}' required>"
+            f"<div id='target_repo_run_many_status' class='repo-check'></div>"
+            f"<div><strong>Plans Dir</strong>: <code>{_escape(self.default_plans_dir)}</code></div>"
+            f"<label for='plans_dir'><strong>Plans Dir Override</strong></label>"
+            f"<input id='plans_dir' name='plans_dir' type='text' placeholder='Optional override'>"
+            f"<div id='plans_dir_status' class='repo-check'></div>"
+            f"<div id='plans_dir_preview' class='plans-preview'></div>"
+            f"<div><strong>Tracked Projects</strong></div>"
+            f"{tracked_projects_html}"
+            f"<div class='preflight-summary'>"
+            f"<div class='launch-decision launch-decision-{_escape(_preflight_status_tone(str(launch_preflight.get('status') or 'warn')))}' id='run_many_launch_decision'>{_escape(launch_preflight.get('decision') or 'Runnable with warnings')}</div>"
+            f"<div><strong>Launch Preflight</strong></div>"
+            f"<div id='run_many_preflight_message' class='repo-check' data-status='{_escape(launch_preflight.get('status'))}'>{_escape(launch_preflight.get('message'))}</div>"
+            f"<div id='run_many_preflight' class='preflight-grid'>{preflight_html}</div>"
+            f"</div>"
+            f"<label for='concurrency'><strong>Concurrency</strong></label>"
+            f"<input id='concurrency' name='concurrency' type='number' min='1' value='1'>"
+            f"<div class='help'>How many plans can run at the same time. Use 1 for the safest option.</div>"
+            + (_provider_select_html("provider_override", providers) if providers else "")
+            + "<button type='submit' id='run_many_submit_button'>Run Plans</button>"
+            + "<button type='submit' formaction='/actions/run-plan-across-projects' id='run_single_across_projects_button'>Run Plan Across Projects</button>"
+            + "</form>"
+            + "</section>"
+            + "<section class='panel'>"
+            + "<h2>Create Plan</h2>"
+            + "<div class='help'>Creates one new plan file in the target project's plans folder.</div>"
+            + "<form method='post' action='/actions/create-plan'>"
+            + f"<label for='target_repo_create_plan'><strong>Target Repo</strong></label>"
+            + f"<input id='target_repo_create_plan' name='target_repo' type='text' value='{_escape(self.repo_path)}' required>"
+            + "<div id='target_repo_create_plan_status' class='repo-check'></div>"
+            + "<label for='template_name'><strong>Template</strong></label>"
+            + "<select id='template_name' name='template_name'>"
+            + "".join(
+                f"<option value='{_escape(name)}'>{_escape(name)}"
+                + (f" - {_escape(desc)}" if desc else "")
+                + "</option>"
+                for name, desc in plan_templates
+            )
+            + "</select>"
+            + f"<div><strong>Plan Root</strong>: <code>{_escape(self.default_plans_dir)}</code></div>"
+            + "<label for='output_path'><strong>Plan File Name</strong></label>"
+            + "<input id='output_path' name='output_path' type='text' placeholder='001-sample.yaml' required>"
+            + "<label for='objective'><strong>Objective</strong></label>"
+            + "<textarea id='objective' name='objective' rows='5' placeholder='Describe the change' required></textarea>"
+            + "<label class='checkbox'><input name='force' type='checkbox' value='1'> Overwrite if the file exists</label>"
+            + "<button type='submit'>Create Plan</button>"
+            + "</form>"
+            + "</section>"
+            + "</div>"
+            + "</main>"
+        )
+        actions_script = """\
+function renderPreflight(preflight, messageId, containerId) {
+  const message = document.getElementById(messageId);
+  const container = document.getElementById(containerId);
+  const decision = document.getElementById('run_many_launch_decision');
+  if (!message || !container || !preflight) return;
+  message.dataset.status = preflight.status || 'unknown';
+  message.textContent = preflight.message || '';
+  const bannerTone = preflight.status === 'pass' || preflight.status === 'ok'
+    ? 'pass'
+    : (preflight.status === 'block' || preflight.status === 'blocked' || preflight.status === 'error')
+      ? 'block'
+      : 'warn';
+  if (decision) {
+    decision.className = `launch-decision launch-decision-${bannerTone}`;
+    decision.textContent = preflight.decision || (bannerTone === 'pass' ? 'Ready to run' : bannerTone === 'block' ? 'Blocked' : 'Runnable with warnings');
+  }
+  const labels = [
+    ['repo', 'Repo'],
+    ['plans_dir', 'Plans Dir'],
+    ['binaries', 'Binaries'],
+    ['writable_paths', 'Writable Paths'],
+    ['required_env', 'Required Env'],
+  ];
+  container.innerHTML = labels.map(([key, label]) => {
+    const item = (preflight.items || {})[key] || {};
+    const details = item.details ? `<div class="help">${item.details}</div>` : '';
+    const remediation = item.remediation ? `<div class="help"><strong>Fix:</strong> ${item.remediation}</div>` : '';
+    const action = item.action_label && item.action_value
+      ? `<button type="button" class="mini-button" data-copy="${item.action_value}">${item.action_label}</button>`
+      : '';
+    const tone = item.status === 'pass' || item.status === 'ok'
+      ? 'pass'
+      : (item.status === 'block' || item.status === 'blocked' || item.status === 'error' || item.status === 'missing' || item.status === 'not_dir' || item.status === 'empty')
+        ? 'block'
+        : 'warn';
+    const statusClass = tone === 'pass' ? 'status-success' : tone === 'block' ? 'status-failure' : 'status-neutral';
+    return `<div class="preflight-item ${statusClass}"><div><strong>${label}</strong> <span class="preflight-badge preflight-badge-${tone}">${tone.toUpperCase()}</span></div><div>${item.summary || ''}</div>${details}${remediation}${action}</div>`;
+  }).join('');
+  wireCopyButtons(container);
+}
+function wirePlansPreview(targetRepoInputId, plansDirInputId, statusId, previewId, preflightMessageId, preflightContainerId) {
+  const targetRepoInput = document.getElementById(targetRepoInputId);
+  const plansDirInput = document.getElementById(plansDirInputId);
+  const runManyForm = plansDirInput ? plansDirInput.closest('form') : null;
+  const providerOverrideInput = runManyForm ? runManyForm.querySelector('select[name="provider_override"]') : null;
+  const runManyButton = document.getElementById('run_many_submit_button');
+  const runAcrossProjectsButton = document.getElementById('run_single_across_projects_button');
+  const status = document.getElementById(statusId);
+  const preview = document.getElementById(previewId);
+  if (!targetRepoInput || !plansDirInput || !status || !preview) return;
+  let timer = null;
+  function updateRunButtonLabels() {
+    const selectedCount = preview.querySelectorAll('input[name="selected_plans"]:checked').length;
+    if (runManyButton) {
+      runManyButton.textContent = selectedCount === 1 ? 'Run Plan' : 'Run Plans';
+    }
+    if (runAcrossProjectsButton) {
+      runAcrossProjectsButton.disabled = selectedCount !== 1;
+      runAcrossProjectsButton.textContent = selectedCount === 1
+        ? 'Run Plan Across Projects'
+        : 'Select One Plan to Run Across Projects';
+    }
+  }
+  function resolvedPlansDir() {
+    const overrideValue = plansDirInput.value.trim();
+    if (overrideValue) return overrideValue;
+    const repoValue = targetRepoInput.value.trim();
+    if (!repoValue) return "";
+    return repoValue.replace(/\\/+$/, "") + "/.kctl/plans";
+  }
+  async function refreshPreflight() {
+    const selectedPlans = Array.from(preview.querySelectorAll('input[name="selected_plans"]:checked')).map((node) => node.value);
+    const params = new URLSearchParams({
+      target_repo: targetRepoInput.value.trim(),
+      plans_dir: resolvedPlansDir(),
+    });
+    if (providerOverrideInput && providerOverrideInput.value.trim()) {
+      params.set('provider_override', providerOverrideInput.value.trim());
+    }
+    selectedPlans.forEach((plan) => params.append('selected_plans', plan));
+    const response = await fetch(`/api/preflight?${params.toString()}`);
+    const data = await response.json();
+    renderPreflight(data, preflightMessageId, preflightContainerId);
+  }
+  async function refreshPreview() {
+    const params = new URLSearchParams({ path: resolvedPlansDir() });
+    const response = await fetch(`/api/list-plans?${params.toString()}`);
+    const data = await response.json();
+    status.dataset.status = data.status;
+    status.textContent = data.message;
+    if (!data.plans || data.plans.length === 0) {
+      preview.innerHTML = "";
+      updateRunButtonLabels();
+      refreshPreflight();
+      return;
+    }
+    preview.innerHTML =
+      "<strong>Plans found</strong>" +
+      data.plans.map((plan) => `<label><input type="checkbox" name="selected_plans" value="${plan}"> <span>${plan}</span></label>`).join("");
+    preview.querySelectorAll('input[name="selected_plans"]').forEach((node) => {
+      node.addEventListener('change', () => {
+        updateRunButtonLabels();
+        refreshPreflight();
+      });
+    });
+    updateRunButtonLabels();
+    refreshPreflight();
+  }
+  function scheduleRefresh() {
+    clearTimeout(timer);
+    timer = setTimeout(refreshPreview, 150);
+  }
+  targetRepoInput.addEventListener('input', scheduleRefresh);
+  plansDirInput.addEventListener('input', scheduleRefresh);
+  if (providerOverrideInput) {
+    providerOverrideInput.addEventListener('change', scheduleRefresh);
+  }
+  refreshPreview();
+}
+window.addEventListener('DOMContentLoaded', () => {
+  wireCopyButtons(document);
+  wireRepoCheck('target_repo_run_many', 'target_repo_run_many_status');
+  wireRepoCheck('target_repo_create_plan', 'target_repo_create_plan_status');
+  wirePlansPreview(
+    'target_repo_run_many',
+    'plans_dir',
+    'plans_dir_status',
+    'plans_dir_preview',
+    'run_many_preflight_message',
+    'run_many_preflight'
+  );
+});
+"""
+        return self._page_shell(active_nav="Actions", body=body, extra_script=actions_script)
+
+    def render_projects_page(self, *, action_message: str | None = None) -> str:
+        tracked_projects = self.load_tracked_projects()
+        tracked_json = json.dumps(tracked_projects)
+        notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
+        project_items_html = "".join(
+            "<div class='project-item'>"
+            f"<code>{_escape(project_path)}</code>"
+            f"<form method='post' action='/actions/remove-project'>"
+            f"<input type='hidden' name='project_path' value='{_escape(project_path)}'>"
+            f"<button type='submit'>Remove</button>"
+            f"</form>"
+            "</div>"
+            for project_path in tracked_projects
+        ) or "<div class='empty'>No tracked projects yet.</div>"
+        body = (
+            f"<main class='single-column'>"
+            f"<div class='column'>"
+            f"{notice_html}"
+            f"<section class='panel'>"
+            f"<h2>Tracked Projects</h2>"
+            f"<div class='help'>Local repo paths used for cross-project plan runs.</div>"
+            f"{project_items_html}"
+            f"</section>"
+            f"<section class='panel'>"
+            f"<h2>Add Project</h2>"
+            f"<div class='help'>Add a local git repository path to the tracked projects list.</div>"
+            f"<form method='post' action='/actions/add-project' id='add_project_form'>"
+            f"<label for='project_path'><strong>Project Path</strong></label>"
+            f"<input id='project_path' name='project_path' type='text' placeholder='/path/to/project' required>"
+            f"<div id='project_path_status' class='repo-check'></div>"
+            f"<div id='project_path_duplicate' class='repo-check'></div>"
+            f"<button type='submit' id='add_project_button'>Add Project</button>"
+            f"</form>"
+            f"</section>"
+            f"</div>"
+            f"</main>"
+        )
+        projects_script = f"""\
+window.addEventListener('DOMContentLoaded', () => {{
+  wireRepoCheck('project_path', 'project_path_status');
+  const trackedProjects = {tracked_json};
+  const input = document.getElementById('project_path');
+  const dupStatus = document.getElementById('project_path_duplicate');
+  const addButton = document.getElementById('add_project_button');
+  if (!input || !dupStatus || !addButton) return;
+  let timer = null;
+  async function checkDuplicate() {{
+    const value = input.value.trim();
+    if (!value) {{
+      dupStatus.textContent = '';
+      dupStatus.dataset.status = '';
+      addButton.disabled = false;
+      return;
+    }}
+    const params = new URLSearchParams({{ path: value }});
+    const response = await fetch('/api/resolve-path?' + params.toString());
+    const data = await response.json();
+    const resolved = data.resolved || '';
+    if (resolved && trackedProjects.includes(resolved)) {{
+      dupStatus.dataset.status = 'empty';
+      dupStatus.textContent = 'Already tracked: ' + resolved;
+      addButton.disabled = true;
+    }} else {{
+      dupStatus.textContent = '';
+      dupStatus.dataset.status = '';
+      addButton.disabled = false;
+    }}
+  }}
+  function scheduleCheck() {{
+    clearTimeout(timer);
+    timer = setTimeout(checkDuplicate, 150);
+  }}
+  input.addEventListener('input', scheduleCheck);
+  checkDuplicate();
+}});
+"""
+        return self._page_shell(active_nav="Projects", body=body, extra_script=projects_script)
+
     def render_page(
         self,
         run_id: str | None = None,
@@ -823,17 +1601,6 @@ class DashboardApp:
         if state.selected_plan is not None:
             base_params["plan_execution_id"] = state.selected_plan.id
         default_plans_status, default_plans_message, default_plan_files = list_plans_in_directory(str(self.default_plans_dir))
-        preflight_items = state.launch_preflight.get("items", {})
-        preflight_html = "".join(
-            _render_preflight_item_html(label, item)
-            for label, item in (
-                ("Repo", preflight_items.get("repo") or {}),
-                ("Plans Dir", preflight_items.get("plans_dir") or {}),
-                ("Binaries", preflight_items.get("binaries") or {}),
-                ("Writable Paths", preflight_items.get("writable_paths") or {}),
-                ("Required Env", preflight_items.get("required_env") or {}),
-            )
-        )
         run_preflight_html = ""
         if state.selected_run_preflight is not None:
             run_preflight_items = state.selected_run_preflight.get("items", {})
@@ -868,107 +1635,19 @@ class DashboardApp:
         ) or "<div class='empty'>No indexed runs.</div>"
 
         overview_html = (
-            "<section class='panel'>"
-            "<h2>Overview</h2>"
-            f"<div>runs={_escape(state.overview.run_count)} active_runs={_escape(state.overview.active_run_count)} failed_runs={_escape(state.overview.failed_run_count)}</div>"
-            f"<div>running_plans={_escape(state.overview.running_plan_count)} blocked_plans={_escape(state.overview.blocked_plan_count)} failed_plans={_escape(state.overview.failed_plan_count)}</div>"
-            f"<div>stale_workspaces={_escape(state.overview.stale_workspace_count)} recent_failures={_escape(state.overview.recent_failure_count)}</div>"
-            "</section>"
+            "<div class='overview-bar'>"
+            f"<span><strong>{_escape(state.overview.run_count)}</strong> runs</span>"
+            f"<span><strong>{_escape(state.overview.active_run_count)}</strong> active</span>"
+            f"<span class='{_status_class('failure') if state.overview.failed_run_count else ''}'><strong>{_escape(state.overview.failed_run_count)}</strong> failed</span>"
+            f"<span><strong>{_escape(state.overview.running_plan_count)}</strong> running</span>"
+            f"<span><strong>{_escape(state.overview.blocked_plan_count)}</strong> blocked</span>"
+            f"<span><strong>{_escape(state.overview.stale_workspace_count)}</strong> stale</span>"
+            "</div>"
         )
 
         attention_items_html = "".join(
             _render_attention_card(item, providers=state.available_providers) for item in state.attention_items
         ) or "<div class='empty'>No attention items.</div>"
-
-        tracked_projects_html = (
-            "".join(
-                f"<label class='checkbox'><input type='checkbox' name='project_paths' value='{_escape(project_path)}'> {_escape(project_path)}</label>"
-                for project_path in state.tracked_projects
-            )
-            if state.tracked_projects
-            else "<div class='help'>No tracked projects yet.</div>"
-        )
-        remove_project_forms_html = "".join(
-            "<form method='post' action='/actions/remove-project'>"
-            f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
-            f"<input type='hidden' name='project_path' value='{_escape(project_path)}'>"
-            f"<button type='submit'>Remove {_escape(project_path)}</button>"
-            "</form>"
-            for project_path in state.tracked_projects
-        )
-        action_panel_html = (
-            "<section class='panel'>"
-            "<h2>Actions</h2>"
-            "<div class='help'>Use this panel to create a plan for a project, then run the plans directory when you are ready.</div>"
-            + (
-                f"<div class='notice'>{_escape(state.action_message)}</div>"
-                if state.action_message
-                else ""
-            )
-            + f"<form method='post' action='/actions/index'>"
-            + f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
-            + "<div class='help'>Refreshes the dashboard data from saved runs and workspaces on this machine.</div>"
-            + "<button type='submit'>Refresh Index</button>"
-            + "</form>"
-            + "<form method='post' action='/actions/run-many'>"
-            + f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
-            + "<div class='help'>Runs every plan in the plans folder for the target project.</div>"
-            + f"<label for='target_repo_run_many'><strong>Target Repo</strong></label>"
-            + f"<input id='target_repo_run_many' name='target_repo' type='text' value='{_escape(self.repo_path)}' required>"
-            + "<div id='target_repo_run_many_status' class='repo-check'></div>"
-            + f"<div><strong>Plans Dir</strong>: <code>{_escape(self.default_plans_dir)}</code></div>"
-            + "<label for='plans_dir'><strong>Plans Dir Override</strong></label>"
-            + "<input id='plans_dir' name='plans_dir' type='text' placeholder='Optional override'>"
-            + "<div id='plans_dir_status' class='repo-check'></div>"
-            + "<div id='plans_dir_preview' class='plans-preview'></div>"
-            + "<div><strong>Tracked Projects</strong></div>"
-            + tracked_projects_html
-            + "<div class='preflight-summary'>"
-            + f"<div class='launch-decision launch-decision-{_escape(_preflight_status_tone(str(state.launch_preflight.get('status') or 'warn')))}' id='run_many_launch_decision'>{_escape(state.launch_preflight.get('decision') or 'Runnable with warnings')}</div>"
-            + "<div><strong>Launch Preflight</strong></div>"
-            + f"<div id='run_many_preflight_message' class='repo-check' data-status='{_escape(state.launch_preflight.get('status'))}'>{_escape(state.launch_preflight.get('message'))}</div>"
-            + f"<div id='run_many_preflight' class='preflight-grid'>{preflight_html}</div>"
-            + "</div>"
-            + "<label for='concurrency'><strong>Concurrency</strong></label>"
-            + "<input id='concurrency' name='concurrency' type='number' min='1' value='1'>"
-            + "<div class='help'>How many plans can run at the same time. Use 1 for the safest option.</div>"
-            + (_provider_select_html("provider_override", state.available_providers) if state.available_providers else "")
-            + "<button type='submit' id='run_many_submit_button'>Run Plans</button>"
-            + "<button type='submit' formaction='/actions/run-plan-across-projects' id='run_single_across_projects_button'>Run Plan Across Projects</button>"
-            + "</form>"
-            + "<form method='post' action='/actions/add-project'>"
-            + f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
-            + "<div class='help'>Track local project paths for cross-repo single-plan runs.</div>"
-            + "<label for='project_path'><strong>Add Project Path</strong></label>"
-            + "<input id='project_path' name='project_path' type='text' placeholder='/path/to/project' required>"
-            + "<button type='submit'>Add Project</button>"
-            + "</form>"
-            + remove_project_forms_html
-            + "<form method='post' action='/actions/create-plan'>"
-            + f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
-            + "<div class='help'>Creates one new plan file in the target project's plans folder.</div>"
-            + f"<label for='target_repo_create_plan'><strong>Target Repo</strong></label>"
-            + f"<input id='target_repo_create_plan' name='target_repo' type='text' value='{_escape(self.repo_path)}' required>"
-            + "<div id='target_repo_create_plan_status' class='repo-check'></div>"
-            + "<label for='template_name'><strong>Template</strong></label>"
-            + "<select id='template_name' name='template_name'>"
-            + "".join(
-                f"<option value='{_escape(name)}'>{_escape(name)}"
-                + (f" - {_escape(description)}" if description else "")
-                + "</option>"
-                for name, description in state.plan_templates
-            )
-            + "</select>"
-            + f"<div><strong>Plan Root</strong>: <code>{_escape(self.default_plans_dir)}</code></div>"
-            + "<label for='output_path'><strong>Plan File Name</strong></label>"
-            + "<input id='output_path' name='output_path' type='text' placeholder='001-sample.yaml' required>"
-            + "<label for='objective'><strong>Objective</strong></label>"
-            + "<textarea id='objective' name='objective' rows='5' placeholder='Describe the change' required></textarea>"
-            + "<label class='checkbox'><input name='force' type='checkbox' value='1'> Overwrite if the file exists</label>"
-            + "<button type='submit'>Create Plan</button>"
-            + "</form>"
-            + "</section>"
-        )
 
         workspace_items_html = "".join(
             (
@@ -1078,566 +1757,57 @@ class DashboardApp:
                 f"<pre class='code-block'>{_escape(state.selected_plan_file_contents)}</pre>"
             )
 
-        return rf"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>kctl Dashboard</title>
-  <style>
-    body {{
-      font-family: sans-serif;
-      margin: 0;
-      padding: 16px;
-      background: #f5f5f5;
-      color: #111;
-      box-sizing: border-box;
-      overflow-x: hidden;
-    }}
-    .page, main {{
-      max-width: 1400px;
-      margin: 0 auto;
-      box-sizing: border-box;
-      width: 100%;
-    }}
-    .page-header {{
-      background: #1f2937;
-      color: white;
-      border-radius: 10px;
-      padding: 16px;
-    }}
-    main {{
-      display: grid;
-      grid-template-columns: 320px 1fr;
-      gap: 16px;
-      padding: 16px;
-      align-items: start;
-      min-width: 0;
-    }}
-    .column {{
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      min-width: 0;
-    }}
-    .panel {{
-      background: white;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      padding: 16px;
-      min-width: 0;
-    }}
-    form {{
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 12px;
-    }}
-    input, button, textarea {{
-      font: inherit;
-      padding: 8px 10px;
-    }}
-    select {{
-      font: inherit;
-      padding: 8px 10px;
-    }}
-    button {{
-      cursor: pointer;
-    }}
-    textarea {{
-      resize: vertical;
-      min-height: 120px;
-    }}
-    .checkbox {{
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }}
-    .notice {{
-      margin-bottom: 12px;
-      padding: 10px 12px;
-      border-radius: 6px;
-      background: #eff6ff;
-      border: 1px solid #bfdbfe;
-    }}
-    .help {{
-      color: #4b5563;
-      font-size: 0.95em;
-      line-height: 1.4;
-    }}
-    .repo-check {{
-      font-size: 0.92em;
-      color: #4b5563;
-    }}
-    .repo-check[data-status='ok'] {{
-      color: #15803d;
-    }}
-    .repo-check[data-status='missing'],
-    .repo-check[data-status='not_dir'],
-    .repo-check[data-status='empty'] {{
-      color: #b91c1c;
-    }}
-    .plans-preview {{
-      color: #374151;
-      font-size: 0.92em;
-      line-height: 1.4;
-    }}
-    .plans-preview ul {{
-      margin: 6px 0 0;
-      padding-left: 18px;
-    }}
-    .plans-preview label {{
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin: 4px 0;
-    }}
-    .preflight-summary {{
-      margin-top: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }}
-    .launch-decision {{
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-weight: 700;
-    }}
-    .launch-decision-pass {{
-      background: #dcfce7;
-      color: #166534;
-    }}
-    .launch-decision-warn {{
-      background: #fef3c7;
-      color: #92400e;
-    }}
-    .launch-decision-block {{
-      background: #fee2e2;
-      color: #991b1b;
-    }}
-    .preflight-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 8px;
-    }}
-    .preflight-item {{
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      padding: 10px;
-      background: white;
-    }}
-    .preflight-badge {{
-      display: inline-block;
-      margin-left: 6px;
-      padding: 1px 6px;
-      border-radius: 999px;
-      font-size: 0.78em;
-      letter-spacing: 0.04em;
-    }}
-    .preflight-badge-pass {{
-      background: #dcfce7;
-      color: #166534;
-    }}
-    .preflight-badge-warn {{
-      background: #fef3c7;
-      color: #92400e;
-    }}
-    .preflight-badge-block {{
-      background: #fee2e2;
-      color: #991b1b;
-    }}
-    .mini-button {{
-      margin-top: 8px;
-      padding: 6px 8px;
-      border: 1px solid #cbd5e1;
-      border-radius: 6px;
-      background: #f8fafc;
-      font-size: 0.85em;
-    }}
-    .list-item, .card {{
-      display: block;
-      text-decoration: none;
-      color: inherit;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      padding: 12px;
-      margin-bottom: 8px;
-      background: white;
-      overflow-wrap: anywhere;
-      min-width: 0;
-    }}
-    .list-item:hover, .card:hover {{
-      border-color: #999;
-    }}
-    .code-block {{
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      background: #f8fafc;
-      border: 1px solid #e5e7eb;
-      border-radius: 6px;
-      padding: 12px;
-      margin-top: 12px;
-      font-family: monospace;
-      font-size: 0.9em;
-    }}
-    .live-output {{
-      max-height: 420px;
-      overflow: auto;
-      background: #0f172a;
-      color: #e2e8f0;
-    }}
-    .status-success {{
-      border-left: 4px solid #15803d;
-    }}
-    .status-failure {{
-      border-left: 4px solid #b91c1c;
-    }}
-    .status-running {{
-      border-left: 4px solid #1d4ed8;
-    }}
-    .status-neutral {{
-      border-left: 4px solid #6b7280;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      background: white;
-      min-width: 760px;
-    }}
-    th, td {{
-      text-align: left;
-      padding: 8px;
-      border-bottom: 1px solid #e5e7eb;
-      vertical-align: top;
-      overflow-wrap: anywhere;
-    }}
-    .table-scroll {{
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-      max-width: 100%;
-    }}
-    .empty {{
-      color: #666;
-      font-style: italic;
-    }}
-    code {{
-      font-family: monospace;
-      font-size: 0.95em;
-    }}
-    header div, .panel div {{
-      overflow-wrap: anywhere;
-    }}
-    label {{
-      overflow-wrap: anywhere;
-    }}
-    @media (max-width: 900px) {{
-      body {{
-        padding: 12px;
-      }}
-      main {{
-        grid-template-columns: 1fr;
-        padding: 12px 0 0;
-      }}
-      .page-header {{
-        padding: 14px 12px;
-      }}
-      .panel {{
-        padding: 14px;
-      }}
-    }}
-    @media (max-width: 640px) {{
-      body {{
-        font-size: 15px;
-        padding: 10px;
-      }}
-      .page-header {{
-        padding: 10px;
-      }}
-      main {{
-        gap: 12px;
-        padding: 10px 0 0;
-      }}
-      .column {{
-        gap: 12px;
-      }}
-      .list-item, .card {{
-        padding: 10px;
-      }}
-      input, button, select, textarea {{
-        width: 100%;
-        box-sizing: border-box;
-        min-width: 0;
-      }}
-      table {{
-        min-width: 640px;
-      }}
-    }}
-  </style>
-  <script>
-    function wireRepoCheck(inputId, statusId) {{
-      const input = document.getElementById(inputId);
-      const status = document.getElementById(statusId);
-      if (!input || !status) return;
-      let timer = null;
-      async function refreshStatus() {{
-        const params = new URLSearchParams({{ path: input.value }});
-        const response = await fetch(`/api/check-repo?${{params.toString()}}`);
-        const data = await response.json();
-        status.dataset.status = data.status;
-        status.textContent = data.message;
-      }}
-      function scheduleRefresh() {{
-        clearTimeout(timer);
-        timer = setTimeout(refreshStatus, 150);
-      }}
-      input.addEventListener('input', scheduleRefresh);
-      refreshStatus();
-    }}
-    function wireCopyButtons(root) {{
-      (root || document).querySelectorAll('[data-copy]').forEach((node) => {{
-        if (node.dataset.bound === '1') return;
-        node.dataset.bound = '1';
-        node.setAttribute('data-label', node.textContent || '');
-        node.addEventListener('click', async () => {{
-          const value = node.getAttribute('data-copy') || '';
-          if (!value) return;
-          try {{
-            await navigator.clipboard.writeText(value);
-            node.textContent = 'Copied';
-            window.setTimeout(() => {{
-              node.textContent = node.getAttribute('data-label') || '';
-            }}, 1200);
-          }} catch (_error) {{
-            node.textContent = 'Copy failed';
-          }}
-        }});
-      }});
-    }}
-    function renderPreflight(preflight, messageId, containerId) {{
-      const message = document.getElementById(messageId);
-      const container = document.getElementById(containerId);
-      const decision = document.getElementById('run_many_launch_decision');
-      if (!message || !container || !preflight) return;
-      message.dataset.status = preflight.status || 'unknown';
-      message.textContent = preflight.message || '';
-      const bannerTone = preflight.status === 'pass' || preflight.status === 'ok'
-        ? 'pass'
-        : (preflight.status === 'block' || preflight.status === 'blocked' || preflight.status === 'error')
-          ? 'block'
-          : 'warn';
-      if (decision) {{
-        decision.className = `launch-decision launch-decision-${{bannerTone}}`;
-        decision.textContent = preflight.decision || (bannerTone === 'pass' ? 'Ready to run' : bannerTone === 'block' ? 'Blocked' : 'Runnable with warnings');
-      }}
-      const labels = [
-        ['repo', 'Repo'],
-        ['plans_dir', 'Plans Dir'],
-        ['binaries', 'Binaries'],
-        ['writable_paths', 'Writable Paths'],
-        ['required_env', 'Required Env'],
-      ];
-      container.innerHTML = labels.map(([key, label]) => {{
-        const item = (preflight.items || {{}})[key] || {{}};
-        const details = item.details ? `<div class="help">${{item.details}}</div>` : '';
-        const remediation = item.remediation ? `<div class="help"><strong>Fix:</strong> ${{item.remediation}}</div>` : '';
-        const action = item.action_label && item.action_value
-          ? `<button type="button" class="mini-button" data-copy="${{item.action_value}}">${{item.action_label}}</button>`
-          : '';
-        const tone = item.status === 'pass' || item.status === 'ok'
-          ? 'pass'
-          : (item.status === 'block' || item.status === 'blocked' || item.status === 'error' || item.status === 'missing' || item.status === 'not_dir' || item.status === 'empty')
-            ? 'block'
-            : 'warn';
-        const statusClass = tone === 'pass' ? 'status-success' : tone === 'block' ? 'status-failure' : 'status-neutral';
-        return `<div class="preflight-item ${{statusClass}}"><div><strong>${{label}}</strong> <span class="preflight-badge preflight-badge-${{tone}}">${{tone.toUpperCase()}}</span></div><div>${{item.summary || ''}}</div>${{details}}${{remediation}}${{action}}</div>`;
-      }}).join('');
-      wireCopyButtons(container);
-    }}
-    function wirePlansPreview(targetRepoInputId, plansDirInputId, statusId, previewId, preflightMessageId, preflightContainerId) {{
-      const targetRepoInput = document.getElementById(targetRepoInputId);
-      const plansDirInput = document.getElementById(plansDirInputId);
-      const runManyForm = plansDirInput ? plansDirInput.closest('form') : null;
-      const providerOverrideInput = runManyForm ? runManyForm.querySelector('select[name="provider_override"]') : null;
-      const runManyButton = document.getElementById('run_many_submit_button');
-      const runAcrossProjectsButton = document.getElementById('run_single_across_projects_button');
-      const status = document.getElementById(statusId);
-      const preview = document.getElementById(previewId);
-      if (!targetRepoInput || !plansDirInput || !status || !preview) return;
-      let timer = null;
-      function updateRunButtonLabels() {{
-        const selectedCount = preview.querySelectorAll('input[name="selected_plans"]:checked').length;
-        if (runManyButton) {{
-          runManyButton.textContent = selectedCount === 1 ? 'Run Plan' : 'Run Plans';
-        }}
-        if (runAcrossProjectsButton) {{
-          runAcrossProjectsButton.disabled = selectedCount !== 1;
-          runAcrossProjectsButton.textContent = selectedCount === 1
-            ? 'Run Plan Across Projects'
-            : 'Select One Plan to Run Across Projects';
-        }}
-      }}
-      function resolvedPlansDir() {{
-        const overrideValue = plansDirInput.value.trim();
-        if (overrideValue) return overrideValue;
-        const repoValue = targetRepoInput.value.trim();
-        if (!repoValue) return "";
-        return repoValue.replace(/\/+$/, "") + "/.kctl/plans";
-      }}
-      async function refreshPreflight() {{
-        const selectedPlans = Array.from(preview.querySelectorAll('input[name="selected_plans"]:checked')).map((node) => node.value);
-        const params = new URLSearchParams({{
-          target_repo: targetRepoInput.value.trim(),
-          plans_dir: resolvedPlansDir(),
-        }});
-        if (providerOverrideInput && providerOverrideInput.value.trim()) {{
-          params.set('provider_override', providerOverrideInput.value.trim());
-        }}
-        selectedPlans.forEach((plan) => params.append('selected_plans', plan));
-        const response = await fetch(`/api/preflight?${{params.toString()}}`);
-        const data = await response.json();
-        renderPreflight(data, preflightMessageId, preflightContainerId);
-      }}
-      async function refreshPreview() {{
-        const params = new URLSearchParams({{ path: resolvedPlansDir() }});
-        const response = await fetch(`/api/list-plans?${{params.toString()}}`);
-        const data = await response.json();
-        status.dataset.status = data.status;
-        status.textContent = data.message;
-        if (!data.plans || data.plans.length === 0) {{
-          preview.innerHTML = "";
-          updateRunButtonLabels();
-          refreshPreflight();
-          return;
-        }}
-        preview.innerHTML =
-          "<strong>Plans found</strong>" +
-          data.plans.map((plan) => `<label><input type="checkbox" name="selected_plans" value="${{plan}}"> <span>${{plan}}</span></label>`).join("");
-        preview.querySelectorAll('input[name="selected_plans"]').forEach((node) => {{
-          node.addEventListener('change', () => {{
-            updateRunButtonLabels();
-            refreshPreflight();
-          }});
-        }});
-        updateRunButtonLabels();
-        refreshPreflight();
-      }}
-      function scheduleRefresh() {{
-        clearTimeout(timer);
-        timer = setTimeout(refreshPreview, 150);
-      }}
-      targetRepoInput.addEventListener('input', scheduleRefresh);
-      plansDirInput.addEventListener('input', scheduleRefresh);
-      if (providerOverrideInput) {{
-        providerOverrideInput.addEventListener('change', scheduleRefresh);
-      }}
-      refreshPreview();
-    }}
-    window.addEventListener('DOMContentLoaded', () => {{
-      wireCopyButtons(document);
-      wireRepoCheck('target_repo_run_many', 'target_repo_run_many_status');
-      wireRepoCheck('target_repo_create_plan', 'target_repo_create_plan_status');
-      wirePlansPreview(
-        'target_repo_run_many',
-        'plans_dir',
-        'plans_dir_status',
-        'plans_dir_preview',
-        'run_many_preflight_message',
-        'run_many_preflight'
-      );
-      const runId = {json.dumps(state.selected_run.id if state.selected_run else "")};
-      const runStatus = {json.dumps(state.live_output_status or (state.selected_run.status if state.selected_run else ""))};
-      const outputNode = document.getElementById('live_output_stream');
-      if (runId && outputNode) {{
-        const refreshOutput = async () => {{
-          const params = new URLSearchParams({{ run_id: runId }});
-          const response = await fetch(`/api/run-output?${{params.toString()}}`);
-          if (!response.ok) return;
-          const data = await response.json();
-          outputNode.textContent = data.output || "";
-        }};
-        refreshOutput();
-        if (runStatus === "running") {{
-          window.setInterval(refreshOutput, 2000);
-        }}
-      }}
-    }});
-  </script>
-</head>
-<body>
-  <div class="page">
-    <header class="page-header">
-      <h1>kctl Dashboard</h1>
-      <div>repository={_escape(state.repo_name)} root={_escape(state.repo_root)}</div>
-    </header>
-    <main>
-            <div class="column">
-              {overview_html}
-              {action_panel_html}
-              <section class="panel">
-                <h2>Attention Queue</h2>
-                {attention_items_html}
-              </section>
-              <section class="panel">
-                <h2>Workspaces</h2>
-                {workspace_items_html}
-              </section>
-              <section class="panel">
-                <h2>Plans</h2>
-                {plan_file_items_html}
-              </section>
-              <section class="panel">
-                <h2>Runs</h2>
-                {run_items}
-      </section>
-    </div>
-    <div class="column">
-      {selected_run_html}
-      <section class="panel">
-        <h2>Plan Executions</h2>
-        {plan_items}
-      </section>
-      {selected_plan_html}
-      <section class="panel">
-        <h2>Live Output</h2>
-        {live_output_html}
-      </section>
-      <section class="panel">
-        <h2>Plan File Detail</h2>
-        {selected_plan_file_html}
-      </section>
-      <section class="panel">
-        <h2>Step Timeline</h2>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>step</th>
-                <th>kind</th>
-                <th>status</th>
-                <th>verify</th>
-                <th>changed</th>
-                <th>duration_ms</th>
-                <th>output_path</th>
-                <th>artifact_path</th>
-              </tr>
-            </thead>
-            <tbody>
-              {timeline_rows}
-            </tbody>
-          </table>
-        </div>
-      </section>
-      <section class="panel">
-        <h2>Workspace</h2>
-        {workspace_html}
-      </section>
-    </div>
-    </main>
-  </div>
-</body>
-</html>
-"""
+        notice_html = f"<div class='notice'>{_escape(state.action_message)}</div>" if state.action_message else ""
+        body = (
+            f"{overview_html}"
+            f"<main>"
+            f"<div class='column'>"
+            f"{notice_html}"
+            f"<section class='panel'><h2>Attention</h2>{attention_items_html}</section>"
+            f"<section class='panel'><h2>Runs</h2>{run_items}</section>"
+            f"<section class='panel'><h2>Workspaces</h2>{workspace_items_html}</section>"
+            f"<section class='panel'><h2>Plans</h2>{plan_file_items_html}</section>"
+            f"</div>"
+            f"<div class='column'>"
+            f"{selected_run_html}"
+            f"<section class='panel'><h2>Plan Executions</h2>{plan_items}</section>"
+            f"{selected_plan_html}"
+            f"<section class='panel'><h2>Live Output</h2>{live_output_html}</section>"
+            f"<section class='panel'><h2>Step Timeline</h2>"
+            f"<div class='table-scroll'><table>"
+            f"<thead><tr><th>#</th><th>step</th><th>kind</th><th>status</th><th>verify</th>"
+            f"<th>changed</th><th>duration_ms</th><th>output_path</th><th>artifact_path</th></tr></thead>"
+            f"<tbody>{timeline_rows}</tbody>"
+            f"</table></div></section>"
+            f"<section class='panel'><h2>Workspace</h2>{workspace_html}</section>"
+            f"<section class='panel'><h2>Plan File</h2>{selected_plan_file_html}</section>"
+            f"</div>"
+            f"</main>"
+        )
+        run_id_json = json.dumps(state.selected_run.id if state.selected_run else "")
+        run_status_json = json.dumps(state.live_output_status or (state.selected_run.status if state.selected_run else ""))
+        dashboard_script = (
+            "window.addEventListener('DOMContentLoaded', () => {\n"
+            "  wireCopyButtons(document);\n"
+            f"  const runId = {run_id_json};\n"
+            f"  const runStatus = {run_status_json};\n"
+            "  const outputNode = document.getElementById('live_output_stream');\n"
+            "  if (runId && outputNode) {\n"
+            "    const refreshOutput = async () => {\n"
+            "      const params = new URLSearchParams({ run_id: runId });\n"
+            "      const response = await fetch(`/api/run-output?${params.toString()}`);\n"
+            "      if (!response.ok) return;\n"
+            "      const data = await response.json();\n"
+            "      outputNode.textContent = data.output || '';\n"
+            "    };\n"
+            "    refreshOutput();\n"
+            "    if (runStatus === 'running') {\n"
+            "      window.setInterval(refreshOutput, 2000);\n"
+            "    }\n"
+            "  }\n"
+            "});\n"
+        )
+        return self._page_shell(active_nav="Dashboard", body=body, extra_script=dashboard_script)
 
 
 def serve_dashboard(
@@ -1659,6 +1829,16 @@ def serve_dashboard(
                 path_value = params.get("path", [""])[0]
                 status, message = check_repo_path(path_value)
                 body = json.dumps({"status": status, "message": message}).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/api/resolve-path":
+                params = parse_qs(parsed.query)
+                path_value = params.get("path", [""])[0].strip()
+                resolved = str(Path(path_value).expanduser().resolve()) if path_value else ""
+                body = json.dumps({"resolved": resolved}).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
@@ -1710,28 +1890,33 @@ def serve_dashboard(
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if parsed.path != "/":
+            if parsed.path not in {"/", "/actions", "/projects"}:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
             params = parse_qs(parsed.query)
-            run_id = params.get("run_id", [None])[0]
-            plan_execution_id = params.get("plan_execution_id", [None])[0]
             action_message = params.get("message", [None])[0]
-            selected_plan_file = params.get("selected_plan_file", [None])[0]
             try:
-                body = app.render_page(
-                    run_id=run_id,
-                    plan_execution_id=plan_execution_id,
-                    action_message=action_message,
-                    selected_plan_file=selected_plan_file,
-                )
+                if parsed.path == "/actions":
+                    body = app.render_actions_page(action_message=action_message)
+                elif parsed.path == "/projects":
+                    body = app.render_projects_page(action_message=action_message)
+                else:
+                    run_id = params.get("run_id", [None])[0]
+                    plan_execution_id = params.get("plan_execution_id", [None])[0]
+                    selected_plan_file = params.get("selected_plan_file", [None])[0]
+                    body = app.render_page(
+                        run_id=run_id,
+                        plan_execution_id=plan_execution_id,
+                        action_message=action_message,
+                        selected_plan_file=selected_plan_file,
+                    )
             except PlanError as exc:
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(
                     (
-                        "<!doctype html><html><body><h1>kctl Dashboard</h1>"
+                        "<!doctype html><html><body><h1>kctl</h1>"
                         f"<p>{_escape(exc)}</p></body></html>"
                     ).encode("utf-8")
                 )
@@ -1756,8 +1941,8 @@ def serve_dashboard(
                 return
             content_length = int(self.headers.get("Content-Length", "0"))
             form_data = parse_qs(self.rfile.read(content_length).decode("utf-8"))
-            run_id = form_data.get("run_id", [""])[0] or None
-            plan_execution_id = form_data.get("plan_execution_id", [""])[0] or None
+            run_id: str | None = None
+            redirect_to = "/actions"
             try:
                 if parsed.path == "/actions/rerun-plan":
                     plan_file_path_value = form_data.get("plan_file_path", [""])[0].strip()
@@ -1771,19 +1956,21 @@ def serve_dashboard(
                     provider_override = form_data.get("provider_override", [""])[0].strip() or None
                     run_id = app.start_run_many(plans_dir, concurrency=1, selected_plan_names=[plan_file_name], provider_override=provider_override)
                     message = f"Rerun started for {plan_file_name}."
-                    plan_execution_id = None
+                    redirect_to = "/"
                 elif parsed.path == "/actions/add-project":
                     project_path_value = form_data.get("project_path", [""])[0].strip()
                     if not project_path_value:
                         raise PlanError("Project path is required.")
                     app.add_tracked_project(Path(project_path_value).expanduser())
                     message = f"Tracked project: {Path(project_path_value).expanduser().resolve()}"
+                    redirect_to = "/projects"
                 elif parsed.path == "/actions/remove-project":
                     project_path_value = form_data.get("project_path", [""])[0].strip()
                     if not project_path_value:
                         raise PlanError("Project path is required.")
                     app.remove_tracked_project(project_path_value)
                     message = f"Removed tracked project: {Path(project_path_value).expanduser().resolve()}"
+                    redirect_to = "/projects"
                 elif parsed.path == "/actions/run-plan-across-projects":
                     selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
                     if len(selected_plan_names) != 1:
@@ -1818,10 +2005,11 @@ def serve_dashboard(
                         f"Started single-plan run for {selected_plan_names[0]} "
                         f"across {len(project_paths)} project(s)."
                     )
-                    plan_execution_id = None
+                    redirect_to = "/"
                 elif parsed.path == "/actions/index":
                     app.run_index_now()
                     message = "Index refreshed."
+                    redirect_to = "/actions"
                 elif parsed.path == "/actions/create-plan":
                     template_name = form_data.get("template_name", [""])[0].strip()
                     target_repo_value = form_data.get("target_repo", [""])[0].strip()
@@ -1843,6 +2031,7 @@ def serve_dashboard(
                         force=form_data.get("force", [""])[0] == "1",
                     )
                     message = f"Created plan at {created_path}."
+                    redirect_to = "/actions"
                 else:
                     target_repo_value = form_data.get("target_repo", [""])[0].strip()
                     if not target_repo_value:
@@ -1861,14 +2050,15 @@ def serve_dashboard(
                         message = f"Started plan run for {selected_plan_names[0]} in {plans_dir}."
                     else:
                         message = f"Started run-many for {plans_dir}."
+                    redirect_to = "/"
             except (PlanError, ValueError) as exc:
                 message = str(exc)
-            location = _link(
-                {},
-                run_id=run_id,
-                plan_execution_id=plan_execution_id,
-                message=message,
-            )
+            if redirect_to == "/projects":
+                location = _page_link("/projects", message=message)
+            elif redirect_to == "/actions":
+                location = _page_link("/actions", message=message)
+            else:
+                location = _link({}, run_id=run_id, message=message)
             self.send_response(HTTPStatus.SEE_OTHER)
             self.send_header("Location", location)
             self.end_headers()

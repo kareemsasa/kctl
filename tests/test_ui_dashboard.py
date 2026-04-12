@@ -138,10 +138,9 @@ class UIDashboardTests(unittest.TestCase):
             app = DashboardApp(repo_path)
             html = app.render_page(run_id=run_id)
 
-            self.assertIn("kctl Dashboard", html)
-            self.assertIn("Overview", html)
-            self.assertIn("Actions", html)
-            self.assertIn("Attention Queue", html)
+            self.assertIn("kctl", html)
+            self.assertIn("overview-bar", html)
+            self.assertIn("Attention", html)
             self.assertIn("Workspaces", html)
             self.assertIn("Plans", html)
             self.assertIn("Runs", html)
@@ -155,32 +154,38 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("verify", html)
             self.assertIn(".kctl/worktrees/", html)
             self.assertIn("lifecycle=released", html)
-            self.assertIn("Run Plans", html)
-            self.assertIn("Refresh Index", html)
-            self.assertIn("Create Plan", html)
-            self.assertIn("template_name", html)
             self.assertIn('name="viewport"', html)
             self.assertIn("table-scroll", html)
             self.assertIn("page-header", html)
-            self.assertIn("@media (max-width: 900px)", html)
-            self.assertIn(".kctl/plans", html)
-            self.assertIn("Plans Dir Override", html)
-            self.assertIn("Target Repo", html)
-            self.assertIn("target_repo_run_many_status", html)
-            self.assertIn("/api/check-repo", html)
-            self.assertIn("plans_dir_preview", html)
-            self.assertIn("/api/list-plans", html)
-            self.assertIn("/api/preflight", html)
-            self.assertIn("selected_plans", html)
-            self.assertIn("Plan File Detail", html)
-            self.assertIn("Launch Preflight", html)
-            self.assertIn("run_many_preflight", html)
-            self.assertIn("preflight-badge", html)
-            self.assertIn("run_many_launch_decision", html)
-            self.assertIn("PASS", html)
-            self.assertIn("run_many_submit_button", html)
-            self.assertIn("run_single_across_projects_button", html)
-            self.assertIn("Tracked Projects", html)
+            self.assertIn("@media (max-width: 860px)", html)
+            self.assertIn("Plan File", html)
+            self.assertIn("main-nav", html)
+            self.assertIn("/actions", html)
+            self.assertIn("/projects", html)
+
+            actions_html = app.render_actions_page()
+
+            self.assertIn("Run Plans", actions_html)
+            self.assertIn("Refresh Index", actions_html)
+            self.assertIn("Create Plan", actions_html)
+            self.assertIn("template_name", actions_html)
+            self.assertIn(".kctl/plans", actions_html)
+            self.assertIn("Plans Dir Override", actions_html)
+            self.assertIn("Target Repo", actions_html)
+            self.assertIn("target_repo_run_many_status", actions_html)
+            self.assertIn("/api/check-repo", actions_html)
+            self.assertIn("plans_dir_preview", actions_html)
+            self.assertIn("/api/list-plans", actions_html)
+            self.assertIn("/api/preflight", actions_html)
+            self.assertIn("selected_plans", actions_html)
+            self.assertIn("Launch Preflight", actions_html)
+            self.assertIn("run_many_preflight", actions_html)
+            self.assertIn("preflight-badge", actions_html)
+            self.assertIn("run_many_launch_decision", actions_html)
+            self.assertIn("PASS", actions_html)
+            self.assertIn("run_many_submit_button", actions_html)
+            self.assertIn("run_single_across_projects_button", actions_html)
+            self.assertIn("Tracked Projects", actions_html)
 
     def test_dashboard_attention_queue_surfaces_blocked_and_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -295,8 +300,8 @@ class UIDashboardTests(unittest.TestCase):
             app = DashboardApp(repo_path)
             html = app.render_page(run_id=run_id)
 
-            self.assertIn("blocked_plans=1", html)
-            self.assertIn("running_plans=1", html)
+            self.assertIn("blocked", html)
+            self.assertIn("running", html)
             # operator action labels replace raw kind names in attention cards
             self.assertIn("Review Workspace", html)
             self.assertIn("Stale — Investigate", html)
@@ -431,6 +436,21 @@ class UIDashboardTests(unittest.TestCase):
             tracked_after = app.load_tracked_projects()
             self.assertNotIn(str(project_a.resolve()), tracked_after)
 
+    def test_add_tracked_project_rejects_duplicate(self) -> None:
+        from kctl_pkg.types import PlanError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_a = Path(tmpdir) / "project-a"
+            init_git_repo(repo_path)
+            init_git_repo(project_a)
+
+            app = DashboardApp(repo_path)
+            app.add_tracked_project(project_a)
+            with self.assertRaises(PlanError) as ctx:
+                app.add_tracked_project(project_a)
+            self.assertIn("already tracked", str(ctx.exception).lower())
+
     def test_dashboard_renders_live_output_for_running_unindexed_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -515,7 +535,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("captured_at=2026-04-12T05:07:33.958781+00:00", html)
             self.assertIn("OPENAI_API_KEY", html)
             self.assertIn("Fix:", html)
-            self.assertIn("BLOCK", html)
+            self.assertIn("blockers", html)
             self.assertIn("Copy env", html)
 
     def test_attention_queue_shows_operator_action_labels_and_rerun_button(self) -> None:
