@@ -178,6 +178,9 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("preflight-badge", html)
             self.assertIn("run_many_launch_decision", html)
             self.assertIn("PASS", html)
+            self.assertIn("run_many_submit_button", html)
+            self.assertIn("run_single_across_projects_button", html)
+            self.assertIn("Tracked Projects", html)
 
     def test_dashboard_attention_queue_surfaces_blocked_and_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -367,6 +370,66 @@ class UIDashboardTests(unittest.TestCase):
                 ],
             )
             self.assertTrue(run_id)
+
+    def test_project_tracking_and_cross_project_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_a = Path(tmpdir) / "project-a"
+            project_b = Path(tmpdir) / "project-b"
+            init_git_repo(repo_path)
+            init_git_repo(project_a)
+            init_git_repo(project_b)
+            plans_dir = repo_path / ".kctl" / "plans"
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            plan_path = plans_dir / "001-sample.yaml"
+            plan_path.write_text(
+                f"repo: {repo_path}\nobjective: x\nsteps:\n  - id: inspect\n    prompt: x\n"
+            )
+            calls: list[tuple[str, str]] = []
+
+            app = DashboardApp(repo_path)
+            app.add_tracked_project(project_a)
+            app.add_tracked_project(project_b)
+            tracked = app.load_tracked_projects()
+            self.assertIn(str(project_a.resolve()), tracked)
+            self.assertIn(str(project_b.resolve()), tracked)
+
+            def fake_run_plan(*, plan_path, repo_override, **kwargs):
+                calls.append((str(plan_path), str(repo_override)))
+                return 0
+
+            with patch("kctl_pkg.ui_dashboard.run_plan", side_effect=fake_run_plan), patch(
+                "kctl_pkg.ui_dashboard.index_repository_state", return_value={}
+            ), patch("kctl_pkg.ui_dashboard.threading.Thread") as thread_cls:
+                def run_immediately(*args, **kwargs):
+                    target = kwargs["target"]
+
+                    class ImmediateThread:
+                        def start(self_nonlocal) -> None:
+                            target()
+
+                    return ImmediateThread()
+
+                thread_cls.side_effect = run_immediately
+                app.start_run_plan_across_projects(
+                    plan_path=plan_path,
+                    project_paths=[project_a, project_b],
+                    provider_override="claude",
+                )
+
+            self.assertEqual(
+                sorted(calls),
+                sorted(
+                    [
+                        (str(plan_path.resolve()), str(project_a.resolve())),
+                        (str(plan_path.resolve()), str(project_b.resolve())),
+                    ]
+                ),
+            )
+
+            app.remove_tracked_project(str(project_a))
+            tracked_after = app.load_tracked_projects()
+            self.assertNotIn(str(project_a.resolve()), tracked_after)
 
     def test_dashboard_renders_live_output_for_running_unindexed_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

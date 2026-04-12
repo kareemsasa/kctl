@@ -1358,6 +1358,7 @@ def run_plan(
     repo_override: str | None = None,
     output_sink: OutputSink | None = None,
     interactive: bool = True,
+    provider_override: str | None = None,
 ) -> int:
     run_data = execute_plan_run(
         plan_path=plan_path,
@@ -1371,5 +1372,6 @@ def run_plan(
         repo_override=repo_override,
         output_sink=output_sink,
         interactive=interactive,
+        provider_override=provider_override,
     )
     return 1 if run_data["status"] == "failure" else 0

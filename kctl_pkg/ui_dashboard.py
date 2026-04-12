@@ -13,9 +13,11 @@ from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .multi import build_multi_run_id, load_normalized_multi_plans, resolve_multi_run_log, run_many_plans
+from .git import ensure_git_repo, get_repo_root
 from .plan import build_plan_from_template, load_plan_templates
 from .paths import project_root
 from .preflight import preflight_multi_run
+from .runner import run_plan
 from .ui_index import index_repository_state
 
 from .types import PlanError
@@ -426,6 +428,7 @@ class DashboardState:
     repo_root: str
     action_message: str | None
     plan_templates: list[tuple[str, str | None]]
+    tracked_projects: list[str]
     available_providers: list[tuple[str, str]]
     overview: RepositoryOverview
     attention_items: list[AttentionItem]
@@ -479,6 +482,44 @@ class DashboardApp:
     @property
     def default_plans_dir(self) -> Path:
         return self.repo_path / ".kctl" / "plans"
+
+    @property
+    def projects_file_path(self) -> Path:
+        return self.repo_path / ".kctl" / "dashboard-projects.json"
+
+    def load_tracked_projects(self) -> list[str]:
+        path = self.projects_file_path
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        projects: list[str] = []
+        for item in data:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            projects.append(str(Path(item).expanduser().resolve()))
+        return sorted(dict.fromkeys(projects))
+
+    def save_tracked_projects(self, projects: list[str]) -> None:
+        path = self.projects_file_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sorted(dict.fromkeys(projects)), indent=2) + "\n")
+
+    def add_tracked_project(self, project_path: Path) -> None:
+        ensure_git_repo(project_path)
+        repo_root = get_repo_root(project_path)
+        projects = self.load_tracked_projects()
+        projects.append(str(repo_root))
+        self.save_tracked_projects(projects)
+
+    def remove_tracked_project(self, project_path: str) -> None:
+        normalized_target = str(Path(project_path).expanduser().resolve())
+        projects = [path for path in self.load_tracked_projects() if path != normalized_target]
+        self.save_tracked_projects(projects)
 
     def plans_dir_for_repo(self, target_repo: Path) -> Path:
         return target_repo.resolve() / ".kctl" / "plans"
@@ -540,6 +581,7 @@ class DashboardApp:
             (template_name, template.get("description") if isinstance(template, dict) else None)
             for template_name, template in templates.items()
         ]
+        tracked_projects = self.load_tracked_projects()
         selected_run: RunDetail | None = None
         plan_cards: list[PlanExecutionCard] = []
         selected_plan: PlanExecutionCard | None = None
@@ -601,6 +643,7 @@ class DashboardApp:
             repo_root=repository.root_path,
             action_message=action_message,
             plan_templates=plan_templates,
+            tracked_projects=tracked_projects,
             available_providers=available_providers(),
             overview=overview,
             attention_items=attention_items,
@@ -726,6 +769,41 @@ class DashboardApp:
         threading.Thread(target=_run, daemon=True).start()
         return run_id
 
+    def start_run_plan_across_projects(
+        self,
+        plan_path: Path,
+        project_paths: list[Path],
+        provider_override: str | None = None,
+    ) -> str:
+        run_id = build_multi_run_id()
+        normalized_projects = sorted({path.expanduser().resolve() for path in project_paths})
+
+        def _run() -> None:
+            for project_path in normalized_projects:
+                try:
+                    run_plan(
+                        plan_path=plan_path.resolve(),
+                        verbose=False,
+                        approve_each_step=False,
+                        branch=None,
+                        commit=False,
+                        commit_message=None,
+                        allow_dirty_start=False,
+                        review_enabled=False,
+                        repo_override=str(project_path),
+                        interactive=False,
+                        provider_override=provider_override,
+                    )
+                except PlanError:
+                    continue
+                try:
+                    index_repository_state(project_path)
+                except PlanError:
+                    continue
+
+        threading.Thread(target=_run, daemon=True).start()
+        return run_id
+
     def render_page(
         self,
         run_id: str | None = None,
@@ -802,6 +880,22 @@ class DashboardApp:
             _render_attention_card(item, providers=state.available_providers) for item in state.attention_items
         ) or "<div class='empty'>No attention items.</div>"
 
+        tracked_projects_html = (
+            "".join(
+                f"<label class='checkbox'><input type='checkbox' name='project_paths' value='{_escape(project_path)}'> {_escape(project_path)}</label>"
+                for project_path in state.tracked_projects
+            )
+            if state.tracked_projects
+            else "<div class='help'>No tracked projects yet.</div>"
+        )
+        remove_project_forms_html = "".join(
+            "<form method='post' action='/actions/remove-project'>"
+            f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
+            f"<input type='hidden' name='project_path' value='{_escape(project_path)}'>"
+            f"<button type='submit'>Remove {_escape(project_path)}</button>"
+            "</form>"
+            for project_path in state.tracked_projects
+        )
         action_panel_html = (
             "<section class='panel'>"
             "<h2>Actions</h2>"
@@ -811,59 +905,68 @@ class DashboardApp:
                 if state.action_message
                 else ""
             )
-            + (
-                f"<form method='post' action='/actions/index'>"
-                f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
-                "<div class='help'>Refreshes the dashboard data from saved runs and workspaces on this machine.</div>"
-                "<button type='submit'>Refresh Index</button>"
-                "</form>"
-                "<form method='post' action='/actions/run-many'>"
-                f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
-                "<div class='help'>Runs every plan in the plans folder for the target project.</div>"
-                f"<label for='target_repo_run_many'><strong>Target Repo</strong></label>"
-                f"<input id='target_repo_run_many' name='target_repo' type='text' value='{_escape(self.repo_path)}' required>"
-                "<div id='target_repo_run_many_status' class='repo-check'></div>"
-                f"<div><strong>Plans Dir</strong>: <code>{_escape(self.default_plans_dir)}</code></div>"
-                "<label for='plans_dir'><strong>Plans Dir Override</strong></label>"
-                "<input id='plans_dir' name='plans_dir' type='text' placeholder='Optional override'>"
-                "<div id='plans_dir_status' class='repo-check'></div>"
-                "<div id='plans_dir_preview' class='plans-preview'></div>"
-                "<div class='preflight-summary'>"
-                f"<div class='launch-decision launch-decision-{_escape(_preflight_status_tone(str(state.launch_preflight.get('status') or 'warn')))}' id='run_many_launch_decision'>{_escape(state.launch_preflight.get('decision') or 'Runnable with warnings')}</div>"
-                "<div><strong>Launch Preflight</strong></div>"
-                f"<div id='run_many_preflight_message' class='repo-check' data-status='{_escape(state.launch_preflight.get('status'))}'>{_escape(state.launch_preflight.get('message'))}</div>"
-                f"<div id='run_many_preflight' class='preflight-grid'>{preflight_html}</div>"
-                "</div>"
-                "<label for='concurrency'><strong>Concurrency</strong></label>"
-                "<input id='concurrency' name='concurrency' type='number' min='1' value='1'>"
-                "<div class='help'>How many plans can run at the same time. Use 1 for the safest option.</div>"
-                + (_provider_select_html("provider_override", state.available_providers) if state.available_providers else "")
-                + "<button type='submit'>Run Plans</button>"
-                "</form>"
-                "<form method='post' action='/actions/create-plan'>"
-                f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
-                "<div class='help'>Creates one new plan file in the target project's plans folder.</div>"
-                f"<label for='target_repo_create_plan'><strong>Target Repo</strong></label>"
-                f"<input id='target_repo_create_plan' name='target_repo' type='text' value='{_escape(self.repo_path)}' required>"
-                "<div id='target_repo_create_plan_status' class='repo-check'></div>"
-                "<label for='template_name'><strong>Template</strong></label>"
-                "<select id='template_name' name='template_name'>"
-                + "".join(
-                    f"<option value='{_escape(name)}'>{_escape(name)}"
-                    + (f" - {_escape(description)}" if description else "")
-                    + "</option>"
-                    for name, description in state.plan_templates
-                )
-                + "</select>"
-                f"<div><strong>Plan Root</strong>: <code>{_escape(self.default_plans_dir)}</code></div>"
-                "<label for='output_path'><strong>Plan File Name</strong></label>"
-                "<input id='output_path' name='output_path' type='text' placeholder='001-sample.yaml' required>"
-                "<label for='objective'><strong>Objective</strong></label>"
-                "<textarea id='objective' name='objective' rows='5' placeholder='Describe the change' required></textarea>"
-                "<label class='checkbox'><input name='force' type='checkbox' value='1'> Overwrite if the file exists</label>"
-                "<button type='submit'>Create Plan</button>"
-                "</form>"
+            + f"<form method='post' action='/actions/index'>"
+            + f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
+            + "<div class='help'>Refreshes the dashboard data from saved runs and workspaces on this machine.</div>"
+            + "<button type='submit'>Refresh Index</button>"
+            + "</form>"
+            + "<form method='post' action='/actions/run-many'>"
+            + f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
+            + "<div class='help'>Runs every plan in the plans folder for the target project.</div>"
+            + f"<label for='target_repo_run_many'><strong>Target Repo</strong></label>"
+            + f"<input id='target_repo_run_many' name='target_repo' type='text' value='{_escape(self.repo_path)}' required>"
+            + "<div id='target_repo_run_many_status' class='repo-check'></div>"
+            + f"<div><strong>Plans Dir</strong>: <code>{_escape(self.default_plans_dir)}</code></div>"
+            + "<label for='plans_dir'><strong>Plans Dir Override</strong></label>"
+            + "<input id='plans_dir' name='plans_dir' type='text' placeholder='Optional override'>"
+            + "<div id='plans_dir_status' class='repo-check'></div>"
+            + "<div id='plans_dir_preview' class='plans-preview'></div>"
+            + "<div><strong>Tracked Projects</strong></div>"
+            + tracked_projects_html
+            + "<div class='preflight-summary'>"
+            + f"<div class='launch-decision launch-decision-{_escape(_preflight_status_tone(str(state.launch_preflight.get('status') or 'warn')))}' id='run_many_launch_decision'>{_escape(state.launch_preflight.get('decision') or 'Runnable with warnings')}</div>"
+            + "<div><strong>Launch Preflight</strong></div>"
+            + f"<div id='run_many_preflight_message' class='repo-check' data-status='{_escape(state.launch_preflight.get('status'))}'>{_escape(state.launch_preflight.get('message'))}</div>"
+            + f"<div id='run_many_preflight' class='preflight-grid'>{preflight_html}</div>"
+            + "</div>"
+            + "<label for='concurrency'><strong>Concurrency</strong></label>"
+            + "<input id='concurrency' name='concurrency' type='number' min='1' value='1'>"
+            + "<div class='help'>How many plans can run at the same time. Use 1 for the safest option.</div>"
+            + (_provider_select_html("provider_override", state.available_providers) if state.available_providers else "")
+            + "<button type='submit' id='run_many_submit_button'>Run Plans</button>"
+            + "<button type='submit' formaction='/actions/run-plan-across-projects' id='run_single_across_projects_button'>Run Plan Across Projects</button>"
+            + "</form>"
+            + "<form method='post' action='/actions/add-project'>"
+            + f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
+            + "<div class='help'>Track local project paths for cross-repo single-plan runs.</div>"
+            + "<label for='project_path'><strong>Add Project Path</strong></label>"
+            + "<input id='project_path' name='project_path' type='text' placeholder='/path/to/project' required>"
+            + "<button type='submit'>Add Project</button>"
+            + "</form>"
+            + remove_project_forms_html
+            + "<form method='post' action='/actions/create-plan'>"
+            + f"<input type='hidden' name='run_id' value='{_escape(state.selected_run.id if state.selected_run else '')}'>"
+            + "<div class='help'>Creates one new plan file in the target project's plans folder.</div>"
+            + f"<label for='target_repo_create_plan'><strong>Target Repo</strong></label>"
+            + f"<input id='target_repo_create_plan' name='target_repo' type='text' value='{_escape(self.repo_path)}' required>"
+            + "<div id='target_repo_create_plan_status' class='repo-check'></div>"
+            + "<label for='template_name'><strong>Template</strong></label>"
+            + "<select id='template_name' name='template_name'>"
+            + "".join(
+                f"<option value='{_escape(name)}'>{_escape(name)}"
+                + (f" - {_escape(description)}" if description else "")
+                + "</option>"
+                for name, description in state.plan_templates
             )
+            + "</select>"
+            + f"<div><strong>Plan Root</strong>: <code>{_escape(self.default_plans_dir)}</code></div>"
+            + "<label for='output_path'><strong>Plan File Name</strong></label>"
+            + "<input id='output_path' name='output_path' type='text' placeholder='001-sample.yaml' required>"
+            + "<label for='objective'><strong>Objective</strong></label>"
+            + "<textarea id='objective' name='objective' rows='5' placeholder='Describe the change' required></textarea>"
+            + "<label class='checkbox'><input name='force' type='checkbox' value='1'> Overwrite if the file exists</label>"
+            + "<button type='submit'>Create Plan</button>"
+            + "</form>"
             + "</section>"
         )
 
@@ -1355,10 +1458,24 @@ class DashboardApp:
       const plansDirInput = document.getElementById(plansDirInputId);
       const runManyForm = plansDirInput ? plansDirInput.closest('form') : null;
       const providerOverrideInput = runManyForm ? runManyForm.querySelector('select[name="provider_override"]') : null;
+      const runManyButton = document.getElementById('run_many_submit_button');
+      const runAcrossProjectsButton = document.getElementById('run_single_across_projects_button');
       const status = document.getElementById(statusId);
       const preview = document.getElementById(previewId);
       if (!targetRepoInput || !plansDirInput || !status || !preview) return;
       let timer = null;
+      function updateRunButtonLabels() {{
+        const selectedCount = preview.querySelectorAll('input[name="selected_plans"]:checked').length;
+        if (runManyButton) {{
+          runManyButton.textContent = selectedCount === 1 ? 'Run Plan' : 'Run Plans';
+        }}
+        if (runAcrossProjectsButton) {{
+          runAcrossProjectsButton.disabled = selectedCount !== 1;
+          runAcrossProjectsButton.textContent = selectedCount === 1
+            ? 'Run Plan Across Projects'
+            : 'Select One Plan to Run Across Projects';
+        }}
+      }}
       function resolvedPlansDir() {{
         const overrideValue = plansDirInput.value.trim();
         if (overrideValue) return overrideValue;
@@ -1388,6 +1505,7 @@ class DashboardApp:
         status.textContent = data.message;
         if (!data.plans || data.plans.length === 0) {{
           preview.innerHTML = "";
+          updateRunButtonLabels();
           refreshPreflight();
           return;
         }}
@@ -1395,8 +1513,12 @@ class DashboardApp:
           "<strong>Plans found</strong>" +
           data.plans.map((plan) => `<label><input type="checkbox" name="selected_plans" value="${{plan}}"> <span>${{plan}}</span></label>`).join("");
         preview.querySelectorAll('input[name="selected_plans"]').forEach((node) => {{
-          node.addEventListener('change', () => {{ refreshPreflight(); }});
+          node.addEventListener('change', () => {{
+            updateRunButtonLabels();
+            refreshPreflight();
+          }});
         }});
+        updateRunButtonLabels();
         refreshPreflight();
       }}
       function scheduleRefresh() {{
@@ -1621,7 +1743,15 @@ def serve_dashboard(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/actions/index", "/actions/run-many", "/actions/create-plan", "/actions/rerun-plan"}:
+            if parsed.path not in {
+                "/actions/index",
+                "/actions/run-many",
+                "/actions/create-plan",
+                "/actions/rerun-plan",
+                "/actions/add-project",
+                "/actions/remove-project",
+                "/actions/run-plan-across-projects",
+            }:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -1641,6 +1771,53 @@ def serve_dashboard(
                     provider_override = form_data.get("provider_override", [""])[0].strip() or None
                     run_id = app.start_run_many(plans_dir, concurrency=1, selected_plan_names=[plan_file_name], provider_override=provider_override)
                     message = f"Rerun started for {plan_file_name}."
+                    plan_execution_id = None
+                elif parsed.path == "/actions/add-project":
+                    project_path_value = form_data.get("project_path", [""])[0].strip()
+                    if not project_path_value:
+                        raise PlanError("Project path is required.")
+                    app.add_tracked_project(Path(project_path_value).expanduser())
+                    message = f"Tracked project: {Path(project_path_value).expanduser().resolve()}"
+                elif parsed.path == "/actions/remove-project":
+                    project_path_value = form_data.get("project_path", [""])[0].strip()
+                    if not project_path_value:
+                        raise PlanError("Project path is required.")
+                    app.remove_tracked_project(project_path_value)
+                    message = f"Removed tracked project: {Path(project_path_value).expanduser().resolve()}"
+                elif parsed.path == "/actions/run-plan-across-projects":
+                    selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
+                    if len(selected_plan_names) != 1:
+                        raise PlanError("Select exactly one plan to run across projects.")
+                    project_paths = [
+                        Path(path_value).expanduser().resolve()
+                        for path_value in form_data.get("project_paths", [])
+                        if path_value.strip()
+                    ]
+                    if not project_paths:
+                        raise PlanError("Select at least one tracked project.")
+                    target_repo_value = form_data.get("target_repo", [""])[0].strip()
+                    if not target_repo_value:
+                        raise PlanError("Target repo is required.")
+                    target_repo = Path(target_repo_value).expanduser().resolve()
+                    plans_dir_value = form_data.get("plans_dir", [""])[0].strip()
+                    plans_dir = (
+                        Path(plans_dir_value).expanduser()
+                        if plans_dir_value
+                        else app.plans_dir_for_repo(target_repo)
+                    )
+                    plan_path = plans_dir.resolve() / selected_plan_names[0]
+                    if not plan_path.exists():
+                        raise PlanError(f"Plan file not found: {plan_path}")
+                    provider_override = form_data.get("provider_override", [""])[0].strip() or None
+                    run_id = app.start_run_plan_across_projects(
+                        plan_path=plan_path,
+                        project_paths=project_paths,
+                        provider_override=provider_override,
+                    )
+                    message = (
+                        f"Started single-plan run for {selected_plan_names[0]} "
+                        f"across {len(project_paths)} project(s)."
+                    )
                     plan_execution_id = None
                 elif parsed.path == "/actions/index":
                     app.run_index_now()
@@ -1680,7 +1857,10 @@ def serve_dashboard(
                     selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
                     provider_override = form_data.get("provider_override", [""])[0].strip() or None
                     run_id = app.start_run_many(plans_dir, concurrency, selected_plan_names=selected_plan_names or None, provider_override=provider_override)
-                    message = f"Started run-many for {plans_dir}."
+                    if len(selected_plan_names) == 1:
+                        message = f"Started plan run for {selected_plan_names[0]} in {plans_dir}."
+                    else:
+                        message = f"Started run-many for {plans_dir}."
             except (PlanError, ValueError) as exc:
                 message = str(exc)
             location = _link(
