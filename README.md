@@ -78,6 +78,8 @@ python3 kctl.py ui runs /path/to/repo
 python3 kctl.py ui run /path/to/repo 20260325T120000000000Z
 python3 kctl.py ui workspaces /path/to/repo
 python3 kctl.py ui dashboard /path/to/repo
+python3 kctl.py ui dashboard /path/to/repo --tailscale
+python3 kctl.py ui dashboard /path/to/repo --tailscale --announce-url http://kctl-node.tailnet.ts.net:8421
 ```
 
 `kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
@@ -349,6 +351,8 @@ Interactive prompts are not supported in batch mode. `--approve-each-step` will 
 Multi-plan run state is written under `.kctl/runs/<run-id>/run.json`, with a sibling `summary.md` and one per-plan subdirectory containing that plan's run log and step artifacts.
 
 `kctl ui index <repo>` builds a local SQLite index at `.kctl/ui-state.db` from existing `.kctl/runs`, `.kctl/worktrees`, and legacy `.kctl-runs` data. `kctl ui runs`, `kctl ui run`, and `kctl ui workspaces` are read-only inspection commands over that index. `kctl ui dashboard` launches a minimal local web dashboard with repository overview counts, an attention queue, repo-wide workspace state, and drill-down views for runs, plan executions, step timelines, and workspace details.
+
+For phone access over Tailscale, use `kctl ui dashboard <repo> --tailscale`. That binds on `0.0.0.0`, prints a localhost URL plus a hostname-based URL hint, and keeps the default local-only behavior unless you opt in. If you already know the exact MagicDNS name or public tailnet URL you want to use, pass it with `--announce-url`.
 
 ## Run Logs
 

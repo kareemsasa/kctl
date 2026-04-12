@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import socket
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -69,6 +70,31 @@ class DashboardState:
     selected_plan: PlanExecutionCard | None
     steps: list[StepTimelineItem]
     workspace: WorkspaceDetail | None
+
+
+def build_dashboard_access_urls(
+    host: str,
+    port: int,
+    *,
+    announce_url: str | None = None,
+    tailscale: bool = False,
+    hostname: str | None = None,
+) -> list[str]:
+    urls: list[str] = []
+    if announce_url:
+        urls.append(announce_url)
+    if host in {"0.0.0.0", "::"}:
+        urls.append(f"http://localhost:{port}")
+        if tailscale:
+            resolved_hostname = hostname or socket.gethostname()
+            urls.append(f"http://{resolved_hostname}:{port}")
+    else:
+        urls.append(f"http://{host}:{port}")
+    deduped: list[str] = []
+    for url in urls:
+        if url not in deduped:
+            deduped.append(url)
+    return deduped
 
 
 class DashboardApp:
@@ -375,7 +401,15 @@ class DashboardApp:
 """
 
 
-def serve_dashboard(repo_path: Path, host: str, port: int, db_path: Path | None = None) -> int:
+def serve_dashboard(
+    repo_path: Path,
+    host: str,
+    port: int,
+    db_path: Path | None = None,
+    *,
+    announce_url: str | None = None,
+    tailscale: bool = False,
+) -> int:
     app = DashboardApp(repo_path=repo_path, db_path=db_path)
 
     class DashboardHandler(BaseHTTPRequestHandler):
@@ -409,7 +443,11 @@ def serve_dashboard(repo_path: Path, host: str, port: int, db_path: Path | None 
             return
 
     server = ThreadingHTTPServer((host, port), DashboardHandler)
-    print(f"kctl dashboard listening on http://{host}:{port}", flush=True)
+    print(f"kctl dashboard listening on {host}:{port}", flush=True)
+    for url in build_dashboard_access_urls(host, port, announce_url=announce_url, tailscale=tailscale):
+        print(f"dashboard url: {url}", flush=True)
+    if tailscale and announce_url is None:
+        print("tailscale note: hostname URL requires MagicDNS or equivalent tailnet DNS.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

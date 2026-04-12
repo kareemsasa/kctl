@@ -158,6 +158,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=8421,
         help="Port to listen on.",
     )
+    ui_dashboard_parser.add_argument(
+        "--tailscale",
+        action="store_true",
+        help="Bind on all interfaces and print a Tailscale-friendly hostname URL hint.",
+    )
+    ui_dashboard_parser.add_argument(
+        "--announce-url",
+        help="Optional public URL to print alongside the local bind address.",
+    )
 
     init_parser = subparsers.add_parser("init", help="Materialize a YAML plan from a named template.")
     init_parser.add_argument("template_name", help="Template name from kctl-plan-templates.yaml.")
@@ -316,7 +325,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.ui_command == "workspaces":
                 return print_ui_workspaces(repo_path, db_path=db_path)
             if args.ui_command == "dashboard":
-                return serve_dashboard(repo_path, host=args.host, port=args.port, db_path=db_path)
+                host = "0.0.0.0" if args.tailscale and args.host == "127.0.0.1" else args.host
+                return serve_dashboard(
+                    repo_path,
+                    host=host,
+                    port=args.port,
+                    db_path=db_path,
+                    announce_url=args.announce_url,
+                    tailscale=args.tailscale,
+                )
         except PlanError as exc:
             print(style_status_text(f"Error: {exc}", "error", stream=sys.stderr, bold=True), file=sys.stderr)
             return 2

@@ -5,12 +5,33 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kctl_pkg.ui_dashboard import DashboardApp
+from kctl_pkg.ui_dashboard import DashboardApp, build_dashboard_access_urls
 from kctl_pkg.ui_index import default_db_path, index_repository_state
 from tests.test_ui_index import init_git_repo, write_sample_plan_run
 
 
 class UIDashboardTests(unittest.TestCase):
+    def test_build_dashboard_access_urls_prefers_announce_url(self) -> None:
+        urls = build_dashboard_access_urls(
+            "0.0.0.0",
+            8421,
+            announce_url="http://kctl-node.tailnet.ts.net:8421",
+            tailscale=True,
+            hostname="ignored-host",
+        )
+        self.assertEqual(
+            urls,
+            [
+                "http://kctl-node.tailnet.ts.net:8421",
+                "http://localhost:8421",
+                "http://ignored-host:8421",
+            ],
+        )
+
+    def test_build_dashboard_access_urls_adds_tailscale_hostname_hint(self) -> None:
+        urls = build_dashboard_access_urls("0.0.0.0", 8421, tailscale=True, hostname="kctl-node")
+        self.assertEqual(urls, ["http://localhost:8421", "http://kctl-node:8421"])
+
     def test_dashboard_renders_runs_plan_cards_steps_and_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
