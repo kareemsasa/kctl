@@ -11,10 +11,27 @@ STORAGE_MODE_CUSTOM_ROOT = "custom_root"
 STORAGE_MODES = {STORAGE_MODE_IN_REPO, STORAGE_MODE_EXTERNAL, STORAGE_MODE_CUSTOM_ROOT}
 
 
+def _storage_root_is_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return path.is_dir() and os.access(path, os.W_OK)
+
+
 def resolve_storage_mode() -> str:
     if os.environ.get("KCTL_ARTIFACT_ROOT", "").strip():
-        return STORAGE_MODE_CUSTOM_ROOT
+        if _storage_root_is_writable(artifact_root_for_mode(STORAGE_MODE_CUSTOM_ROOT)):
+            return STORAGE_MODE_CUSTOM_ROOT
     value = os.environ.get("KCTL_ARTIFACT_STORAGE", STORAGE_MODE_IN_REPO).strip().lower()
+    if value == STORAGE_MODE_EXTERNAL:
+        if _storage_root_is_writable(artifact_root_for_mode(STORAGE_MODE_EXTERNAL)):
+            return STORAGE_MODE_EXTERNAL
+        return STORAGE_MODE_IN_REPO
+    if value == STORAGE_MODE_CUSTOM_ROOT:
+        if _storage_root_is_writable(artifact_root_for_mode(STORAGE_MODE_CUSTOM_ROOT)):
+            return STORAGE_MODE_CUSTOM_ROOT
+        return STORAGE_MODE_IN_REPO
     if value in STORAGE_MODES:
         return value
     return STORAGE_MODE_IN_REPO
@@ -34,6 +51,15 @@ def artifact_root() -> Path:
     return kctl_home()
 
 
+def artifact_root_for_mode(storage_mode: str | None = None) -> Path:
+    storage_mode = storage_mode or resolve_storage_mode()
+    if storage_mode == STORAGE_MODE_CUSTOM_ROOT:
+        configured_root = os.environ.get("KCTL_ARTIFACT_ROOT")
+        if configured_root:
+            return Path(configured_root).expanduser().resolve()
+    return kctl_home()
+
+
 def repository_key(repo_root: Path) -> str:
     return hashlib.sha256(str(repo_root.resolve()).encode("utf-8")).hexdigest()[:16]
 
@@ -42,7 +68,7 @@ def single_runs_base(repo_root: Path, storage_mode: str | None = None) -> Path:
     storage_mode = storage_mode or resolve_storage_mode()
     repo_root = repo_root.resolve()
     if storage_mode in {STORAGE_MODE_EXTERNAL, STORAGE_MODE_CUSTOM_ROOT}:
-        return artifact_root() / "repos" / repository_key(repo_root) / "single-runs"
+        return artifact_root_for_mode(storage_mode) / "repos" / repository_key(repo_root) / "single-runs"
     return repo_root / ".kctl-runs"
 
 
@@ -54,7 +80,7 @@ def kctl_state_root(repo_root: Path, storage_mode: str | None = None) -> Path:
     storage_mode = storage_mode or resolve_storage_mode()
     repo_root = repo_root.resolve()
     if storage_mode in {STORAGE_MODE_EXTERNAL, STORAGE_MODE_CUSTOM_ROOT}:
-        return artifact_root() / "repos" / repository_key(repo_root)
+        return artifact_root_for_mode(storage_mode) / "repos" / repository_key(repo_root)
     return repo_root / ".kctl"
 
 

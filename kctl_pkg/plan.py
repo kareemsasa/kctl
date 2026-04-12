@@ -5,8 +5,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from .paths import project_root
 from .terminal import style_text
 from .types import PlanError
@@ -16,6 +14,17 @@ STRUCTURED_OUTPUT_SCHEMAS = {"inspect_v1", "plan_v1", "review_v1"}
 REVIEW_POLICIES = {"advisory", "blocking", "manual"}
 STEP_MODES = {"default", "read-only"}
 VERIFY_MODES = {"legacy", "full"}
+
+
+def _yaml_module() -> Any:
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:
+        raise PlanError(
+            "PyYAML is required for YAML plan operations. Install dependencies with "
+            "`python3 -m pip install -e .[dev]` or `python3 -m pip install -r requirements.txt`."
+        ) from exc
+    return yaml
 
 
 def resolve_plan_path(plan_value: str) -> Path:
@@ -44,6 +53,7 @@ def resolve_plan_path(plan_value: str) -> Path:
 def load_plan(plan_path: Path) -> dict[str, Any]:
     if not plan_path.exists():
         raise PlanError(f"Plan file does not exist: {plan_path}")
+    yaml = _yaml_module()
     try:
         data = yaml.safe_load(plan_path.read_text())
     except yaml.YAMLError as exc:
@@ -57,6 +67,7 @@ def load_plan_templates(script_root: Path) -> dict[str, Any]:
     templates_path = script_root / "kctl-plan-templates.yaml"
     if not templates_path.exists():
         raise PlanError(f"Templates file does not exist: {templates_path}")
+    yaml = _yaml_module()
     try:
         data = yaml.safe_load(templates_path.read_text())
     except yaml.YAMLError as exc:
@@ -397,6 +408,7 @@ def init_plan(
 ) -> int:
     if output_path.exists() and not force:
         raise PlanError(f"Output file already exists: {output_path}. Use --force to overwrite.")
+    yaml = _yaml_module()
     templates = load_plan_templates(project_root())
     plan = build_plan_from_template(
         templates=templates,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,14 @@ def sanitize_slug(value: str) -> str:
 
 
 def default_db_path(repo_root: Path) -> Path:
-    return ui_state_db_path(repo_root)
+    preferred_path = ui_state_db_path(repo_root)
+    try:
+        preferred_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return repo_root.resolve() / ".kctl" / "ui-state.db"
+    if preferred_path.parent.exists() and not os.access(preferred_path.parent, os.W_OK):
+        return repo_root.resolve() / ".kctl" / "ui-state.db"
+    return preferred_path
 
 
 def read_json(path: Path) -> dict[str, Any]:
