@@ -88,6 +88,8 @@ python3 kctl.py ui service install /path/to/repo --announce-url http://kctl-node
 
 When `KCTL_ARTIFACT_STORAGE=external` is set, `kctl` stores run metadata outside the target repository. `KCTL_HOME` controls the external root and defaults to `~/.kctl`. When `KCTL_ARTIFACT_ROOT` is set and writable, `kctl` resolves storage as `custom_root` and uses the same external artifact layout under that configured root. If the configured external root cannot be created or written, `kctl` falls back to repo-local storage instead of failing path resolution up front.
 
+Before `kctl` launches a run, it performs a hard preflight. That check verifies the repo and plans paths, required binaries on `PATH`, writable run/workspace directories, and any env vars declared with `required_env` or `defaults.required_env`. Failed preflight checks stop the run before launch and persist a blocked run record when kctl can write state.
+
 Example from outside this repository:
 
 ```bash
@@ -103,6 +105,8 @@ Top-level fields:
 - `defaults.verify`: optional shell command to run after each step
 - `defaults.verify_shell`: optional shell prefix for verification commands, for example `zsh -lc`
 - `defaults.stop_on_failure`: whether to stop immediately when Codex or verification fails
+- `defaults.required_env`: optional list of env var names that must be present before launch
+- `required_env`: optional list of env var names that must be present before launch
 - `steps`: ordered list of step objects
 
 Step fields:

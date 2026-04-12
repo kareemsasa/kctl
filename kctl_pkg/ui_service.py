@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import sys
@@ -7,6 +8,11 @@ from pathlib import Path
 
 from .paths import project_root
 from .types import PlanError
+
+
+def _systemd_environment_line(name: str, value: str) -> str:
+    escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'Environment="{name}={escaped_value}"'
 
 
 def default_service_name() -> str:
@@ -48,6 +54,7 @@ def render_dashboard_service(
         command.extend(["--announce-url", announce_url])
     quoted_command = shlex.join(command)
     working_directory = project_root().resolve()
+    path_value = os.environ.get("PATH", "")
     return "\n".join(
         [
             "[Unit]",
@@ -58,6 +65,7 @@ def render_dashboard_service(
             "[Service]",
             "Type=simple",
             f"WorkingDirectory={working_directory}",
+            _systemd_environment_line("PATH", path_value),
             f"ExecStart={quoted_command}",
             "Restart=on-failure",
             "RestartSec=3",

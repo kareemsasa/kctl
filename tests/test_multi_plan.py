@@ -15,7 +15,7 @@ from kctl_pkg.artifacts import resolve_storage, single_run_dir
 from kctl_pkg.multi import discover_plan_files, run_many_plans
 from kctl_pkg.plan import normalize_plan
 from kctl_pkg.runner import execute_plan_run
-from kctl_pkg.types import CommandResult
+from kctl_pkg.types import CommandResult, PlanError
 
 
 def run_checked(command: list[str], cwd: Path) -> None:
@@ -161,6 +161,48 @@ class MultiPlanTests(unittest.TestCase):
             self.assertIn("Timestamp:", summary_text)
             self.assertIn("## Steps", summary_text)
             self.assertIn("- validate: success (verification: passed)", summary_text)
+
+    def test_execute_plan_run_blocks_before_launch_when_required_env_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_path = Path(tmpdir) / "blocked.yaml"
+            plan_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: blocked
+                    required_env:
+                      - TEST_REQUIRED_SECRET
+                    steps:
+                      - id: inspect
+                        prompt: Inspect
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            with patch.dict(os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True):
+                with patch("kctl_pkg.runner.run_streaming_command", side_effect=AssertionError("agent should not run")):
+                    with self.assertRaises(PlanError) as context:
+                        execute_plan_run(
+                            plan_path=plan_path,
+                            verbose=False,
+                            approve_each_step=False,
+                            branch=None,
+                            commit=False,
+                            commit_message=None,
+                            allow_dirty_start=False,
+                            review_enabled=False,
+                            interactive=False,
+                        )
+
+            self.assertIn("Preflight failed before launch", str(context.exception))
+            run_logs = sorted((repo_path / ".kctl-runs").glob("*/run.json"))
+            self.assertTrue(run_logs)
+            run_state = json.loads(run_logs[-1].read_text())
+            self.assertEqual(run_state["status"], "blocked")
+            self.assertEqual(run_state["preflight"]["issues"][0]["code"], "missing_env")
 
     def test_normalize_plan_records_explicit_and_inferred_step_types(self) -> None:
         plan = {
@@ -924,6 +966,43 @@ class MultiPlanTests(unittest.TestCase):
             stream_text = (run_logs[-1].parent / "stream.log").read_text()
             self.assertIn("Multi-plan run:", stream_text)
             self.assertIn("Plan summary:", stream_text)
+
+    def test_run_many_plans_blocks_before_launch_when_preflight_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            (plans_dir / "001-plan.yaml").write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: plan 0
+                    required_env:
+                      - TEST_REQUIRED_SECRET
+                    steps:
+                      - id: inspect
+                        prompt: Inspect 0
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            with patch.dict(os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True):
+                with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=AssertionError("workspace should not be created")), patch(
+                    "kctl_pkg.multi.execute_plan_run", side_effect=AssertionError("plan should not run")
+                ):
+                    with self.assertRaises(PlanError) as context:
+                        run_many_plans(plans_dir, concurrency=1, verbose=False)
+
+            self.assertIn("Preflight failed before launch", str(context.exception))
+            run_logs = sorted((repo_path / ".kctl" / "runs").glob("*/run.json"))
+            self.assertTrue(run_logs)
+            run_state = json.loads(run_logs[-1].read_text())
+            self.assertEqual(run_state["status"], "blocked")
+            self.assertEqual(run_state["plans"][0]["status"], "blocked")
+            self.assertEqual(run_state["plans"][0]["failure_reason"], "preflight_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

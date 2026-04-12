@@ -30,6 +30,7 @@ class UIServiceTests(unittest.TestCase):
             )
 
             self.assertIn("ExecStart=", unit_text)
+            self.assertIn("Environment=\"PATH=", unit_text)
             self.assertIn("ui dashboard", unit_text)
             self.assertIn("--tailscale", unit_text)
             self.assertIn("--announce-url", unit_text)

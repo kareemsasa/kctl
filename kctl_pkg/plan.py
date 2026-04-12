@@ -106,6 +106,19 @@ def validate_plan(plan: dict[str, Any]) -> None:
     stop_on_failure = defaults.get("stop_on_failure")
     if stop_on_failure is not None and not isinstance(stop_on_failure, bool):
         raise PlanError("defaults.stop_on_failure must be a boolean if provided.")
+    defaults_required_env = defaults.get("required_env")
+    if defaults_required_env is not None:
+        if not isinstance(defaults_required_env, list) or not all(
+            isinstance(item, str) and item.strip() for item in defaults_required_env
+        ):
+            raise PlanError("defaults.required_env must be a list of non-empty strings if provided.")
+
+    required_env = plan.get("required_env")
+    if required_env is not None:
+        if not isinstance(required_env, list) or not all(
+            isinstance(item, str) and item.strip() for item in required_env
+        ):
+            raise PlanError("Plan field 'required_env' must be a list of non-empty strings if provided.")
 
     steps = plan.get("steps")
     if not isinstance(steps, list) or not steps:

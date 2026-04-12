@@ -12,7 +12,8 @@ from typing import Any
 from .artifacts import discover_multi_run_logs, multi_run_dir, resolve_storage, worktree_run_root
 from .git import create_isolated_workspace, ensure_git_repo, get_repo_root, resolve_repo
 from .output import ConsoleOutputSink, FileOutputSink, OutputSink, TeeOutputSink
-from .plan import load_plan, validate_plan
+from .plan import load_plan, normalize_plan, validate_plan
+from .preflight import preflight_multi_run
 from .runner import execute_plan_run
 from .summary import write_multi_run_summary
 from .terminal import style_status_text, style_text
@@ -85,6 +86,34 @@ def load_plan_specs(plans_dir: Path, selected_filenames: set[str] | None = None)
     return plan_specs
 
 
+def load_normalized_multi_plans(
+    plans_dir: Path, selected_filenames: set[str] | None = None
+) -> tuple[list[PlanSpec], dict[str, dict[str, Any]]]:
+    plan_specs: list[PlanSpec] = []
+    normalized_plans: dict[str, dict[str, Any]] = {}
+    seen_plan_ids: set[str] = set()
+    for index, plan_path in enumerate(discover_plan_files(plans_dir, selected_filenames=selected_filenames), start=1):
+        plan = load_plan(plan_path)
+        validate_plan(plan)
+        normalized_plan = normalize_plan(plan)
+        target_repo = resolve_repo(plan_path, normalized_plan["repo"])
+        plan_id = sanitize_plan_id(plan_path.stem)
+        if plan_id in seen_plan_ids:
+            plan_id = f"{plan_id}-{index:02d}"
+        seen_plan_ids.add(plan_id)
+        normalized_plans[plan_id] = normalized_plan
+        plan_specs.append(
+            PlanSpec(
+                plan_id=plan_id,
+                plan_path=plan_path,
+                filename=plan_path.name,
+                repo_path=target_repo,
+                step_ids=[step["id"] for step in normalized_plan["steps"]],
+            )
+        )
+    return plan_specs, normalized_plans
+
+
 def build_multi_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
@@ -130,6 +159,51 @@ def print_run_summary(run_data: dict[str, Any], output_sink: OutputSink) -> None
         output_sink.write_line(style_status_text(format_status_line(plan_state), rendered_status))
 
 
+def write_blocked_run_state(
+    *,
+    plans_dir: Path,
+    run_root: Path,
+    run_id: str,
+    concurrency: int,
+    plan_specs: list[PlanSpec],
+    preflight_report: Any,
+) -> dict[str, Any]:
+    run_data: dict[str, Any] = {
+        "run_id": run_id,
+        "plans_dir": str(plans_dir.resolve()),
+        "repo": str(preflight_report.repo_root) if preflight_report.repo_root is not None else None,
+        "artifact_storage_mode": preflight_report.environment["storage_mode"],
+        "artifact_root_path": str(run_root.parent),
+        "stream_log_path": str(run_root / "stream.log"),
+        "status": "blocked",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "ended_at": datetime.now(timezone.utc).isoformat(),
+        "concurrency": concurrency,
+        "preflight": preflight_report.to_dict(),
+        "plans": [
+            {
+                "plan_id": spec.plan_id,
+                "filename": spec.filename,
+                "plan_path": str(spec.plan_path),
+                "status": "blocked",
+                "current_step": spec.step_ids[0] if spec.step_ids else None,
+                "step_statuses": {},
+                "worktree_path": str((preflight_report.worktree_root / spec.plan_id).resolve())
+                if preflight_report.worktree_root is not None
+                else None,
+                "branch_name": build_branch_name(run_id, spec.plan_id),
+                "run_output_dir": str((run_root / spec.plan_id).resolve()),
+                "log_path": None,
+                "verify_result": "not-run",
+                "failure_reason": "preflight_failed",
+            }
+            for spec in plan_specs
+        ],
+    }
+    write_run_state(run_root, run_data)
+    return run_data
+
+
 def run_many_plans(
     plans_dir: Path,
     concurrency: int,
@@ -140,9 +214,33 @@ def run_many_plans(
     if concurrency < 1:
         raise PlanError("--concurrency must be at least 1.")
     selected_filenames = {name.strip() for name in (selected_plan_names or []) if name.strip()}
-    plan_specs = load_plan_specs(plans_dir, selected_filenames=selected_filenames or None)
-    repo_root = plan_specs[0].repo_path
     run_id = run_id_override or build_multi_run_id()
+    plan_specs, normalized_plans = load_normalized_multi_plans(
+        plans_dir, selected_filenames=selected_filenames or None
+    )
+    preflight_report = preflight_multi_run(
+        plans_dir=plans_dir,
+        run_id=run_id,
+        plan_specs=plan_specs,
+        normalized_plans=normalized_plans,
+    )
+    if not preflight_report.ok:
+        if preflight_report.run_root is not None:
+            try:
+                preflight_report.run_root.mkdir(parents=True, exist_ok=True)
+                write_blocked_run_state(
+                    plans_dir=plans_dir,
+                    run_root=preflight_report.run_root,
+                    run_id=run_id,
+                    concurrency=concurrency,
+                    plan_specs=plan_specs,
+                    preflight_report=preflight_report,
+                )
+            except OSError:
+                pass
+        raise PlanError("Preflight failed before launch:\n" + "\n".join(preflight_report.format_blockers()))
+    repo_root = preflight_report.repo_root
+    assert repo_root is not None
     storage = resolve_storage()
     artifact_storage_mode = storage.mode
     run_root = multi_run_dir(repo_root, run_id, storage_mode=artifact_storage_mode)
@@ -159,6 +257,7 @@ def run_many_plans(
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "concurrency": concurrency,
+        "preflight": preflight_report.to_dict(),
         "plans": [
             {
                 "plan_id": spec.plan_id,
@@ -172,6 +271,7 @@ def run_many_plans(
                 "run_output_dir": str(run_root / spec.plan_id),
                 "log_path": None,
                 "verify_result": "not-run",
+                "failure_reason": None,
             }
             for spec in plan_specs
         ],
@@ -249,6 +349,7 @@ def run_many_plans(
             current_step=run_data_result["steps"][-1]["id"] if run_data_result["steps"] else None,
             log_path=run_data_result["log_path"],
             verify_result=verify_result,
+            failure_reason=None if mapped_status == "passed" else "run_stopped" if mapped_status == "blocked" else "run_failed",
         )
         return spec.plan_id, 0 if mapped_status == "passed" else 1
 
@@ -260,7 +361,7 @@ def run_many_plans(
             try:
                 _, exit_code = future.result()
             except Exception as exc:
-                update_plan_state(plan_id, status="failed")
+                update_plan_state(plan_id, status="failed", failure_reason="plan_exception")
                 failures += 1
                 output_sink.write_line(style_status_text(f"[{plan_id}] failed: {exc}", "failure"))
                 continue
