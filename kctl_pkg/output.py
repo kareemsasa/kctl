@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from pathlib import Path
 
 
 class OutputSink:
@@ -67,3 +68,27 @@ class BufferedOutputSink(OutputSink):
 class NullOutputSink(OutputSink):
     def write(self, text: str, *, stream: str = "stdout") -> None:
         return
+
+
+class FileOutputSink(OutputSink):
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def write(self, text: str, *, stream: str = "stdout") -> None:
+        if not text:
+            return
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+
+
+class TeeOutputSink(OutputSink):
+    def __init__(self, *sinks: OutputSink) -> None:
+        self.sinks = sinks
+
+    def write(self, text: str, *, stream: str = "stdout") -> None:
+        for sink in self.sinks:
+            sink.write(text, stream=stream)

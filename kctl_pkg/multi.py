@@ -11,7 +11,7 @@ from typing import Any
 
 from .artifacts import discover_multi_run_logs, multi_run_dir, resolve_storage, worktree_run_root
 from .git import create_isolated_workspace, ensure_git_repo, get_repo_root, resolve_repo
-from .output import ConsoleOutputSink, OutputSink
+from .output import ConsoleOutputSink, FileOutputSink, OutputSink, TeeOutputSink
 from .plan import load_plan, validate_plan
 from .runner import execute_plan_run
 from .summary import write_multi_run_summary
@@ -36,24 +36,31 @@ def sanitize_plan_id(value: str) -> str:
     return normalized or "plan"
 
 
-def discover_plan_files(plans_dir: Path) -> list[Path]:
+def discover_plan_files(plans_dir: Path, selected_filenames: set[str] | None = None) -> list[Path]:
     if not plans_dir.exists():
         raise PlanError(f"Plans directory does not exist: {plans_dir}")
     if not plans_dir.is_dir():
         raise PlanError(f"Plans directory is not a directory: {plans_dir}")
-    plan_paths = sorted(
+    discovered_paths = sorted(
         {path.resolve() for pattern in PLAN_FILE_PATTERNS for path in plans_dir.glob(pattern)}
     )
+    if selected_filenames:
+        plan_paths = [path for path in discovered_paths if path.name in selected_filenames]
+        missing = sorted(selected_filenames - {path.name for path in plan_paths})
+        if missing:
+            raise PlanError(f"Selected plan files were not found under {plans_dir}: {', '.join(missing)}")
+    else:
+        plan_paths = discovered_paths
     if not plan_paths:
         raise PlanError(f"No plan files found under: {plans_dir}")
     return plan_paths
 
 
-def load_plan_specs(plans_dir: Path) -> list[PlanSpec]:
+def load_plan_specs(plans_dir: Path, selected_filenames: set[str] | None = None) -> list[PlanSpec]:
     plan_specs: list[PlanSpec] = []
     repo_roots: set[Path] = set()
     seen_plan_ids: set[str] = set()
-    for index, plan_path in enumerate(discover_plan_files(plans_dir), start=1):
+    for index, plan_path in enumerate(discover_plan_files(plans_dir, selected_filenames=selected_filenames), start=1):
         plan = load_plan(plan_path)
         validate_plan(plan)
         target_repo = resolve_repo(plan_path, plan["repo"])
@@ -94,6 +101,18 @@ def write_run_state(run_root: Path, run_data: dict[str, Any]) -> Path:
     return run_path
 
 
+def resolve_multi_run_log(repo_root: Path, run_id: str) -> Path:
+    candidate_paths = [
+        multi_run_dir(repo_root, run_id, storage_mode="in_repo") / "run.json",
+        multi_run_dir(repo_root, run_id, storage_mode="custom_root") / "run.json",
+        multi_run_dir(repo_root, run_id, storage_mode="external") / "run.json",
+    ]
+    for candidate in candidate_paths:
+        if candidate.exists():
+            return candidate.resolve()
+    raise PlanError(f"Could not resolve multi-run log for: {run_id}")
+
+
 def format_status_line(plan_state: dict[str, Any]) -> str:
     verify_result = plan_state.get("verify_result") or "not-run"
     return (
@@ -115,23 +134,28 @@ def run_many_plans(
     plans_dir: Path,
     concurrency: int,
     verbose: bool = False,
+    selected_plan_names: list[str] | None = None,
+    run_id_override: str | None = None,
 ) -> int:
     if concurrency < 1:
         raise PlanError("--concurrency must be at least 1.")
-    plan_specs = load_plan_specs(plans_dir)
+    selected_filenames = {name.strip() for name in (selected_plan_names or []) if name.strip()}
+    plan_specs = load_plan_specs(plans_dir, selected_filenames=selected_filenames or None)
     repo_root = plan_specs[0].repo_path
-    run_id = build_multi_run_id()
+    run_id = run_id_override or build_multi_run_id()
     storage = resolve_storage()
     artifact_storage_mode = storage.mode
     run_root = multi_run_dir(repo_root, run_id, storage_mode=artifact_storage_mode)
     worktree_root = worktree_run_root(repo_root, run_id, storage_mode=artifact_storage_mode)
-    output_sink = ConsoleOutputSink()
+    stream_log_path = run_root / "stream.log"
+    output_sink = TeeOutputSink(ConsoleOutputSink(), FileOutputSink(stream_log_path))
     run_data: dict[str, Any] = {
         "run_id": run_id,
         "plans_dir": str(plans_dir.resolve()),
         "repo": str(repo_root),
         "artifact_storage_mode": artifact_storage_mode,
         "artifact_root_path": str(run_root.parent),
+        "stream_log_path": str(stream_log_path),
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "concurrency": concurrency,
@@ -163,7 +187,10 @@ def run_many_plans(
             write_run_state(run_root, run_data)
 
     def run_one_plan(spec: PlanSpec) -> tuple[str, int]:
-        plan_output_sink = ConsoleOutputSink(prefix=f"[{spec.plan_id}] ")
+        plan_output_sink = TeeOutputSink(
+            ConsoleOutputSink(prefix=f"[{spec.plan_id}] "),
+            FileOutputSink(stream_log_path),
+        )
         branch_name = build_branch_name(run_id, spec.plan_id)
         worktree_path = worktree_root / spec.plan_id
         update_plan_state(
@@ -264,16 +291,10 @@ def resolve_status_run_path(target: str) -> Path:
         if not matching_logs:
             raise PlanError(f"No saved multi-plan runs found for: {target_path.resolve()}")
         return matching_logs[-1]
-    cwd_run_log = multi_run_dir(Path.cwd(), target, storage_mode="in_repo") / "run.json"
-    if cwd_run_log.exists():
-        return cwd_run_log.resolve()
-    custom_run_log = multi_run_dir(Path.cwd(), target, storage_mode="custom_root") / "run.json"
-    if custom_run_log.exists():
-        return custom_run_log.resolve()
-    external_run_log = multi_run_dir(Path.cwd(), target, storage_mode="external") / "run.json"
-    if external_run_log.exists():
-        return external_run_log.resolve()
-    raise PlanError(f"Could not resolve run status target: {target}")
+    try:
+        return resolve_multi_run_log(Path.cwd(), target)
+    except PlanError as exc:
+        raise PlanError(f"Could not resolve run status target: {target}") from exc
 
 
 def print_run_status(target: str) -> int:

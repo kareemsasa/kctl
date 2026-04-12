@@ -67,6 +67,16 @@ class MultiPlanTests(unittest.TestCase):
             discovered = discover_plan_files(plans_dir)
             self.assertEqual([path.name for path in discovered], ["a-first.yml", "b-second.yaml"])
 
+    def test_discover_plan_files_can_filter_selected_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plans_dir = Path(tmpdir)
+            (plans_dir / "a-first.yml").write_text("repo: /tmp\nobjective: x\nsteps:\n  - id: inspect\n    prompt: x\n")
+            (plans_dir / "b-second.yaml").write_text("repo: /tmp\nobjective: x\nsteps:\n  - id: inspect\n    prompt: x\n")
+
+            discovered = discover_plan_files(plans_dir, selected_filenames={"b-second.yaml"})
+
+            self.assertEqual([path.name for path in discovered], ["b-second.yaml"])
+
     def test_execute_plan_run_verify_step_is_handled_by_kctl(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -911,7 +921,9 @@ class MultiPlanTests(unittest.TestCase):
             summary_text = (run_logs[-1].parent / "summary.md").read_text()
             self.assertIn("## Plans", summary_text)
             self.assertIn("- 001-plan: passed (verification: not-run)", summary_text)
-
+            stream_text = (run_logs[-1].parent / "stream.log").read_text()
+            self.assertIn("Multi-plan run:", stream_text)
+            self.assertIn("Plan summary:", stream_text)
 
 if __name__ == "__main__":
     unittest.main()

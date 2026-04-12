@@ -7,12 +7,37 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kctl_pkg.ui_dashboard import DashboardApp, build_dashboard_access_urls
+from kctl_pkg.ui_dashboard import DashboardApp, build_dashboard_access_urls, check_repo_path, list_plans_in_directory
 from kctl_pkg.ui_index import default_db_path, index_repository_state
 from tests.test_ui_index import init_git_repo, write_sample_plan_run
 
 
 class UIDashboardTests(unittest.TestCase):
+    def test_check_repo_path_reports_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            repo_path.mkdir()
+            file_path = Path(tmpdir) / "file.txt"
+            file_path.write_text("x")
+
+            self.assertEqual(check_repo_path("")[0], "empty")
+            self.assertEqual(check_repo_path(str(repo_path))[0], "ok")
+            self.assertEqual(check_repo_path(str(file_path))[0], "not_dir")
+            self.assertEqual(check_repo_path(str(Path(tmpdir) / "missing"))[0], "missing")
+
+    def test_list_plans_in_directory_reports_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            (plans_dir / "001-first.yaml").write_text("repo: /tmp\nobjective: x\nsteps:\n  - id: implement\n    prompt: x\n")
+            (plans_dir / "002-second.yml").write_text("repo: /tmp\nobjective: x\nsteps:\n  - id: implement\n    prompt: x\n")
+
+            status, message, plans = list_plans_in_directory(str(plans_dir))
+
+            self.assertEqual(status, "ok")
+            self.assertIn("Found 2 plan file(s)", message)
+            self.assertEqual(plans, ["001-first.yaml", "002-second.yml"])
+
     def test_build_dashboard_access_urls_prefers_announce_url(self) -> None:
         urls = build_dashboard_access_urls(
             "0.0.0.0",
@@ -49,6 +74,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Actions", html)
             self.assertIn("Attention Queue", html)
             self.assertIn("Workspaces", html)
+            self.assertIn("Plans", html)
             self.assertIn("Runs", html)
             self.assertIn("Run Detail", html)
             self.assertIn("Plan Executions", html)
@@ -66,7 +92,17 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("template_name", html)
             self.assertIn('name="viewport"', html)
             self.assertIn("table-scroll", html)
+            self.assertIn("page-header", html)
             self.assertIn("@media (max-width: 900px)", html)
+            self.assertIn(".kctl/plans", html)
+            self.assertIn("Plans Dir Override", html)
+            self.assertIn("Target Repo", html)
+            self.assertIn("target_repo_run_many_status", html)
+            self.assertIn("/api/check-repo", html)
+            self.assertIn("plans_dir_preview", html)
+            self.assertIn("/api/list-plans", html)
+            self.assertIn("selected_plans", html)
+            self.assertIn("Plan File Detail", html)
 
     def test_dashboard_attention_queue_surfaces_blocked_and_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -204,13 +240,19 @@ class UIDashboardTests(unittest.TestCase):
     def test_start_run_many_runs_and_reindexes_in_background(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
-            plans_dir = Path(tmpdir) / "plans"
-            plans_dir.mkdir()
+            target_repo = Path(tmpdir) / "target-repo"
+            target_repo.mkdir()
             init_git_repo(repo_path)
             calls: list[tuple[str, object]] = []
 
-            def fake_run_many(plans_dir_arg: Path, concurrency: int, verbose: bool) -> int:
-                calls.append(("run_many", plans_dir_arg.resolve(), concurrency, verbose))
+            def fake_run_many(
+                plans_dir_arg: Path,
+                concurrency: int,
+                verbose: bool,
+                selected_plan_names: list[str] | None = None,
+                run_id_override: str | None = None,
+            ) -> int:
+                calls.append(("run_many", plans_dir_arg.resolve(), concurrency, verbose, selected_plan_names, run_id_override))
                 return 0
 
             def fake_index(repo_path_arg: Path, db_path: Path | None = None) -> dict[str, int]:
@@ -228,35 +270,105 @@ class UIDashboardTests(unittest.TestCase):
                             target()
                     return ImmediateThread()
                 thread_cls.side_effect = run_immediately
-                app.start_run_many(plans_dir, concurrency=2)
+                run_id = app.start_run_many(app.plans_dir_for_repo(target_repo), concurrency=2, selected_plan_names=["001-one.yaml"])
 
             self.assertEqual(
                 calls,
                 [
-                    ("run_many", plans_dir.resolve(), 2, False),
+                    ("run_many", app.plans_dir_for_repo(target_repo).resolve(), 2, False, ["001-one.yaml"], run_id),
                     ("index", repo_path.resolve(), None),
                 ],
             )
+            self.assertTrue(run_id)
+
+    def test_dashboard_renders_live_output_for_running_unindexed_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            index_repository_state(repo_path)
+
+            run_id = "20260412T045948708353Z"
+            run_root = repo_path / ".kctl" / "runs" / run_id
+            plan_root = run_root / "001-review"
+            plan_root.mkdir(parents=True, exist_ok=True)
+            (run_root / "stream.log").write_text("[001-review] starting plan\n[001-review] running inspect\n")
+            (run_root / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "plans_dir": str((repo_path / ".kctl" / "plans").resolve()),
+                        "repo": str(repo_path.resolve()),
+                        "artifact_storage_mode": "in_repo",
+                        "artifact_root_path": str((repo_path / ".kctl" / "runs").resolve()),
+                        "stream_log_path": str((run_root / "stream.log").resolve()),
+                        "status": "running",
+                        "started_at": "2026-04-12T04:59:48.708897+00:00",
+                        "concurrency": 1,
+                        "plans": [
+                            {
+                                "plan_id": "001-review",
+                                "filename": "001-review.yaml",
+                                "plan_path": str((repo_path / ".kctl" / "plans" / "001-review.yaml").resolve()),
+                                "status": "running",
+                                "current_step": "inspect",
+                                "step_statuses": {"inspect": "running"},
+                                "worktree_path": str((repo_path / ".kctl" / "worktrees" / run_id / "001-review").resolve()),
+                                "branch_name": f"kctl/{run_id}/001-review",
+                                "run_output_dir": str(plan_root.resolve()),
+                                "log_path": None,
+                                "verify_result": "not-run",
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            app = DashboardApp(repo_path)
+            html = app.render_page(run_id=run_id)
+
+            self.assertIn("Live Output", html)
+            self.assertIn("live_output_stream", html)
+            self.assertIn("[001-review] starting plan", html)
+            self.assertIn("/api/run-output", html)
 
     def test_create_plan_writes_template_based_plan_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
+            target_repo = Path(tmpdir) / "target-repo"
             init_git_repo(repo_path)
+            init_git_repo(target_repo)
             app = DashboardApp(repo_path)
-            output_path = Path(tmpdir) / "plans" / "001-sample.yaml"
-
             created_path = app.create_plan(
+                target_repo=target_repo,
                 template_name="single_step",
-                output_path=output_path,
+                output_name="001-sample.yaml",
                 objective="Add a small UI improvement",
                 force=False,
             )
 
-            self.assertEqual(created_path, output_path)
-            contents = output_path.read_text()
+            expected_path = app.plans_dir_for_repo(target_repo) / "001-sample.yaml"
+            self.assertEqual(created_path, expected_path)
+            contents = expected_path.read_text()
             self.assertIn("objective: Add a small UI improvement", contents)
-            self.assertIn(f"repo: {repo_path}", contents)
+            self.assertIn(f"repo: {target_repo}", contents)
             self.assertIn("id: implement", contents)
+
+    def test_dashboard_renders_plan_file_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_dir = repo_path / ".kctl" / "plans"
+            plan_dir.mkdir(parents=True, exist_ok=True)
+            plan_path = plan_dir / "001-sample.yaml"
+            plan_path.write_text("repo: /tmp\nobjective: review\nsteps:\n  - id: inspect\n    prompt: look\n")
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            html = app.render_page(selected_plan_file=str(plan_path))
+
+            self.assertIn("001-sample.yaml", html)
+            self.assertIn("objective: review", html)
 
 
 if __name__ == "__main__":
