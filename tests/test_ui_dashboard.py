@@ -153,7 +153,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("001-add-ui", html)
             self.assertIn("verify", html)
             self.assertIn(".kctl/worktrees/", html)
-            self.assertIn("lifecycle=released", html)
+            self.assertIn("lifecycle-released", html)
             self.assertIn('name="viewport"', html)
             self.assertIn("table-scroll", html)
             self.assertIn("page-header", html)
@@ -307,8 +307,8 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Stale — Investigate", html)
             self.assertIn("review_blocked", html)
             self.assertIn("running-plan", html)
-            self.assertIn("lifecycle=stale", html)
-            self.assertIn("lifecycle=active", html)
+            self.assertIn("lifecycle-stale", html)
+            self.assertIn("lifecycle-active", html)
 
     def test_dashboard_renders_action_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -593,7 +593,8 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Rerun", html)
             self.assertNotIn("Fix Config", html)
             self.assertIn("Blocked by agent quota", html)
-            self.assertIn("Retry after: 3pm (America/Chicago)", html)
+            self.assertIn("Retry after", html)
+            self.assertIn("3pm (America/Chicago)", html)
 
     def test_attention_queue_shows_fix_config_label_for_preflight_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -676,6 +677,387 @@ class UIDashboardTests(unittest.TestCase):
 
             self.assertIn("001-sample.yaml", html)
             self.assertIn("objective: review", html)
+
+
+class AgentSessionTests(unittest.TestCase):
+    # ------------------------------------------------------------------
+    # Storage helpers
+    # ------------------------------------------------------------------
+
+    def test_list_sessions_returns_empty_when_no_sessions_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            self.assertEqual(app.list_sessions(), [])
+
+    def test_list_sessions_returns_sessions_sorted_newest_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            for session_id, started_at in [
+                ("20260101-000001-aabbccdd", "2026-01-01T00:00:01+00:00"),
+                ("20260101-000002-aabbccdd", "2026-01-01T00:00:02+00:00"),
+            ]:
+                meta: dict[str, object] = {
+                    "id": session_id,
+                    "project_path": tmpdir,
+                    "prompt": "do a thing",
+                    "provider": "codex",
+                    "status": "completed",
+                    "started_at": started_at,
+                }
+                app._write_session_meta(meta)
+
+            sessions = app.list_sessions()
+            self.assertEqual(len(sessions), 2)
+            self.assertEqual(sessions[0]["id"], "20260101-000002-aabbccdd")
+            self.assertEqual(sessions[1]["id"], "20260101-000001-aabbccdd")
+
+    def test_read_session_output_returns_empty_for_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            self.assertEqual(app.read_session_output("nonexistent-id"), "")
+
+    def test_read_session_output_returns_log_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "20260101-000001-aabbccdd"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("agent output line\n")
+            self.assertEqual(app.read_session_output(session_id), "agent output line\n")
+
+    def test_get_session_returns_none_for_missing_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            self.assertIsNone(app.get_session("nonexistent"))
+
+    def test_get_session_returns_meta_for_existing_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            meta: dict[str, object] = {
+                "id": "20260101-000001-aabbccdd",
+                "project_path": tmpdir,
+                "prompt": "do a thing",
+                "provider": "claude",
+                "status": "running",
+                "started_at": "2026-01-01T00:00:01+00:00",
+            }
+            app._write_session_meta(meta)
+            result = app.get_session("20260101-000001-aabbccdd")
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result["prompt"], "do a thing")
+
+    # ------------------------------------------------------------------
+    # start_agent_session
+    # ------------------------------------------------------------------
+
+    def test_start_agent_session_rejects_missing_project(self) -> None:
+        from kctl_pkg.types import PlanError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            with self.assertRaises(PlanError):
+                app.start_agent_session(
+                    project_path=str(Path(tmpdir) / "no-such-dir"),
+                    prompt="hello",
+                    provider="codex",
+                )
+
+    def test_start_agent_session_writes_meta_and_returns_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "project"
+            project.mkdir()
+            app = DashboardApp(Path(tmpdir) / "repo")
+            launched: list[tuple[list[str], str]] = []
+
+            def fake_run(meta: dict, command: list[str], output_path: object) -> None:
+                launched.append((command, str(meta["project_path"])))
+
+            with patch.object(app, "_run_session_subprocess", side_effect=fake_run):
+                session_id = app.start_agent_session(
+                    project_path=str(project),
+                    prompt="write a test",
+                    provider="codex",
+                )
+
+            self.assertTrue(session_id)
+            meta = app.get_session(session_id)
+            self.assertIsNotNone(meta)
+            assert meta is not None
+            self.assertEqual(meta["status"], "running")
+            self.assertEqual(meta["prompt"], "write a test")
+            self.assertEqual(meta["provider"], "codex")
+            self.assertEqual(len(launched), 1)
+            self.assertIn("codex", launched[0][0])
+
+    def test_start_agent_session_builds_claude_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "project"
+            project.mkdir()
+            app = DashboardApp(Path(tmpdir) / "repo")
+            launched: list[list[str]] = []
+
+            def fake_run(meta: dict, command: list[str], output_path: object) -> None:
+                launched.append(command)
+
+            with patch.object(app, "_run_session_subprocess", side_effect=fake_run):
+                app.start_agent_session(
+                    project_path=str(project),
+                    prompt="add logging",
+                    provider="claude",
+                )
+
+            self.assertEqual(len(launched), 1)
+            cmd = launched[0]
+            self.assertIn("claude", cmd)
+            self.assertIn("--dangerously-skip-permissions", cmd)
+            self.assertIn("-p", cmd)
+            self.assertIn("add logging", cmd)
+
+    # ------------------------------------------------------------------
+    # reply_to_session
+    # ------------------------------------------------------------------
+
+    def test_reply_to_session_raises_for_unknown_session(self) -> None:
+        from kctl_pkg.types import PlanError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            with self.assertRaises(PlanError, msg="Session not found"):
+                app.reply_to_session("nonexistent", "follow up")
+
+    def test_reply_to_session_raises_when_session_still_running(self) -> None:
+        from kctl_pkg.types import PlanError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            meta: dict[str, object] = {
+                "id": "sess-running",
+                "project_path": tmpdir,
+                "prompt": "first turn",
+                "provider": "codex",
+                "provider_session_id": "uuid-1",
+                "status": "running",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "messages": [{"role": "user", "content": "first turn", "timestamp": "2026-01-01T00:00:01+00:00"}],
+            }
+            app._write_session_meta(meta)
+            with self.assertRaises(PlanError):
+                app.reply_to_session("sess-running", "follow up")
+
+    def test_reply_to_session_appends_message_and_relaunches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-done"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("first turn output\n")
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": tmpdir,
+                "prompt": "first turn",
+                "provider": "claude",
+                "provider_session_id": "uuid-abc",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "ended_at": "2026-01-01T00:00:10+00:00",
+                "exit_code": 0,
+                "messages": [{"role": "user", "content": "first turn", "timestamp": "2026-01-01T00:00:01+00:00"}],
+            }
+            app._write_session_meta(meta)
+            launched: list[list[str]] = []
+
+            def fake_run(m: dict, command: list[str], output_path: object) -> None:
+                launched.append(command)
+
+            with patch.object(app, "_run_session_subprocess", side_effect=fake_run):
+                app.reply_to_session(session_id, "now do more")
+
+            fresh = app.get_session(session_id)
+            assert fresh is not None
+            self.assertEqual(fresh["status"], "running")
+            messages = list(fresh.get("messages") or [])
+            self.assertEqual(len(messages), 2)
+            self.assertEqual(messages[1]["content"], "now do more")
+            self.assertEqual(len(launched), 1)
+            cmd = launched[0]
+            self.assertIn("--resume", cmd)
+            self.assertIn("uuid-abc", cmd)
+
+    # ------------------------------------------------------------------
+    # stop_agent_session
+    # ------------------------------------------------------------------
+
+    def test_stop_agent_session_returns_false_for_unknown_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            self.assertFalse(app.stop_agent_session("nonexistent"))
+
+    def test_stop_agent_session_returns_false_when_not_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            meta: dict[str, object] = {
+                "id": "sess-done",
+                "project_path": tmpdir,
+                "prompt": "done",
+                "provider": "codex",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "pid": None,
+            }
+            app._write_session_meta(meta)
+            self.assertFalse(app.stop_agent_session("sess-done"))
+
+    def test_stop_agent_session_sends_sigterm_to_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            meta: dict[str, object] = {
+                "id": "sess-running",
+                "project_path": tmpdir,
+                "prompt": "running",
+                "provider": "codex",
+                "status": "running",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "pid": 99999,
+            }
+            app._write_session_meta(meta)
+            killed: list[tuple[int, int]] = []
+            import signal as _signal
+
+            with patch("kctl_pkg.ui_dashboard.os.kill", side_effect=lambda pid, sig: killed.append((pid, sig))):
+                result = app.stop_agent_session("sess-running")
+
+            self.assertTrue(result)
+            self.assertEqual(killed, [(99999, _signal.SIGTERM)])
+
+    # ------------------------------------------------------------------
+    # Page renderers
+    # ------------------------------------------------------------------
+
+    def test_render_sessions_page_with_no_tracked_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            html = app.render_sessions_page()
+            self.assertIn("Sessions", html)
+            self.assertIn("Add a project", html)
+            self.assertIn("No sessions yet", html)
+
+    def test_render_sessions_page_lists_existing_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "my-project"
+            init_git_repo(project)
+            app = DashboardApp(Path(tmpdir) / "repo")
+            app.add_tracked_project(project)
+            meta: dict[str, object] = {
+                "id": "20260101-000001-aabbccdd",
+                "project_path": str(project),
+                "project_name": "my-project",
+                "prompt": "fix the bug",
+                "provider": "claude",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:01+00:00",
+            }
+            app._write_session_meta(meta)
+            html = app.render_sessions_page()
+            self.assertIn("my-project", html)
+            self.assertIn("fix the bug", html)
+            self.assertIn("completed", html)
+            self.assertIn("claude", html)
+            self.assertIn("/sessions/detail?id=20260101-000001-aabbccdd", html)
+
+    def test_render_session_detail_page_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            html = app.render_session_detail_page("no-such-id")
+            self.assertIn("Session not found", html)
+
+    def test_render_session_detail_page_shows_meta_and_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "20260101-000001-aabbccdd"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("agent did a lot\n")
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": "/some/path",
+                "project_name": "my-project",
+                "prompt": "add tests",
+                "provider": "codex",
+                "provider_session_id": "uuid-xyz",
+                "status": "completed",
+                "exit_code": 0,
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "ended_at": "2026-01-01T00:05:00+00:00",
+                "pid": None,
+                "token_warning": None,
+                "messages": [
+                    {"role": "user", "content": "add tests", "timestamp": "2026-01-01T00:00:01+00:00"},
+                ],
+            }
+            app._write_session_meta(meta)
+            html = app.render_session_detail_page(session_id)
+            self.assertIn("my-project", html)
+            self.assertIn("add tests", html)
+            self.assertIn("codex", html)
+            self.assertIn("completed", html)
+            self.assertIn("agent did a lot", html)
+            self.assertIn("Exit code", html)
+            self.assertIn("reply", html.lower())
+
+    def test_render_session_detail_page_shows_stop_button_when_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-running"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("")
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": tmpdir,
+                "project_name": "proj",
+                "prompt": "go",
+                "provider": "claude",
+                "provider_session_id": "uuid-1",
+                "status": "running",
+                "exit_code": None,
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "ended_at": None,
+                "pid": 12345,
+                "token_warning": None,
+                "messages": [{"role": "user", "content": "go", "timestamp": "2026-01-01T00:00:01+00:00"}],
+            }
+            app._write_session_meta(meta)
+            html = app.render_session_detail_page(session_id)
+            self.assertIn("Stop Session", html)
+            self.assertIn("/actions/stop-session", html)
+
+    def test_render_session_detail_page_shows_token_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-quota"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("you have hit your limit\n")
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": tmpdir,
+                "project_name": "proj",
+                "prompt": "too much",
+                "provider": "claude",
+                "provider_session_id": "uuid-2",
+                "status": "failed",
+                "exit_code": 1,
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "ended_at": "2026-01-01T00:01:00+00:00",
+                "pid": None,
+                "token_warning": "you have hit your limit",
+                "messages": [],
+            }
+            app._write_session_meta(meta)
+            html = app.render_session_detail_page(session_id)
+            self.assertIn("Token/quota warning", html)
+            self.assertIn("hit your limit", html)
 
 
 if __name__ == "__main__":

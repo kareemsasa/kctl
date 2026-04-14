@@ -364,10 +364,7 @@ def normalize_step(step: dict[str, Any], defaults: dict[str, Any] | None = None)
 def resolve_provider_config(defaults: dict[str, Any]) -> tuple[str, str]:
     """Return (provider, permission_mode) with appropriate defaults applied."""
     provider = defaults.get("provider") or "codex"
-    if provider == "claude":
-        permission_mode = defaults.get("permission_mode") or "auto"
-    else:
-        permission_mode = defaults.get("permission_mode") or "auto"
+    permission_mode = defaults.get("permission_mode") or "auto"
     return provider, permission_mode
 
 
