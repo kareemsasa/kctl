@@ -436,6 +436,68 @@ class UIDashboardTests(unittest.TestCase):
             )
             self.assertTrue(run_id)
 
+    def test_handle_action_run_many_returns_redirect_and_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            target_repo = Path(tmpdir) / "target-repo"
+            init_git_repo(repo_path)
+            init_git_repo(target_repo)
+
+            app = DashboardApp(repo_path)
+            with patch.object(app, "start_run_many", return_value="run-123") as start_run_many_mock:
+                result = app.handle_action(
+                    "/actions/run-many",
+                    {
+                        "target_repo": [str(target_repo)],
+                        "concurrency": ["2"],
+                        "selected_plans": ["001-one.yaml"],
+                        "provider_override": ["claude"],
+                    },
+                )
+
+            self.assertEqual(result.redirect_to, "/")
+            self.assertEqual(result.run_id, "run-123")
+            self.assertIn("Started plan run for 001-one.yaml", result.message)
+            self.assertEqual(start_run_many_mock.call_args.kwargs["provider_override"], "claude")
+
+    def test_handle_action_start_session_uses_default_provider_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_path = Path(tmpdir) / "project"
+            init_git_repo(repo_path)
+            init_git_repo(project_path)
+
+            app = DashboardApp(repo_path)
+            with patch("kctl_pkg.ui_dashboard.available_providers", return_value=[("claude", "Claude")]), patch.object(
+                app,
+                "start_agent_session",
+                return_value="session-123",
+            ) as start_session_mock:
+                result = app.handle_action(
+                    "/actions/start-session",
+                    {
+                        "project_path": [str(project_path)],
+                        "prompt": ["inspect this repo"],
+                    },
+                )
+
+            self.assertEqual(result.redirect_to, "/sessions/detail?id=session-123")
+            self.assertEqual(result.message, "Session started.")
+            self.assertEqual(start_session_mock.call_args.kwargs["provider"], "claude")
+
+    def test_handle_action_rerun_plan_requires_existing_plan_file(self) -> None:
+        from kctl_pkg.types import PlanError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+
+            app = DashboardApp(repo_path)
+            with self.assertRaises(PlanError) as ctx:
+                app.handle_action("/actions/rerun-plan", {"plan_file_path": [str(Path(tmpdir) / "missing.yaml")]})
+
+            self.assertIn("Plan file not found", str(ctx.exception))
+
     def test_project_tracking_and_cross_project_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"

@@ -111,6 +111,13 @@ class DashboardState:
     workspace: WorkspaceDetail | None
 
 
+@dataclass(frozen=True)
+class DashboardActionResult:
+    redirect_to: str
+    message: str
+    run_id: str | None = None
+
+
 def summarize_preflight_for_dashboard(
     target_repo_value: str,
     plans_dir_value: str,
@@ -2439,6 +2446,244 @@ window.addEventListener('DOMContentLoaded', () => {{
             )
         raise PlanError(f"Unsupported route: {path}")
 
+    def handle_action(
+        self,
+        path: str,
+        form_data: dict[str, list[str]] | None = None,
+    ) -> DashboardActionResult:
+        form_data = form_data or {}
+        run_id: str | None = None
+        redirect_to = "/actions"
+
+        if path == "/actions/rerun-plan":
+            plan_file_path_value = form_data.get("plan_file_path", [""])[0].strip()
+            if not plan_file_path_value:
+                raise PlanError("Plan file path is required.")
+            plan_path = Path(plan_file_path_value)
+            if not plan_path.exists():
+                raise PlanError(f"Plan file not found: {plan_path}")
+            plans_dir = plan_path.parent
+            plan_file_name = plan_path.name
+            provider_override = form_data.get("provider_override", [""])[0].strip() or None
+            run_id = self.start_run_many(
+                plans_dir,
+                concurrency=1,
+                selected_plan_names=[plan_file_name],
+                provider_override=provider_override,
+            )
+            return DashboardActionResult(
+                redirect_to="/",
+                message=f"Rerun started for {plan_file_name}.",
+                run_id=run_id,
+            )
+
+        if path == "/actions/add-project":
+            project_path_value = form_data.get("project_path", [""])[0].strip()
+            if not project_path_value:
+                raise PlanError("Project path is required.")
+            self.add_tracked_project(Path(project_path_value).expanduser())
+            return DashboardActionResult(
+                redirect_to="/projects",
+                message=f"Tracked project: {Path(project_path_value).expanduser().resolve()}",
+            )
+
+        if path == "/actions/remove-project":
+            project_path_value = form_data.get("project_path", [""])[0].strip()
+            if not project_path_value:
+                raise PlanError("Project path is required.")
+            self.remove_tracked_project(project_path_value)
+            return DashboardActionResult(
+                redirect_to="/projects",
+                message=f"Removed tracked project: {Path(project_path_value).expanduser().resolve()}",
+            )
+
+        if path == "/actions/run-plan-across-projects":
+            selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
+            if len(selected_plan_names) != 1:
+                raise PlanError("Select exactly one plan to run across projects.")
+            project_paths = [
+                Path(path_value).expanduser().resolve()
+                for path_value in form_data.get("project_paths", [])
+                if path_value.strip()
+            ]
+            if not project_paths:
+                raise PlanError("Select at least one tracked project.")
+            target_repo_value = form_data.get("target_repo", [""])[0].strip()
+            if not target_repo_value:
+                raise PlanError("Target repo is required.")
+            target_repo = Path(target_repo_value).expanduser().resolve()
+            plans_dir_value = form_data.get("plans_dir", [""])[0].strip()
+            plans_dir = Path(plans_dir_value).expanduser() if plans_dir_value else self.plans_dir_for_repo(target_repo)
+            plan_path = plans_dir.resolve() / selected_plan_names[0]
+            if not plan_path.exists():
+                raise PlanError(f"Plan file not found: {plan_path}")
+            provider_override = form_data.get("provider_override", [""])[0].strip() or None
+            run_id = self.start_run_plan_across_projects(
+                plan_path=plan_path,
+                project_paths=project_paths,
+                provider_override=provider_override,
+            )
+            return DashboardActionResult(
+                redirect_to="/",
+                message=f"Started single-plan run for {selected_plan_names[0]} across {len(project_paths)} project(s).",
+                run_id=run_id,
+            )
+
+        if path == "/actions/index":
+            self.run_index_now()
+            return DashboardActionResult(redirect_to="/actions", message="Index refreshed.")
+
+        if path == "/actions/create-plan":
+            template_name = form_data.get("template_name", [""])[0].strip()
+            target_repo_value = form_data.get("target_repo", [""])[0].strip()
+            output_path_value = form_data.get("output_path", [""])[0].strip()
+            objective = form_data.get("objective", [""])[0].strip()
+            if not template_name:
+                raise PlanError("Template name is required.")
+            if not target_repo_value:
+                raise PlanError("Target repo is required.")
+            if not output_path_value:
+                raise PlanError("Plan file name is required.")
+            if not objective:
+                raise PlanError("Objective is required.")
+            created_path = self.create_plan(
+                target_repo=Path(target_repo_value).expanduser(),
+                template_name=template_name,
+                output_name=output_path_value,
+                objective=objective,
+                force=form_data.get("force", [""])[0] == "1",
+            )
+            return DashboardActionResult(
+                redirect_to="/actions",
+                message=f"Created plan at {created_path}.",
+            )
+
+        if path == "/actions/start-session":
+            project_path_value = form_data.get("project_path", [""])[0].strip()
+            if not project_path_value:
+                raise PlanError("Project is required.")
+            prompt_value = form_data.get("prompt", [""])[0].strip()
+            if not prompt_value:
+                raise PlanError("Prompt is required.")
+            provider_value = form_data.get("provider", [""])[0].strip()
+            if not provider_value:
+                providers = available_providers()
+                provider_value = providers[0][0] if providers else "codex"
+            session_id = self.start_agent_session(
+                project_path=project_path_value,
+                prompt=prompt_value,
+                provider=provider_value,
+            )
+            return DashboardActionResult(
+                redirect_to=f"/sessions/detail?id={session_id}",
+                message="Session started.",
+            )
+
+        if path == "/actions/stop-session":
+            session_id_value = form_data.get("session_id", [""])[0].strip()
+            if not session_id_value:
+                raise PlanError("Session ID is required.")
+            self.stop_agent_session(session_id_value)
+            return DashboardActionResult(
+                redirect_to=f"/sessions/detail?id={session_id_value}",
+                message="Session stop signal sent.",
+            )
+
+        if path == "/actions/session-reply":
+            session_id_value = form_data.get("session_id", [""])[0].strip()
+            if not session_id_value:
+                raise PlanError("Session ID is required.")
+            reply_value = form_data.get("reply", [""])[0].strip()
+            if not reply_value:
+                raise PlanError("Reply message is required.")
+            self.reply_to_session(session_id_value, reply_value)
+            return DashboardActionResult(
+                redirect_to=f"/sessions/detail?id={session_id_value}",
+                message="Reply sent.",
+            )
+
+        if path.startswith("/actions/project-git-"):
+            git_path = form_data.get("path", [""])[0].strip()
+            if not git_path:
+                raise PlanError("Project path is required.")
+            repo = Path(git_path).expanduser().resolve()
+            if path == "/actions/project-git-commit":
+                commit_msg = form_data.get("message", [""])[0].strip()
+                if not commit_msg:
+                    raise PlanError("Commit message is required.")
+                sha = stage_and_commit(repo, commit_msg)
+                message = f"Committed {sha}"
+            elif path == "/actions/project-git-switch":
+                branch_name = form_data.get("branch", [""])[0].strip()
+                if not branch_name:
+                    raise PlanError("Branch name is required.")
+                switch_branch(repo, branch_name)
+                message = f"Switched to {branch_name}"
+            elif path == "/actions/project-git-create-branch":
+                branch_name = form_data.get("branch", [""])[0].strip()
+                if not branch_name:
+                    raise PlanError("Branch name is required.")
+                create_branch(repo, branch_name)
+                message = f"Created and switched to {branch_name}"
+            elif path == "/actions/project-git-pull":
+                remote_name = form_data.get("remote", ["origin"])[0].strip()
+                output = git_pull(repo, remote=remote_name)
+                message = f"Pulled from {remote_name}"
+                if output:
+                    message += f": {output[:120]}"
+            elif path == "/actions/project-git-push":
+                remote_name = form_data.get("remote", ["origin"])[0].strip()
+                try:
+                    output = git_push(repo, remote=remote_name)
+                except PlanError:
+                    output = git_push(repo, remote=remote_name, set_upstream=True)
+                message = f"Pushed to {remote_name}"
+                if output:
+                    message += f": {output[:120]}"
+            elif path == "/actions/project-git-stash":
+                stash_msg = form_data.get("stash_message", [""])[0].strip() or None
+                git_stash_save(repo, message=stash_msg)
+                message = "Changes stashed"
+            elif path == "/actions/project-git-stash-pop":
+                git_stash_pop(repo)
+                message = "Stash popped"
+            elif path == "/actions/project-git-discard":
+                discard_all_changes(repo)
+                message = "All changes discarded"
+            else:
+                raise PlanError("Unknown git action.")
+            return DashboardActionResult(
+                redirect_to=_page_link("/projects/detail", path=git_path, message=message),
+                message=message,
+            )
+
+        if path == "/actions/run-many":
+            target_repo_value = form_data.get("target_repo", [""])[0].strip()
+            if not target_repo_value:
+                raise PlanError("Target repo is required.")
+            target_repo = Path(target_repo_value).expanduser().resolve()
+            plans_dir_value = form_data.get("plans_dir", [""])[0].strip()
+            plans_dir = Path(plans_dir_value).expanduser() if plans_dir_value else self.plans_dir_for_repo(target_repo)
+            concurrency_value = form_data.get("concurrency", ["1"])[0].strip() or "1"
+            concurrency = int(concurrency_value)
+            if concurrency < 1:
+                raise PlanError("Concurrency must be at least 1.")
+            selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
+            provider_override = form_data.get("provider_override", [""])[0].strip() or None
+            run_id = self.start_run_many(
+                plans_dir,
+                concurrency,
+                selected_plan_names=selected_plan_names or None,
+                provider_override=provider_override,
+            )
+            if len(selected_plan_names) == 1:
+                message = f"Started plan run for {selected_plan_names[0]} in {plans_dir}."
+            else:
+                message = f"Started run-many for {plans_dir}."
+            return DashboardActionResult(redirect_to="/", message=message, run_id=run_id)
+
+        raise PlanError(f"Unsupported action: {path}")
+
 
 def serve_dashboard(
     repo_path: Path,
@@ -2644,205 +2889,15 @@ def serve_dashboard(
                 return
             content_length = int(self.headers.get("Content-Length", "0"))
             form_data = parse_qs(self.rfile.read(content_length).decode("utf-8"))
-            run_id: str | None = None
-            redirect_to = "/actions"
             try:
-                if parsed.path == "/actions/rerun-plan":
-                    plan_file_path_value = form_data.get("plan_file_path", [""])[0].strip()
-                    if not plan_file_path_value:
-                        raise PlanError("Plan file path is required.")
-                    plan_path = Path(plan_file_path_value)
-                    if not plan_path.exists():
-                        raise PlanError(f"Plan file not found: {plan_path}")
-                    plans_dir = plan_path.parent
-                    plan_file_name = plan_path.name
-                    provider_override = form_data.get("provider_override", [""])[0].strip() or None
-                    run_id = app.start_run_many(plans_dir, concurrency=1, selected_plan_names=[plan_file_name], provider_override=provider_override)
-                    message = f"Rerun started for {plan_file_name}."
-                    redirect_to = "/"
-                elif parsed.path == "/actions/add-project":
-                    project_path_value = form_data.get("project_path", [""])[0].strip()
-                    if not project_path_value:
-                        raise PlanError("Project path is required.")
-                    app.add_tracked_project(Path(project_path_value).expanduser())
-                    message = f"Tracked project: {Path(project_path_value).expanduser().resolve()}"
-                    redirect_to = "/projects"
-                elif parsed.path == "/actions/remove-project":
-                    project_path_value = form_data.get("project_path", [""])[0].strip()
-                    if not project_path_value:
-                        raise PlanError("Project path is required.")
-                    app.remove_tracked_project(project_path_value)
-                    message = f"Removed tracked project: {Path(project_path_value).expanduser().resolve()}"
-                    redirect_to = "/projects"
-                elif parsed.path == "/actions/run-plan-across-projects":
-                    selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
-                    if len(selected_plan_names) != 1:
-                        raise PlanError("Select exactly one plan to run across projects.")
-                    project_paths = [
-                        Path(path_value).expanduser().resolve()
-                        for path_value in form_data.get("project_paths", [])
-                        if path_value.strip()
-                    ]
-                    if not project_paths:
-                        raise PlanError("Select at least one tracked project.")
-                    target_repo_value = form_data.get("target_repo", [""])[0].strip()
-                    if not target_repo_value:
-                        raise PlanError("Target repo is required.")
-                    target_repo = Path(target_repo_value).expanduser().resolve()
-                    plans_dir_value = form_data.get("plans_dir", [""])[0].strip()
-                    plans_dir = (
-                        Path(plans_dir_value).expanduser()
-                        if plans_dir_value
-                        else app.plans_dir_for_repo(target_repo)
-                    )
-                    plan_path = plans_dir.resolve() / selected_plan_names[0]
-                    if not plan_path.exists():
-                        raise PlanError(f"Plan file not found: {plan_path}")
-                    provider_override = form_data.get("provider_override", [""])[0].strip() or None
-                    run_id = app.start_run_plan_across_projects(
-                        plan_path=plan_path,
-                        project_paths=project_paths,
-                        provider_override=provider_override,
-                    )
-                    message = (
-                        f"Started single-plan run for {selected_plan_names[0]} "
-                        f"across {len(project_paths)} project(s)."
-                    )
-                    redirect_to = "/"
-                elif parsed.path == "/actions/index":
-                    app.run_index_now()
-                    message = "Index refreshed."
-                    redirect_to = "/actions"
-                elif parsed.path == "/actions/create-plan":
-                    template_name = form_data.get("template_name", [""])[0].strip()
-                    target_repo_value = form_data.get("target_repo", [""])[0].strip()
-                    output_path_value = form_data.get("output_path", [""])[0].strip()
-                    objective = form_data.get("objective", [""])[0].strip()
-                    if not template_name:
-                        raise PlanError("Template name is required.")
-                    if not target_repo_value:
-                        raise PlanError("Target repo is required.")
-                    if not output_path_value:
-                        raise PlanError("Plan file name is required.")
-                    if not objective:
-                        raise PlanError("Objective is required.")
-                    created_path = app.create_plan(
-                        target_repo=Path(target_repo_value).expanduser(),
-                        template_name=template_name,
-                        output_name=output_path_value,
-                        objective=objective,
-                        force=form_data.get("force", [""])[0] == "1",
-                    )
-                    message = f"Created plan at {created_path}."
-                    redirect_to = "/actions"
-                elif parsed.path == "/actions/start-session":
-                    project_path_value = form_data.get("project_path", [""])[0].strip()
-                    if not project_path_value:
-                        raise PlanError("Project is required.")
-                    prompt_value = form_data.get("prompt", [""])[0].strip()
-                    if not prompt_value:
-                        raise PlanError("Prompt is required.")
-                    provider_value = form_data.get("provider", [""])[0].strip()
-                    if not provider_value:
-                        providers = available_providers()
-                        provider_value = providers[0][0] if providers else "codex"
-                    session_id = app.start_agent_session(
-                        project_path=project_path_value,
-                        prompt=prompt_value,
-                        provider=provider_value,
-                    )
-                    message = "Session started."
-                    redirect_to = f"/sessions/detail?id={session_id}"
-                elif parsed.path == "/actions/stop-session":
-                    session_id_value = form_data.get("session_id", [""])[0].strip()
-                    if not session_id_value:
-                        raise PlanError("Session ID is required.")
-                    app.stop_agent_session(session_id_value)
-                    message = "Session stop signal sent."
-                    redirect_to = f"/sessions/detail?id={session_id_value}"
-                elif parsed.path == "/actions/session-reply":
-                    session_id_value = form_data.get("session_id", [""])[0].strip()
-                    if not session_id_value:
-                        raise PlanError("Session ID is required.")
-                    reply_value = form_data.get("reply", [""])[0].strip()
-                    if not reply_value:
-                        raise PlanError("Reply message is required.")
-                    app.reply_to_session(session_id_value, reply_value)
-                    message = "Reply sent."
-                    redirect_to = f"/sessions/detail?id={session_id_value}"
-                elif parsed.path.startswith("/actions/project-git-"):
-                    git_path = form_data.get("path", [""])[0].strip()
-                    if not git_path:
-                        raise PlanError("Project path is required.")
-                    redirect_to = _page_link("/projects/detail", path=git_path)
-                    repo = Path(git_path).expanduser().resolve()
-                    if parsed.path == "/actions/project-git-commit":
-                        commit_msg = form_data.get("message", [""])[0].strip()
-                        if not commit_msg:
-                            raise PlanError("Commit message is required.")
-                        sha = stage_and_commit(repo, commit_msg)
-                        message = f"Committed {sha}"
-                    elif parsed.path == "/actions/project-git-switch":
-                        branch_name = form_data.get("branch", [""])[0].strip()
-                        if not branch_name:
-                            raise PlanError("Branch name is required.")
-                        switch_branch(repo, branch_name)
-                        message = f"Switched to {branch_name}"
-                    elif parsed.path == "/actions/project-git-create-branch":
-                        branch_name = form_data.get("branch", [""])[0].strip()
-                        if not branch_name:
-                            raise PlanError("Branch name is required.")
-                        create_branch(repo, branch_name)
-                        message = f"Created and switched to {branch_name}"
-                    elif parsed.path == "/actions/project-git-pull":
-                        remote_name = form_data.get("remote", ["origin"])[0].strip()
-                        output = git_pull(repo, remote=remote_name)
-                        message = f"Pulled from {remote_name}"
-                        if output:
-                            message += f": {output[:120]}"
-                    elif parsed.path == "/actions/project-git-push":
-                        remote_name = form_data.get("remote", ["origin"])[0].strip()
-                        try:
-                            output = git_push(repo, remote=remote_name)
-                        except PlanError:
-                            output = git_push(repo, remote=remote_name, set_upstream=True)
-                        message = f"Pushed to {remote_name}"
-                        if output:
-                            message += f": {output[:120]}"
-                    elif parsed.path == "/actions/project-git-stash":
-                        stash_msg = form_data.get("stash_message", [""])[0].strip() or None
-                        git_stash_save(repo, message=stash_msg)
-                        message = "Changes stashed"
-                    elif parsed.path == "/actions/project-git-stash-pop":
-                        git_stash_pop(repo)
-                        message = "Stash popped"
-                    elif parsed.path == "/actions/project-git-discard":
-                        discard_all_changes(repo)
-                        message = "All changes discarded"
-                    else:
-                        raise PlanError("Unknown git action.")
-                    redirect_to = _page_link("/projects/detail", path=git_path, message=message)
-                else:
-                    target_repo_value = form_data.get("target_repo", [""])[0].strip()
-                    if not target_repo_value:
-                        raise PlanError("Target repo is required.")
-                    target_repo = Path(target_repo_value).expanduser().resolve()
-                    plans_dir_value = form_data.get("plans_dir", [""])[0].strip()
-                    plans_dir = Path(plans_dir_value).expanduser() if plans_dir_value else app.plans_dir_for_repo(target_repo)
-                    concurrency_value = form_data.get("concurrency", ["1"])[0].strip() or "1"
-                    concurrency = int(concurrency_value)
-                    if concurrency < 1:
-                        raise PlanError("Concurrency must be at least 1.")
-                    selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
-                    provider_override = form_data.get("provider_override", [""])[0].strip() or None
-                    run_id = app.start_run_many(plans_dir, concurrency, selected_plan_names=selected_plan_names or None, provider_override=provider_override)
-                    if len(selected_plan_names) == 1:
-                        message = f"Started plan run for {selected_plan_names[0]} in {plans_dir}."
-                    else:
-                        message = f"Started run-many for {plans_dir}."
-                    redirect_to = "/"
+                action_result = app.handle_action(parsed.path, form_data)
+                message = action_result.message
+                redirect_to = action_result.redirect_to
+                run_id = action_result.run_id
             except (PlanError, ValueError) as exc:
                 message = str(exc)
+                redirect_to = "/actions"
+                run_id = None
             if redirect_to.startswith("/projects/detail?"):
                 if "message=" not in redirect_to:
                     location = redirect_to + "&" + urlencode({"message": message})
