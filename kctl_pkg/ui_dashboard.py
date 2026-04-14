@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import shutil
+import signal
 import socket
+import subprocess
 import threading
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,7 +18,22 @@ from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from .multi import build_multi_run_id, load_normalized_multi_plans, resolve_multi_run_log, run_many_plans
-from .git import check_remote_connectivity, ensure_git_repo, get_project_git_detail, get_project_git_summary, get_repo_root
+from .git import (
+    check_remote_connectivity,
+    create_branch,
+    discard_all_changes,
+    ensure_git_repo,
+    get_full_diff,
+    get_project_git_detail,
+    get_project_git_summary,
+    get_repo_root,
+    git_pull,
+    git_push,
+    git_stash_pop,
+    git_stash_save,
+    stage_and_commit,
+    switch_branch,
+)
 from .plan import build_plan_from_template, load_plan_templates
 from .paths import project_root
 from .preflight import preflight_multi_run
@@ -69,10 +89,10 @@ def _link(base_params: dict[str, str], **updates: str | None) -> str:
     return f"/?{query}" if query else "/"
 
 
-def _page_link(path: str, **params: str | None) -> str:
+def _page_link(route: str, /, **params: str | None) -> str:
     filtered = {k: v for k, v in params.items() if v is not None}
     query = urlencode(filtered)
-    return f"{path}?{query}" if query else path
+    return f"{route}?{query}" if query else route
 
 
 def check_repo_path(path_value: str) -> tuple[str, str]:
@@ -95,6 +115,40 @@ def available_providers() -> list[tuple[str, str]]:
     if shutil.which("claude") is not None:
         providers.append(("claude", "Claude"))
     return providers
+
+
+_TOKEN_WARNING_PATTERNS = (
+    "hit your limit",
+    "usage limit",
+    "quota exceeded",
+    "quota exhausted",
+    "out of tokens",
+    "token limit",
+    "rate limit",
+    "too many requests",
+    "max_tokens_exceeded",
+    "insufficient_quota",
+    "billing",
+    "plan limit",
+    "context window full",
+    "turn limit",
+)
+
+
+def _detect_token_warning(output_path: Path) -> str | None:
+    """Scan session output for token/quota exhaustion signals."""
+    try:
+        text = output_path.read_text(errors="replace")
+    except OSError:
+        return None
+    lower = text.lower()
+    for pattern in _TOKEN_WARNING_PATTERNS:
+        if pattern in lower:
+            for line in reversed(text.splitlines()):
+                if pattern in line.lower():
+                    return line.strip()
+            return pattern
+    return None
 
 
 def _provider_select_html(field_name: str, providers: list[tuple[str, str]]) -> str:
@@ -974,6 +1028,167 @@ a.project-name:hover {
     min-width: 640px;
   }
 }
+.session-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  background: white;
+  text-decoration: none;
+  color: inherit;
+}
+.session-item:hover {
+  border-color: #999;
+}
+.session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.85em;
+  color: #6b7280;
+}
+.session-prompt-preview {
+  font-size: 0.92em;
+  color: #374151;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.session-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.session-badge-running {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.session-badge-completed {
+  background: #dcfce7;
+  color: #166534;
+}
+.session-badge-failed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.session-badge-provider {
+  background: #f3f4f6;
+  color: #374151;
+}
+.session-output {
+  max-height: 600px;
+  overflow: auto;
+  background: #0f172a;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 12px;
+  font-family: monospace;
+  font-size: 0.88em;
+  line-height: 1.5;
+}
+.session-prompt-full {
+  white-space: pre-wrap;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+.session-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.btn-primary {
+  background: #1d4ed8;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-weight: 500;
+}
+.btn-primary:hover {
+  background: #1e40af;
+}
+.btn-danger {
+  background: #dc2626;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 0.9em;
+}
+.btn-danger:hover {
+  background: #b91c1c;
+}
+.btn-sm {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 0.82em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-sm:hover {
+  background: var(--border);
+}
+.btn-sm.btn-danger {
+  background: #dc2626;
+  color: white;
+  border-color: #dc2626;
+  padding: 4px 10px;
+  font-size: 0.82em;
+}
+.btn-sm.btn-danger:hover {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+.action-message {
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 0.9em;
+}
+.action-ok {
+  background: rgba(34,197,94,0.12);
+  border: 1px solid rgba(34,197,94,0.3);
+  color: #22c55e;
+}
+.action-error {
+  background: rgba(239,68,68,0.12);
+  border: 1px solid rgba(239,68,68,0.3);
+  color: #ef4444;
+}
+.session-message {
+  margin-bottom: 12px;
+}
+.session-message:last-child {
+  margin-bottom: 0;
+}
+.session-message-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 0.9em;
+}
 """
 
 
@@ -1021,7 +1236,7 @@ function wireCopyButtons(root) {
 
 
 def _render_nav_html(active: str) -> str:
-    items = [("Dashboard", "/"), ("Actions", "/actions"), ("Projects", "/projects")]
+    items = [("Dashboard", "/"), ("Actions", "/actions"), ("Projects", "/projects"), ("Sessions", "/sessions")]
     parts = []
     for label, href in items:
         cls = "nav-link active" if label == active else "nav-link"
@@ -1437,6 +1652,531 @@ class DashboardApp:
         threading.Thread(target=_run, daemon=True).start()
         return run_id
 
+    # -- Agent sessions -------------------------------------------------------
+
+    @property
+    def sessions_dir(self) -> Path:
+        return self.repo_path / ".kctl" / "sessions"
+
+    def _session_dir(self, session_id: str) -> Path:
+        return self.sessions_dir / session_id
+
+    def _session_meta_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "meta.json"
+
+    def _session_output_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "output.log"
+
+    def _write_session_meta(self, meta: dict[str, object]) -> None:
+        path = self._session_meta_path(str(meta["id"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(meta, indent=2) + "\n")
+
+    def _read_session_meta(self, session_id: str) -> dict[str, object] | None:
+        path = self._session_meta_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def list_sessions(self) -> list[dict[str, object]]:
+        if not self.sessions_dir.exists():
+            return []
+        sessions: list[dict[str, object]] = []
+        for child in sorted(self.sessions_dir.iterdir(), reverse=True):
+            if not child.is_dir():
+                continue
+            meta = self._read_session_meta(child.name)
+            if meta is not None:
+                sessions.append(meta)
+        sessions.sort(key=lambda s: str(s.get("started_at") or ""), reverse=True)
+        return sessions
+
+    def get_session(self, session_id: str) -> dict[str, object] | None:
+        return self._read_session_meta(session_id)
+
+    def read_session_output(self, session_id: str) -> str:
+        path = self._session_output_path(session_id)
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text()
+        except OSError:
+            return ""
+
+    def _run_session_subprocess(
+        self,
+        meta: dict[str, object],
+        command: list[str],
+        output_path: Path,
+    ) -> None:
+        resolved = str(meta["project_path"])
+        session_id = str(meta["id"])
+
+        def _run() -> None:
+            final_status = "failed"
+            final_exit_code: int | None = -1
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=resolved,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                meta["pid"] = process.pid
+                self._write_session_meta(meta)
+
+                with output_path.open("a", encoding="utf-8") as log:
+                    for line in iter(process.stdout.readline, ""):
+                        log.write(line)
+                        log.flush()
+                    process.stdout.close()
+
+                exit_code = process.wait()
+                final_status = "completed" if exit_code == 0 else "failed"
+                final_exit_code = exit_code
+            except Exception as exc:
+                with output_path.open("a", encoding="utf-8") as log:
+                    log.write(f"\n[kctl] session error: {exc}\n")
+            finally:
+                fresh = self._read_session_meta(session_id) or meta
+                fresh["status"] = final_status
+                fresh["exit_code"] = final_exit_code
+                fresh["ended_at"] = datetime.now(timezone.utc).isoformat()
+                fresh["pid"] = None
+                fresh["token_warning"] = _detect_token_warning(output_path)
+                self._write_session_meta(fresh)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def start_agent_session(
+        self,
+        project_path: str,
+        prompt: str,
+        provider: str,
+    ) -> str:
+        resolved = str(Path(project_path).expanduser().resolve())
+        if not Path(resolved).is_dir():
+            raise PlanError(f"Project path is not a directory: {resolved}")
+
+        session_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        provider_session_id = str(uuid.uuid4())
+        output_path = self._session_output_path(session_id)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.touch()
+
+        now = datetime.now(timezone.utc).isoformat()
+        meta: dict[str, object] = {
+            "id": session_id,
+            "project_path": resolved,
+            "project_name": Path(resolved).name,
+            "prompt": prompt,
+            "provider": provider,
+            "provider_session_id": provider_session_id,
+            "status": "running",
+            "started_at": now,
+            "ended_at": None,
+            "exit_code": None,
+            "pid": None,
+            "messages": [{"role": "user", "content": prompt, "timestamp": now}],
+        }
+        self._write_session_meta(meta)
+
+        if provider == "claude":
+            command = [
+                "claude", "--dangerously-skip-permissions",
+                "--session-id", provider_session_id,
+                "-p", prompt,
+            ]
+        else:
+            command = ["codex", "exec", "--full-auto", "--cd", resolved, prompt]
+
+        self._run_session_subprocess(meta, command, output_path)
+        return session_id
+
+    def reply_to_session(self, session_id: str, reply: str) -> None:
+        meta = self._read_session_meta(session_id)
+        if not meta:
+            raise PlanError(f"Session not found: {session_id}")
+        if meta.get("status") == "running":
+            raise PlanError("Session is still running. Wait for it to finish before replying.")
+
+        resolved = str(meta["project_path"])
+        provider = str(meta.get("provider") or "codex")
+        provider_session_id = str(meta.get("provider_session_id") or "")
+        output_path = self._session_output_path(session_id)
+
+        now = datetime.now(timezone.utc).isoformat()
+        messages = list(meta.get("messages") or [])
+        messages.append({"role": "user", "content": reply, "timestamp": now})
+        meta["messages"] = messages
+        meta["status"] = "running"
+        meta["ended_at"] = None
+        meta["exit_code"] = None
+        self._write_session_meta(meta)
+
+        with output_path.open("a", encoding="utf-8") as log:
+            log.write(f"\n{'─' * 60}\n")
+            log.write(f"[follow-up #{len(messages)}]\n")
+            log.write(f"{'─' * 60}\n\n")
+
+        if provider == "claude" and provider_session_id:
+            command = [
+                "claude", "--dangerously-skip-permissions",
+                "--resume", provider_session_id,
+                "-p", reply,
+            ]
+        else:
+            command = ["codex", "exec", "resume", "--last", "--full-auto", reply]
+
+        self._run_session_subprocess(meta, command, output_path)
+
+    def stop_agent_session(self, session_id: str) -> bool:
+        meta = self._read_session_meta(session_id)
+        if not meta:
+            return False
+        pid = meta.get("pid")
+        if not pid or meta.get("status") != "running":
+            return False
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+        return True
+
+    # -- Page renderers --------------------------------------------------------
+
+    def render_sessions_page(self, *, action_message: str | None = None, prefill_project: str | None = None) -> str:
+        providers = available_providers()
+        tracked_projects = self.load_tracked_projects()
+        sessions = self.list_sessions()
+
+        notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
+
+        project_options = "".join(
+            f"<option value='{_escape(p)}'{' selected' if prefill_project and str(Path(prefill_project).expanduser().resolve()) == p else ''}>"
+            f"{_escape(Path(p).name)} &mdash; {_escape(p)}</option>"
+            for p in tracked_projects
+        )
+        if not tracked_projects:
+            project_select = (
+                "<div class='help'>No tracked projects. <a href='/projects'>Add a project</a> first.</div>"
+            )
+        else:
+            project_select = (
+                f"<label for='session_project'><strong>Project</strong></label>"
+                f"<select id='session_project' name='project_path' required>{project_options}</select>"
+            )
+
+        if providers:
+            provider_options = "".join(
+                f"<option value='{_escape(v)}'>{_escape(l)}</option>"
+                for v, l in providers
+            )
+            provider_select = (
+                f"<label for='session_provider'><strong>Provider</strong></label>"
+                f"<select id='session_provider' name='provider'>{provider_options}</select>"
+            )
+        else:
+            provider_select = (
+                "<div class='help'>No agent providers found. Install <code>codex</code> or <code>claude</code>.</div>"
+            )
+
+        session_list_html = ""
+        if sessions:
+            for s in sessions:
+                sid = str(s.get("id") or "")
+                status = str(s.get("status") or "unknown")
+                provider_name = str(s.get("provider") or "")
+                project_name = str(s.get("project_name") or Path(str(s.get("project_path") or "")).name)
+                prompt_preview = str(s.get("prompt") or "")
+                if len(prompt_preview) > 120:
+                    prompt_preview = prompt_preview[:120] + "..."
+                started = str(s.get("started_at") or "")
+                if started and "T" in started:
+                    started = started.replace("T", " ").split(".")[0] + " UTC"
+                badge_cls = f"session-badge-{status}" if status in {"running", "completed", "failed"} else "session-badge-provider"
+                detail_url = f"/sessions/detail?id={_escape(sid)}"
+                session_list_html += (
+                    f"<a class='session-item {_status_class(status)}' href='{detail_url}'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                    f"<strong>{_escape(project_name)}</strong>"
+                    f"<div style='display:flex;gap:6px'>"
+                    f"<span class='session-badge session-badge-provider'>{_escape(provider_name)}</span>"
+                    f"<span class='session-badge {_escape(badge_cls)}'>{_escape(status)}</span>"
+                    f"</div></div>"
+                    f"<div class='session-prompt-preview'>{_escape(prompt_preview)}</div>"
+                    f"<div class='session-meta'><span>{_escape(started)}</span></div>"
+                    f"</a>"
+                )
+        else:
+            session_list_html = "<div class='empty'>No sessions yet. Launch one above.</div>"
+
+        body = (
+            f"<main class='single-column'><div class='column'>"
+            f"{notice_html}"
+            f"<section class='panel'>"
+            f"<h2>Launch Agent Session</h2>"
+            f"<div class='help'>Run an ad-hoc prompt against a project using Claude or Codex. "
+            f"No YAML plan required.</div>"
+            f"<form method='post' action='/actions/start-session'>"
+            f"{project_select}"
+            f"{provider_select}"
+            f"<label for='session_prompt'><strong>Prompt</strong></label>"
+            f"<textarea id='session_prompt' name='prompt' rows='6' "
+            f"placeholder='Describe what you want the agent to do...' required></textarea>"
+            f"<button type='submit' class='btn-primary'>Launch Session</button>"
+            f"</form>"
+            f"</section>"
+            f"<section class='panel'>"
+            f"<h2>Recent Sessions</h2>"
+            f"{session_list_html}"
+            f"</section>"
+            f"</div></main>"
+        )
+        return self._page_shell(active_nav="Sessions", body=body)
+
+    def render_session_detail_page(self, session_id: str) -> str:
+        meta = self.get_session(session_id)
+        if not meta:
+            return self._page_shell(
+                active_nav="Sessions",
+                body=(
+                    "<main class='single-column'><div class='column'>"
+                    "<a class='back-link' href='/sessions'>&larr; All Sessions</a>"
+                    f"<section class='panel'><div class='empty'>Session not found: {_escape(session_id)}</div></section>"
+                    "</div></main>"
+                ),
+            )
+
+        status = str(meta.get("status") or "unknown")
+        provider_name = str(meta.get("provider") or "")
+        project_path = str(meta.get("project_path") or "")
+        project_name = str(meta.get("project_name") or Path(project_path).name)
+        messages = meta.get("messages") or []
+        prompt = str(meta.get("prompt") or "")
+        started = str(meta.get("started_at") or "")
+        ended = meta.get("ended_at")
+        exit_code = meta.get("exit_code")
+        token_warning = meta.get("token_warning")
+        output = self.read_session_output(session_id)
+
+        if started and "T" in started:
+            started_display = started.replace("T", " ").split(".")[0] + " UTC"
+        else:
+            started_display = started
+
+        ended_display = ""
+        if ended:
+            ended_str = str(ended)
+            if "T" in ended_str:
+                ended_display = ended_str.replace("T", " ").split(".")[0] + " UTC"
+            else:
+                ended_display = ended_str
+
+        badge_cls = f"session-badge-{status}" if status in {"running", "completed", "failed"} else "session-badge-provider"
+        message_count = len(messages) if isinstance(messages, list) else 0
+        turn_label = f"{message_count} turn{'s' if message_count != 1 else ''}"
+
+        info_html = (
+            f"<div style='display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px'>"
+            f"<span class='session-badge session-badge-provider'>{_escape(provider_name)}</span>"
+            f"<span class='session-badge {_escape(badge_cls)}' id='status_badge'>{_escape(status)}</span>"
+            f"<span class='session-badge session-badge-provider' id='turn_badge'>{_escape(turn_label)}</span>"
+            f"</div>"
+            f"<div><strong>Project:</strong> {_escape(project_name)} &mdash; <code>{_escape(project_path)}</code></div>"
+            f"<div><strong>Started:</strong> {_escape(started_display)}</div>"
+        )
+        if ended_display:
+            info_html += f"<div><strong>Ended:</strong> {_escape(ended_display)}</div>"
+        if exit_code is not None:
+            info_html += f"<div><strong>Exit code:</strong> {_escape(str(exit_code))}</div>"
+
+        token_warning_html = ""
+        if token_warning:
+            token_warning_html = (
+                f"<div id='token_warning' class='notice' style='background:#fef3cd;color:#856404;border:1px solid #ffc107;"
+                f"border-radius:6px;padding:10px 14px;margin-top:10px;font-size:0.9em'>"
+                f"<strong>Token/quota warning:</strong> {_escape(str(token_warning))}"
+                f"</div>"
+            )
+
+        stop_html = ""
+        if status == "running":
+            stop_html = (
+                f"<form method='post' action='/actions/stop-session' style='margin:0;display:inline'>"
+                f"<input type='hidden' name='session_id' value='{_escape(session_id)}'>"
+                f"<button type='submit' class='btn-danger'>Stop Session</button>"
+                f"</form>"
+            )
+
+        # Conversation history
+        conversation_inner = ""
+        if isinstance(messages, list) and messages:
+            for i, msg in enumerate(messages):
+                content = str(msg.get("content") or "") if isinstance(msg, dict) else str(msg)
+                ts = ""
+                if isinstance(msg, dict) and msg.get("timestamp"):
+                    ts_raw = str(msg["timestamp"])
+                    if "T" in ts_raw:
+                        ts = ts_raw.replace("T", " ").split(".")[0] + " UTC"
+                    else:
+                        ts = ts_raw
+                num = i + 1
+                conversation_inner += (
+                    f"<div class='session-message'>"
+                    f"<div class='session-message-header'>"
+                    f"<strong>Prompt #{num}</strong>"
+                    f"{f'<span class=\"session-meta\">{_escape(ts)}</span>' if ts else ''}"
+                    f"</div>"
+                    f"<div class='session-prompt-full'>{_escape(content)}</div>"
+                    f"</div>"
+                )
+        else:
+            conversation_inner = f"<div class='session-prompt-full'>{_escape(prompt)}</div>"
+        conversation_html = f"<div id='conversation_list'>{conversation_inner}</div>"
+
+        # Reply form (visible when not running)
+        can_reply = status in {"completed", "failed"}
+        reply_html = ""
+        provider_label = provider_name.capitalize() if provider_name else "Agent"
+        if can_reply:
+            reply_html = (
+                f"<section class='panel' id='reply_section'>"
+                f"<h2>Reply</h2>"
+                f"<form method='post' action='/actions/session-reply'>"
+                f"<input type='hidden' name='session_id' value='{_escape(session_id)}'>"
+                f"<textarea name='reply' rows='4' placeholder='Send a follow-up message...' required "
+                f"style='min-height:80px' id='reply_input'></textarea>"
+                f"<button type='submit' class='btn-primary'>Send Reply via {_escape(provider_label)}</button>"
+                f"</form>"
+                f"</section>"
+            )
+
+        output_html = (
+            f"<pre class='session-output' id='session_output'>{_escape(output) if output else '(waiting for output...)'}</pre>"
+        )
+
+        body = (
+            f"<main class='single-column'><div class='column'>"
+            f"<a class='back-link' href='/sessions'>&larr; All Sessions</a>"
+            f"<section class='panel'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:12px'>"
+            f"<h2 style='margin:0'>Session: {_escape(project_name)}</h2>"
+            f"{stop_html}"
+            f"</div>"
+            f"{info_html}"
+            f"{token_warning_html}"
+            f"</section>"
+            f"<section class='panel'>"
+            f"<h2>Conversation</h2>"
+            f"{conversation_html}"
+            f"</section>"
+            f"<section class='panel'>"
+            f"<h2>Output</h2>"
+            f"{output_html}"
+            f"</section>"
+            f"{reply_html}"
+            f"</div></main>"
+        )
+
+        session_id_json = json.dumps(session_id)
+        status_json = json.dumps(status)
+        provider_label_json = json.dumps(provider_label)
+        detail_script = (
+            "window.addEventListener('DOMContentLoaded', () => {\n"
+            f"  const sessionId = {session_id_json};\n"
+            f"  const sessionStatus = {status_json};\n"
+            f"  const providerLabel = {provider_label_json};\n"
+            "  const outputNode = document.getElementById('session_output');\n"
+            "  if (!sessionId || !outputNode || sessionStatus !== 'running') return;\n"
+            "  let knownMsgCount = document.querySelectorAll('.session-message').length;\n"
+            "  function escapeHtml(s) {\n"
+            "    const d = document.createElement('div'); d.textContent = s; return d.innerHTML;\n"
+            "  }\n"
+            "  function renderMessages(msgs) {\n"
+            "    const conv = document.getElementById('conversation_list');\n"
+            "    if (!conv || !Array.isArray(msgs) || msgs.length <= knownMsgCount) return;\n"
+            "    knownMsgCount = msgs.length;\n"
+            "    let html = '';\n"
+            "    msgs.forEach((m, i) => {\n"
+            "      const content = (typeof m === 'object' && m.content) ? m.content : String(m);\n"
+            "      let ts = '';\n"
+            "      if (typeof m === 'object' && m.timestamp) {\n"
+            "        ts = m.timestamp.replace('T', ' ').split('.')[0] + ' UTC';\n"
+            "      }\n"
+            "      html += '<div class=\"session-message\">'\n"
+            "        + '<div class=\"session-message-header\">'\n"
+            "        + '<strong>Prompt #' + (i + 1) + '</strong>'\n"
+            "        + (ts ? '<span class=\"session-meta\">' + escapeHtml(ts) + '</span>' : '')\n"
+            "        + '</div>'\n"
+            "        + '<div class=\"session-prompt-full\">' + escapeHtml(content) + '</div>'\n"
+            "        + '</div>';\n"
+            "    });\n"
+            "    conv.innerHTML = html;\n"
+            "    const turnBadge = document.getElementById('turn_badge');\n"
+            "    if (turnBadge) {\n"
+            "      const n = msgs.length;\n"
+            "      turnBadge.textContent = n + ' turn' + (n !== 1 ? 's' : '');\n"
+            "    }\n"
+            "  }\n"
+            "  const refreshOutput = async () => {\n"
+            "    const params = new URLSearchParams({ id: sessionId });\n"
+            "    const response = await fetch(`/api/session-output?${params.toString()}`);\n"
+            "    if (!response.ok) return;\n"
+            "    const data = await response.json();\n"
+            "    outputNode.textContent = data.output || '(waiting for output...)';\n"
+            "    outputNode.scrollTop = outputNode.scrollHeight;\n"
+            "    if (data.messages) renderMessages(data.messages);\n"
+            "    if (data.status !== 'running') {\n"
+            "      clearInterval(window._sessionPoll);\n"
+            "      const badge = document.getElementById('status_badge');\n"
+            "      if (badge) {\n"
+            "        badge.textContent = data.status;\n"
+            "        badge.className = 'session-badge session-badge-' + data.status;\n"
+            "      }\n"
+            "      if (data.token_warning && !document.getElementById('token_warning')) {\n"
+            "        const panel = document.querySelector('.panel');\n"
+            "        if (panel) {\n"
+            "          const warn = document.createElement('div');\n"
+            "          warn.id = 'token_warning';\n"
+            "          warn.className = 'notice';\n"
+            "          warn.style.cssText = 'background:#fef3cd;color:#856404;border:1px solid #ffc107;border-radius:6px;padding:10px 14px;margin-top:10px;font-size:0.9em';\n"
+            "          warn.innerHTML = '<strong>Token/quota warning:</strong> ' + escapeHtml(data.token_warning);\n"
+            "          panel.appendChild(warn);\n"
+            "        }\n"
+            "      }\n"
+            "      const replySection = document.getElementById('reply_section');\n"
+            "      if (!replySection) {\n"
+            "        const col = document.querySelector('.column');\n"
+            "        if (col) {\n"
+            "          const section = document.createElement('section');\n"
+            "          section.id = 'reply_section';\n"
+            "          section.className = 'panel';\n"
+            "          section.innerHTML = '<h2>Reply</h2>'\n"
+            f"           + '<form method=\"post\" action=\"/actions/session-reply\">'\n"
+            f"           + '<input type=\"hidden\" name=\"session_id\" value=\"' + sessionId + '\">'\n"
+            "           + '<textarea name=\"reply\" rows=\"4\" placeholder=\"Send a follow-up message...\" required '\n"
+            "           + 'style=\"min-height:80px\" id=\"reply_input\"></textarea>'\n"
+            "           + '<button type=\"submit\" class=\"btn-primary\">Send Reply via ' + escapeHtml(providerLabel) + '</button>'\n"
+            "           + '</form>';\n"
+            "          col.appendChild(section);\n"
+            "          const input = document.getElementById('reply_input');\n"
+            "          if (input) input.focus();\n"
+            "        }\n"
+            "      }\n"
+            "    }\n"
+            "  };\n"
+            "  refreshOutput();\n"
+            "  window._sessionPoll = setInterval(refreshOutput, 1500);\n"
+            "});\n"
+        )
+        return self._page_shell(active_nav="Sessions", body=body, extra_script=detail_script)
+
     def render_actions_page(self, *, action_message: str | None = None) -> str:
         templates = load_plan_templates(project_root())
         plan_templates = [
@@ -1674,7 +2414,7 @@ window.addEventListener('DOMContentLoaded', () => {
 """
         return self._page_shell(active_nav="Actions", body=body, extra_script=actions_script)
 
-    def render_project_detail_page(self, project_path: str) -> str:
+    def render_project_detail_page(self, project_path: str, *, action_message: str | None = None) -> str:
         resolved = str(Path(project_path).expanduser().resolve())
         tracked = self.load_tracked_projects()
         if resolved not in tracked:
@@ -1702,6 +2442,15 @@ window.addEventListener('DOMContentLoaded', () => {
                 ),
             )
 
+        path_hidden = f"<input type='hidden' name='path' value='{_escape(resolved)}'>"
+
+        # -- Feedback banner --
+        message_html = ""
+        if action_message:
+            is_error = action_message.lower().startswith("error:") or action_message.lower().startswith("failed")
+            cls = "action-error" if is_error else "action-ok"
+            message_html = f"<div class='action-message {cls}'>{_escape(action_message)}</div>"
+
         # Branch + status badges
         branch = detail.get("branch")
         dirty = detail.get("dirty")
@@ -1728,44 +2477,68 @@ window.addEventListener('DOMContentLoaded', () => {
             else:
                 status_badges.append("<span class='git-badge git-synced'>in sync</span>")
 
+        launch_session_url = _page_link("/sessions", project=resolved)
         header_html = (
             "<a class='back-link' href='/projects'>&larr; All Projects</a>"
+            f"{message_html}"
             "<section class='panel'>"
             "<div class='detail-header'>"
             f"<h2 style='margin:0'>{name}</h2>"
+            f"<div style='display:flex;gap:8px;align-items:center'>"
             f"<div class='project-git'>{''.join(status_badges)}</div>"
+            f"<a href='{_escape(launch_session_url)}' class='btn-primary' "
+            f"style='text-decoration:none;font-size:0.85em;padding:6px 12px'>Launch Agent</a>"
+            f"</div>"
             "</div>"
             f"<div class='project-path' style='margin-top:4px'><code>{_escape(resolved)}</code></div>"
             "</section>"
         )
 
-        # Remotes
+        # -- Remotes with pull/push buttons --
         remotes = detail.get("remotes") or []
+        unique_remote_names: set[str] = set()
         if remotes:
             remote_names: set[str] = set()
             remote_rows = ""
             for r in remotes:
                 url = str(r.get("url", ""))
-                name = str(r.get("name", ""))
-                if name:
-                    remote_names.add(name)
+                rname = str(r.get("name", ""))
+                if rname:
+                    remote_names.add(rname)
                 remote_rows += (
                     "<div class='remote-row'>"
-                    f"<span class='remote-name'>{_escape(name)}</span>"
+                    f"<span class='remote-name'>{_escape(rname)}</span>"
                     f"<span class='remote-url'>{_escape(url)}</span>"
                     f"<span class='remote-direction'>{_escape(str(r.get('direction', '')))}</span>"
                     "</div>"
                 )
+            unique_remote_names = remote_names
             connectivity_html = (
                 "<div id='remote_status' style='margin-top:8px'>"
                 "<span class='ssh-status ssh-pending'>checking remote connectivity&hellip;</span>"
                 "</div>"
             ) if remote_names else ""
+
+            pull_push_forms = ""
+            for rname in sorted(remote_names):
+                pull_push_forms += (
+                    f"<div class='git-action-row' style='display:flex;gap:6px;align-items:center;margin-top:8px'>"
+                    f"<span style='font-size:0.85em;min-width:60px'>{_escape(rname)}:</span>"
+                    f"<form method='post' action='/actions/project-git-pull' style='margin:0'>"
+                    f"{path_hidden}<input type='hidden' name='remote' value='{_escape(rname)}'>"
+                    f"<button type='submit' class='btn-sm'>Pull</button></form>"
+                    f"<form method='post' action='/actions/project-git-push' style='margin:0'>"
+                    f"{path_hidden}<input type='hidden' name='remote' value='{_escape(rname)}'>"
+                    f"<button type='submit' class='btn-sm'>Push</button></form>"
+                    f"</div>"
+                )
+
             remotes_html = (
                 "<section class='panel detail-section'>"
                 "<h3>Remotes</h3>"
                 f"{remote_rows}"
                 f"{connectivity_html}"
+                f"{pull_push_forms}"
                 "</section>"
             )
         else:
@@ -1776,15 +2549,40 @@ window.addEventListener('DOMContentLoaded', () => {
                 "</section>"
             )
 
-        # Git status
+        # -- Working tree status with discard + commit form --
         status_output = str(detail.get("status_output", ""))
         diff_stat = str(detail.get("diff_stat", ""))
         if status_output:
+            discard_form = (
+                "<form method='post' action='/actions/project-git-discard' style='margin:0;display:inline' "
+                f"onsubmit=\"return confirm('This will discard ALL uncommitted changes. Continue?')\">"
+                f"{path_hidden}"
+                "<button type='submit' class='btn-sm btn-danger'>Discard All Changes</button>"
+                "</form>"
+            )
+            commit_form = (
+                "<div style='margin-top:12px'>"
+                "<details id='diff_preview'>"
+                "<summary style='cursor:pointer;font-size:0.85em;color:var(--muted)'>Show full diff</summary>"
+                "<pre class='code-block' id='diff_content' style='max-height:400px;overflow:auto'>Loading&hellip;</pre>"
+                "</details>"
+                f"<form method='post' action='/actions/project-git-commit' style='margin-top:8px;display:flex;gap:6px;align-items:start'>"
+                f"{path_hidden}"
+                "<input type='text' name='message' placeholder='Commit message' required "
+                "style='flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;"
+                "background:var(--surface);color:var(--text);font-size:0.9em'>"
+                "<button type='submit' class='btn-primary' style='font-size:0.85em;padding:6px 14px;white-space:nowrap'>Commit All</button>"
+                "</form></div>"
+            )
             status_html = (
                 "<section class='panel detail-section'>"
-                "<h3>Working Tree Status</h3>"
+                "<div style='display:flex;align-items:center;justify-content:space-between'>"
+                "<h3 style='margin:0'>Working Tree Status</h3>"
+                f"{discard_form}"
+                "</div>"
                 f"<pre class='code-block'>{_escape(status_output)}</pre>"
                 + (f"<pre class='code-block'>{_escape(diff_stat)}</pre>" if diff_stat else "")
+                + commit_form
                 + "</section>"
             )
         else:
@@ -1795,19 +2593,37 @@ window.addEventListener('DOMContentLoaded', () => {
                 "</section>"
             )
 
-        # Branches
+        # -- Branches with switch/create --
         branches = detail.get("branches") or []
         if branches:
             branch_items = ""
             for b in branches:
                 is_current = str(b.get("current", "false")) == "true"
-                cls = " class='branch-current'" if is_current else ""
-                prefix = "* " if is_current else ""
-                branch_items += f"<li{cls}>{prefix}{_escape(str(b.get('name', '')))}</li>"
+                bname = _escape(str(b.get("name", "")))
+                if is_current:
+                    branch_items += f"<li class='branch-current'>* {bname}</li>"
+                else:
+                    switch_form = (
+                        f"<form method='post' action='/actions/project-git-switch' style='margin:0;display:inline'>"
+                        f"{path_hidden}<input type='hidden' name='branch' value='{bname}'>"
+                        f"<button type='submit' class='btn-sm' style='margin-left:6px'>Switch</button></form>"
+                    )
+                    branch_items += f"<li>{bname} {switch_form}</li>"
+            create_branch_form = (
+                "<div style='margin-top:10px;display:flex;gap:6px'>"
+                f"<form method='post' action='/actions/project-git-create-branch' style='margin:0;display:flex;gap:6px;flex:1'>"
+                f"{path_hidden}"
+                "<input type='text' name='branch' placeholder='new-branch-name' required "
+                "style='flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;"
+                "background:var(--surface);color:var(--text);font-size:0.85em'>"
+                "<button type='submit' class='btn-sm'>Create &amp; Switch</button>"
+                "</form></div>"
+            )
             branches_html = (
                 "<section class='panel detail-section'>"
                 f"<h3>Local Branches ({len(branches)})</h3>"
                 f"<ul class='branch-list'>{branch_items}</ul>"
+                f"{create_branch_form}"
                 "</section>"
             )
         else:
@@ -1818,18 +2634,41 @@ window.addEventListener('DOMContentLoaded', () => {
                 "</section>"
             )
 
-        # Stash
+        # -- Stash with save/pop --
         stash_list = detail.get("stash_list") or []
+        stash_save_form = (
+            "<div style='margin-top:8px;display:flex;gap:6px'>"
+            f"<form method='post' action='/actions/project-git-stash' style='margin:0;display:flex;gap:6px;flex:1'>"
+            f"{path_hidden}"
+            "<input type='text' name='stash_message' placeholder='Stash message (optional)' "
+            "style='flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;"
+            "background:var(--surface);color:var(--text);font-size:0.85em'>"
+            "<button type='submit' class='btn-sm'>Stash</button>"
+            "</form></div>"
+        )
         if stash_list:
-            stash_items = "".join(f"<li>{_escape(s)}</li>" for s in stash_list)
+            pop_form = (
+                f"<form method='post' action='/actions/project-git-stash-pop' style='margin:0;display:inline'>"
+                f"{path_hidden}"
+                f"<button type='submit' class='btn-sm' style='margin-left:6px'>Pop</button></form>"
+            )
+            stash_items = f"<li>{_escape(stash_list[0])} {pop_form}</li>"
+            stash_items += "".join(f"<li>{_escape(s)}</li>" for s in stash_list[1:])
             stash_html = (
                 "<section class='panel detail-section'>"
                 f"<h3>Stash ({len(stash_list)})</h3>"
                 f"<ul class='branch-list'>{stash_items}</ul>"
+                f"{stash_save_form}"
                 "</section>"
             )
         else:
-            stash_html = ""
+            stash_html = (
+                "<section class='panel detail-section'>"
+                "<h3>Stash</h3>"
+                "<div class='empty' style='margin-bottom:6px'>No stashed changes.</div>"
+                f"{stash_save_form}"
+                "</section>"
+            )
 
         # Recent commits
         commits = detail.get("recent_commits") or []
@@ -1858,9 +2697,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
         remote_names_for_detail: set[str] = set()
         for r in remotes:
-            name = str(r.get("name", ""))
-            if name:
-                remote_names_for_detail.add(name)
+            rname = str(r.get("name", ""))
+            if rname:
+                remote_names_for_detail.add(rname)
         remote_names_json = json.dumps(sorted(remote_names_for_detail))
         project_path_json = json.dumps(resolved)
 
@@ -1869,31 +2708,49 @@ window.addEventListener('DOMContentLoaded', async () => {{
   const remoteNames = {remote_names_json};
   const projectPath = {project_path_json};
   const container = document.getElementById('remote_status');
-  if (!container || remoteNames.length === 0) return;
-  const results = [];
-  for (const name of remoteNames) {{
-    try {{
-      const params = new URLSearchParams({{ path: projectPath, remote: name }});
-      const resp = await fetch('/api/project-remote-check?' + params.toString());
-      const data = await resp.json();
-      results.push(data);
-    }} catch (e) {{
-      results.push({{ remote: name, ok: false, message: 'fetch error' }});
+  if (container && remoteNames.length > 0) {{
+    const results = [];
+    for (const name of remoteNames) {{
+      try {{
+        const params = new URLSearchParams({{ path: projectPath, remote: name }});
+        const resp = await fetch('/api/project-remote-check?' + params.toString());
+        const data = await resp.json();
+        results.push(data);
+      }} catch (e) {{
+        results.push({{ remote: name, ok: false, message: 'fetch error' }});
+      }}
     }}
-  }}
-  let html = '';
-  for (const r of results) {{
-    const cls = r.ok ? 'ssh-ok' : 'ssh-fail';
-    const label = r.ok ? 'connected' : 'unreachable';
-    const proto = r.protocol ? ' (' + esc(r.protocol) + ')' : '';
-    const remote = r.remote ? esc(r.remote) : '';
-    const msg = (!r.ok && r.message && r.message !== 'connected') ? ' &mdash; ' + esc(r.message) : '';
-    html += `<div class="ssh-status ${{cls}}">${{remote}}${{proto}}: ${{label}}${{msg}}</div>`;
-    if (r.hint) {{
-      html += `<div class="help" style="margin-top:4px;font-size:0.85em">${{esc(r.hint)}}</div>`;
+    let html = '';
+    for (const r of results) {{
+      const cls = r.ok ? 'ssh-ok' : 'ssh-fail';
+      const label = r.ok ? 'connected' : 'unreachable';
+      const proto = r.protocol ? ' (' + esc(r.protocol) + ')' : '';
+      const remote = r.remote ? esc(r.remote) : '';
+      const msg = (!r.ok && r.message && r.message !== 'connected') ? ' &mdash; ' + esc(r.message) : '';
+      html += `<div class="ssh-status ${{cls}}">${{remote}}${{proto}}: ${{label}}${{msg}}</div>`;
+      if (r.hint) {{
+        html += `<div class="help" style="margin-top:4px;font-size:0.85em">${{esc(r.hint)}}</div>`;
+      }}
     }}
+    container.innerHTML = html;
   }}
-  container.innerHTML = html;
+  const diffToggle = document.getElementById('diff_preview');
+  if (diffToggle) {{
+    let loaded = false;
+    diffToggle.addEventListener('toggle', async () => {{
+      if (diffToggle.open && !loaded) {{
+        loaded = true;
+        try {{
+          const params = new URLSearchParams({{ path: projectPath }});
+          const resp = await fetch('/api/project-git-diff?' + params.toString());
+          const data = await resp.json();
+          document.getElementById('diff_content').textContent = data.diff || '(no diff)';
+        }} catch (e) {{
+          document.getElementById('diff_content').textContent = 'Failed to load diff.';
+        }}
+      }}
+    }});
+  }}
 }});
 function esc(s) {{
   const d = document.createElement('div');
@@ -1980,17 +2837,9 @@ function esc(s) {{
             f"<main class='single-column'>"
             f"<div class='column'>"
             f"{notice_html}"
-            f"<section class='panel'>"
-            f"<div style='display:flex;align-items:center;justify-content:space-between'>"
-            f"<h2 style='margin:0'>Tracked Projects</h2>"
-            f"<button id='refresh_git_btn' type='button' style='font-size:0.85em'>Refresh</button>"
-            f"</div>"
-            f"<div class='help'>Local repo paths used for cross-project plan runs.</div>"
-            f"<div id='projects_list'>{project_items_html}</div>"
-            f"</section>"
-            f"<section class='panel'>"
-            f"<h2>Add Project</h2>"
-            f"<div class='help'>Add a local git repository path to the tracked projects list.</div>"
+            f"<details class='panel actions-details'>"
+            f"<summary><h2 class='inline-heading'>Add Project</h2></summary>"
+            f"<div class='help' style='margin-top:8px'>Add a local git repository path to the tracked projects list.</div>"
             f"<form method='post' action='/actions/add-project' id='add_project_form'>"
             f"<label for='project_path'><strong>Project Path</strong></label>"
             f"<input id='project_path' name='project_path' type='text' placeholder='/path/to/project' required>"
@@ -1998,6 +2847,14 @@ function esc(s) {{
             f"<div id='project_path_duplicate' class='repo-check'></div>"
             f"<button type='submit' id='add_project_button'>Add Project</button>"
             f"</form>"
+            f"</details>"
+            f"<section class='panel'>"
+            f"<div style='display:flex;align-items:center;justify-content:space-between'>"
+            f"<h2 style='margin:0'>Tracked Projects</h2>"
+            f"<button id='refresh_git_btn' type='button' style='font-size:0.85em'>Refresh</button>"
+            f"</div>"
+            f"<div class='help'>Local repo paths used for cross-project plan runs.</div>"
+            f"<div id='projects_list'>{project_items_html}</div>"
             f"</section>"
             f"</div>"
             f"</main>"
@@ -2441,7 +3298,47 @@ def serve_dashboard(
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if parsed.path not in {"/", "/actions", "/projects", "/projects/detail"}:
+            if parsed.path == "/api/project-git-diff":
+                params = parse_qs(parsed.query)
+                path_value = params.get("path", [""])[0].strip()
+                if path_value:
+                    repo = Path(path_value).expanduser().resolve()
+                    diff_text = get_full_diff(repo)
+                else:
+                    diff_text = ""
+                body = json.dumps({"diff": diff_text}).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/api/session-output":
+                params = parse_qs(parsed.query)
+                session_id = params.get("id", [""])[0].strip()
+                if session_id:
+                    meta = app.get_session(session_id)
+                    output = app.read_session_output(session_id)
+                    status = str(meta.get("status") or "unknown") if meta else "unknown"
+                    messages = list(meta.get("messages") or []) if meta else []
+                    token_warning = str(meta.get("token_warning") or "") if meta else ""
+                else:
+                    output = ""
+                    status = "unknown"
+                    messages = []
+                    token_warning = ""
+                body = json.dumps({
+                    "id": session_id,
+                    "status": status,
+                    "output": output,
+                    "messages": messages,
+                    "token_warning": token_warning,
+                }).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path not in {"/", "/actions", "/projects", "/projects/detail", "/sessions", "/sessions/detail"}:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
             params = parse_qs(parsed.query)
@@ -2451,9 +3348,15 @@ def serve_dashboard(
                     body = app.render_actions_page(action_message=action_message)
                 elif parsed.path == "/projects/detail":
                     project_path = params.get("path", [""])[0]
-                    body = app.render_project_detail_page(project_path)
+                    body = app.render_project_detail_page(project_path, action_message=action_message)
                 elif parsed.path == "/projects":
                     body = app.render_projects_page(action_message=action_message)
+                elif parsed.path == "/sessions/detail":
+                    session_id = params.get("id", [""])[0]
+                    body = app.render_session_detail_page(session_id)
+                elif parsed.path == "/sessions":
+                    prefill_project = params.get("project", [None])[0]
+                    body = app.render_sessions_page(action_message=action_message, prefill_project=prefill_project)
                 else:
                     run_id = params.get("run_id", [None])[0]
                     plan_execution_id = params.get("plan_execution_id", [None])[0]
@@ -2490,6 +3393,17 @@ def serve_dashboard(
                 "/actions/add-project",
                 "/actions/remove-project",
                 "/actions/run-plan-across-projects",
+                "/actions/start-session",
+                "/actions/stop-session",
+                "/actions/session-reply",
+                "/actions/project-git-commit",
+                "/actions/project-git-switch",
+                "/actions/project-git-create-branch",
+                "/actions/project-git-pull",
+                "/actions/project-git-push",
+                "/actions/project-git-stash",
+                "/actions/project-git-stash-pop",
+                "/actions/project-git-discard",
             }:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
@@ -2586,6 +3500,93 @@ def serve_dashboard(
                     )
                     message = f"Created plan at {created_path}."
                     redirect_to = "/actions"
+                elif parsed.path == "/actions/start-session":
+                    project_path_value = form_data.get("project_path", [""])[0].strip()
+                    if not project_path_value:
+                        raise PlanError("Project is required.")
+                    prompt_value = form_data.get("prompt", [""])[0].strip()
+                    if not prompt_value:
+                        raise PlanError("Prompt is required.")
+                    provider_value = form_data.get("provider", [""])[0].strip()
+                    if not provider_value:
+                        providers = available_providers()
+                        provider_value = providers[0][0] if providers else "codex"
+                    session_id = app.start_agent_session(
+                        project_path=project_path_value,
+                        prompt=prompt_value,
+                        provider=provider_value,
+                    )
+                    message = f"Session started."
+                    redirect_to = f"/sessions/detail?id={session_id}"
+                elif parsed.path == "/actions/stop-session":
+                    session_id_value = form_data.get("session_id", [""])[0].strip()
+                    if not session_id_value:
+                        raise PlanError("Session ID is required.")
+                    app.stop_agent_session(session_id_value)
+                    message = "Session stop signal sent."
+                    redirect_to = f"/sessions/detail?id={session_id_value}"
+                elif parsed.path == "/actions/session-reply":
+                    session_id_value = form_data.get("session_id", [""])[0].strip()
+                    if not session_id_value:
+                        raise PlanError("Session ID is required.")
+                    reply_value = form_data.get("reply", [""])[0].strip()
+                    if not reply_value:
+                        raise PlanError("Reply message is required.")
+                    app.reply_to_session(session_id_value, reply_value)
+                    message = "Reply sent."
+                    redirect_to = f"/sessions/detail?id={session_id_value}"
+                elif parsed.path.startswith("/actions/project-git-"):
+                    git_path = form_data.get("path", [""])[0].strip()
+                    if not git_path:
+                        raise PlanError("Project path is required.")
+                    redirect_to = _page_link("/projects/detail", path=git_path)
+                    repo = Path(git_path).expanduser().resolve()
+                    if parsed.path == "/actions/project-git-commit":
+                        commit_msg = form_data.get("message", [""])[0].strip()
+                        if not commit_msg:
+                            raise PlanError("Commit message is required.")
+                        sha = stage_and_commit(repo, commit_msg)
+                        message = f"Committed {sha}"
+                    elif parsed.path == "/actions/project-git-switch":
+                        branch_name = form_data.get("branch", [""])[0].strip()
+                        if not branch_name:
+                            raise PlanError("Branch name is required.")
+                        switch_branch(repo, branch_name)
+                        message = f"Switched to {branch_name}"
+                    elif parsed.path == "/actions/project-git-create-branch":
+                        branch_name = form_data.get("branch", [""])[0].strip()
+                        if not branch_name:
+                            raise PlanError("Branch name is required.")
+                        create_branch(repo, branch_name)
+                        message = f"Created and switched to {branch_name}"
+                    elif parsed.path == "/actions/project-git-pull":
+                        remote_name = form_data.get("remote", ["origin"])[0].strip()
+                        output = git_pull(repo, remote=remote_name)
+                        message = f"Pulled from {remote_name}"
+                        if output:
+                            message += f": {output[:120]}"
+                    elif parsed.path == "/actions/project-git-push":
+                        remote_name = form_data.get("remote", ["origin"])[0].strip()
+                        try:
+                            output = git_push(repo, remote=remote_name)
+                        except PlanError:
+                            output = git_push(repo, remote=remote_name, set_upstream=True)
+                        message = f"Pushed to {remote_name}"
+                        if output:
+                            message += f": {output[:120]}"
+                    elif parsed.path == "/actions/project-git-stash":
+                        stash_msg = form_data.get("stash_message", [""])[0].strip() or None
+                        git_stash_save(repo, message=stash_msg)
+                        message = "Changes stashed"
+                    elif parsed.path == "/actions/project-git-stash-pop":
+                        git_stash_pop(repo)
+                        message = "Stash popped"
+                    elif parsed.path == "/actions/project-git-discard":
+                        discard_all_changes(repo)
+                        message = "All changes discarded"
+                    else:
+                        raise PlanError("Unknown git action.")
+                    redirect_to = _page_link("/projects/detail", path=git_path, message=message)
                 else:
                     target_repo_value = form_data.get("target_repo", [""])[0].strip()
                     if not target_repo_value:
@@ -2607,7 +3608,16 @@ def serve_dashboard(
                     redirect_to = "/"
             except (PlanError, ValueError) as exc:
                 message = str(exc)
-            if redirect_to == "/projects":
+            if redirect_to.startswith("/projects/detail?"):
+                if "message=" not in redirect_to:
+                    location = redirect_to + "&" + urlencode({"message": message})
+                else:
+                    location = redirect_to
+            elif redirect_to.startswith("/sessions/detail"):
+                location = redirect_to if "?" in redirect_to else redirect_to + f"?message={message}"
+            elif redirect_to == "/sessions":
+                location = _page_link("/sessions", message=message)
+            elif redirect_to == "/projects":
                 location = _page_link("/projects", message=message)
             elif redirect_to == "/actions":
                 location = _page_link("/actions", message=message)

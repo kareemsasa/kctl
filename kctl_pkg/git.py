@@ -372,6 +372,121 @@ def probe_workspace_dirty(workspace_path: str | None) -> bool | None:
     return bool(result.stdout.strip())
 
 
+def git_pull(repo_path: Path, remote: str = "origin", branch: str | None = None) -> str:
+    """Pull from a remote. Returns the git output on success."""
+    cmd = ["git", "pull", "--rebase", remote]
+    if branch:
+        cmd.append(branch)
+    result = run_command(cmd, cwd=repo_path)
+    if result.exit_code != 0:
+        message = get_git_error_message(result)
+        raise PlanError(f"Failed to pull from {remote}: {message}")
+    return result.stdout.strip()
+
+
+def git_push(
+    repo_path: Path,
+    remote: str = "origin",
+    branch: str | None = None,
+    set_upstream: bool = False,
+) -> str:
+    """Push to a remote. Returns the git output on success."""
+    cmd = ["git", "push"]
+    if set_upstream:
+        cmd.append("-u")
+    cmd.append(remote)
+    if branch:
+        cmd.append(branch)
+    result = run_command(cmd, cwd=repo_path)
+    if result.exit_code != 0:
+        message = get_git_error_message(result)
+        raise PlanError(f"Failed to push to {remote}: {message}")
+    return (result.stdout + result.stderr).strip()
+
+
+def git_stash_save(repo_path: Path, message: str | None = None) -> str:
+    """Stash working-tree changes. Returns git output."""
+    cmd = ["git", "stash", "push"]
+    if message:
+        cmd.extend(["-m", message])
+    result = run_command(cmd, cwd=repo_path)
+    if result.exit_code != 0:
+        msg = get_git_error_message(result)
+        raise PlanError(f"Failed to stash changes: {msg}")
+    return result.stdout.strip()
+
+
+def git_stash_pop(repo_path: Path) -> str:
+    """Pop the top stash entry. Returns git output."""
+    result = run_command(["git", "stash", "pop"], cwd=repo_path)
+    if result.exit_code != 0:
+        msg = get_git_error_message(result)
+        raise PlanError(f"Failed to pop stash: {msg}")
+    return result.stdout.strip()
+
+
+def discard_all_changes(repo_path: Path) -> str:
+    """Discard all uncommitted changes (tracked and untracked files)."""
+    checkout_result = run_command(["git", "checkout", "--", "."], cwd=repo_path)
+    if checkout_result.exit_code != 0:
+        msg = get_git_error_message(checkout_result)
+        raise PlanError(f"Failed to discard tracked changes: {msg}")
+    clean_result = run_command(["git", "clean", "-fd"], cwd=repo_path)
+    if clean_result.exit_code != 0:
+        msg = get_git_error_message(clean_result)
+        raise PlanError(f"Failed to clean untracked files: {msg}")
+    return "All changes discarded."
+
+
+def stage_and_commit(repo_path: Path, message: str, paths: list[str] | None = None) -> str:
+    """Stage files and commit. Returns the new commit SHA.
+
+    If *paths* is None, stages everything (``git add -A``).
+    Otherwise stages only the given paths.
+    """
+    if paths:
+        add_result = run_command(["git", "add", "--"] + paths, cwd=repo_path)
+    else:
+        add_result = run_command(["git", "add", "-A"], cwd=repo_path)
+    if add_result.exit_code != 0:
+        msg = get_git_error_message(add_result)
+        raise PlanError(f"Failed to stage changes: {msg}")
+
+    commit_result = run_command(["git", "commit", "-m", message], cwd=repo_path)
+    if commit_result.exit_code != 0:
+        msg = get_git_error_message(commit_result)
+        raise PlanError(f"Failed to commit: {msg}")
+
+    sha_result = run_command(["git", "rev-parse", "--short", "HEAD"], cwd=repo_path)
+    if sha_result.exit_code != 0:
+        return "unknown"
+    return sha_result.stdout.strip()
+
+
+def create_branch(repo_path: Path, branch_name: str) -> None:
+    """Create a new branch and switch to it."""
+    result = run_command(["git", "switch", "-c", branch_name], cwd=repo_path)
+    if result.exit_code != 0:
+        msg = get_git_error_message(result)
+        raise PlanError(f"Failed to create branch '{branch_name}': {msg}")
+
+
+def switch_branch(repo_path: Path, branch_name: str) -> None:
+    """Switch to an existing local branch."""
+    result = run_command(["git", "switch", branch_name], cwd=repo_path)
+    if result.exit_code != 0:
+        msg = get_git_error_message(result)
+        raise PlanError(f"Failed to switch to branch '{branch_name}': {msg}")
+
+
+def get_full_diff(repo_path: Path) -> str:
+    """Return the full working-tree diff (unstaged + untracked shown as new)."""
+    result = run_command(["git", "diff", "HEAD"], cwd=repo_path)
+    if result.exit_code != 0:
+        return ""
+    return result.stdout
+
+
 def create_isolated_workspace(
     repo_path: Path,
     workspace_path: Path,
