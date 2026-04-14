@@ -47,6 +47,7 @@ Run a plan:
 
 ```bash
 python3 kctl.py run examples/sample-plan.yaml
+python3 kctl.py run examples/sample-plan.yaml --provider claude
 ```
 
 Opt in to external artifact storage for a single run:
@@ -62,12 +63,14 @@ Run the same plan across multiple repositories under a root:
 ```bash
 python3 kctl.py batch examples/sample-plan.yaml --root /Users/sasa/Projects
 python3 kctl.py batch examples/sample-plan.yaml --root /Users/sasa/Projects --output-mode grouped
+python3 kctl.py batch examples/sample-plan.yaml --root /Users/sasa/Projects --provider claude
 ```
 
 Run multiple plans for one repository with isolated worktrees:
 
 ```bash
 python3 kctl.py plans run-many plans/traffic-simulator --concurrency 3
+python3 kctl.py plans run-many plans/traffic-simulator --concurrency 3 --provider claude
 python3 kctl.py plans status plans/traffic-simulator
 ```
 

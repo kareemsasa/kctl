@@ -61,6 +61,12 @@ def add_run_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Run scope and test review passes after successful steps that leave new changes.",
     )
+    parser.add_argument(
+        "--provider",
+        choices=("codex", "claude"),
+        dest="provider_override",
+        help="Override the agent provider for this run.",
+    )
 
 
 def discover_git_repos(root_path: Path) -> list[Path]:
@@ -112,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Show the raw Codex stream instead of the filtered terminal view.",
+    )
+    run_many_parser.add_argument(
+        "--provider",
+        choices=("codex", "claude"),
+        dest="provider_override",
+        help="Override the agent provider for this run.",
     )
 
     status_parser = plans_subparsers.add_parser("status", help="Show the latest status for a multi-plan run.")
@@ -309,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
                 commit_message=args.commit_message,
                 allow_dirty_start=args.allow_dirty_start,
                 review_enabled=args.review,
+                provider_override=args.provider_override,
             )
         except PlanError as exc:
             print(style_status_text(f"Error: {exc}", "error", stream=sys.stderr, bold=True), file=sys.stderr)
@@ -349,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
                     repo_override=str(repo_path),
                     output_sink=repo_sink,
                     interactive=False,
+                    provider_override=args.provider_override,
                 )
                 if args.output_mode == "grouped":
                     console_sink.write_line(
@@ -391,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                     Path(args.plans_dir).expanduser().resolve(),
                     concurrency=args.concurrency,
                     verbose=args.verbose,
+                    provider_override=args.provider_override,
                 )
             if args.plans_command == "status":
                 return print_run_status(args.target)
