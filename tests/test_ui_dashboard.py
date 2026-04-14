@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,11 +16,114 @@ from kctl_pkg.ui_dashboard import (
     list_plans_in_directory,
     summarize_preflight_for_dashboard,
 )
+from kctl_pkg.ui_dashboard_http import handle_api_get, handle_page_get, resolve_action_redirect
 from kctl_pkg.ui_index import default_db_path, index_repository_state
 from tests.test_ui_index import init_git_repo, write_sample_plan_run
 
 
 class UIDashboardTests(unittest.TestCase):
+    def test_handle_api_get_preflight_passes_provider_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+
+            calls: list[tuple[str, str, list[str] | None, str | None]] = []
+
+            def fake_summarize(
+                target_repo_value: str,
+                plans_dir_value: str,
+                selected_plan_names: list[str] | None = None,
+                provider_override: str | None = None,
+            ) -> dict[str, object]:
+                calls.append((target_repo_value, plans_dir_value, selected_plan_names, provider_override))
+                return {"status": "pass"}
+
+            response = handle_api_get(
+                app,
+                "/api/preflight",
+                {
+                    "target_repo": [str(repo_path)],
+                    "plans_dir": [str(repo_path / ".kctl" / "plans")],
+                    "selected_plans": ["001-a.yaml"],
+                    "provider_override": ["claude"],
+                },
+                summarize_preflight=fake_summarize,
+            )
+
+            self.assertIsNotNone(response)
+            assert response is not None
+            status_code, content_type, body = response
+            self.assertEqual(status_code, HTTPStatus.OK)
+            self.assertEqual(content_type, "application/json; charset=utf-8")
+            self.assertEqual(json.loads(body.decode("utf-8")), {"status": "pass"})
+            self.assertEqual(
+                calls,
+                [(str(repo_path), str(repo_path / ".kctl" / "plans"), ["001-a.yaml"], "claude")],
+            )
+
+    def test_handle_api_get_run_output_reads_live_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+            with patch.object(app, "load_live_run_data", return_value={"run_id": "run-1"}), patch.object(
+                app,
+                "read_live_output",
+                return_value=("stream text", "/tmp/run-1/stream.log", "running"),
+            ):
+                response = handle_api_get(
+                    app,
+                    "/api/run-output",
+                    {"run_id": ["run-1"]},
+                    summarize_preflight=lambda *args, **kwargs: {},
+                )
+
+            self.assertIsNotNone(response)
+            assert response is not None
+            _, _, body = response
+            self.assertEqual(
+                json.loads(body.decode("utf-8")),
+                {
+                    "run_id": "run-1",
+                    "status": "running",
+                    "output_path": "/tmp/run-1/stream.log",
+                    "output": "stream text",
+                },
+            )
+
+    def test_handle_page_get_rejects_unknown_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+
+            from kctl_pkg.types import PlanError
+
+            with self.assertRaises(PlanError) as ctx:
+                handle_page_get(app, "/missing", {})
+
+            self.assertIn("Not Found", str(ctx.exception))
+
+    def test_resolve_action_redirect_keeps_project_detail_message_when_present(self) -> None:
+        action_result = SimpleNamespace(
+            redirect_to="/projects/detail?path=%2Ftmp%2Frepo&message=existing",
+            message="ignored",
+            run_id=None,
+        )
+
+        location = resolve_action_redirect(action_result, "new message")
+
+        self.assertEqual(location, "/projects/detail?path=%2Ftmp%2Frepo&message=existing")
+
+    def test_resolve_action_redirect_builds_run_root_location(self) -> None:
+        action_result = SimpleNamespace(redirect_to="/", message="Started.", run_id="run-123")
+
+        location = resolve_action_redirect(action_result, "Started.")
+
+        self.assertIn("run_id=run-123", location)
+        self.assertIn("message=Started.", location)
+
     def test_check_repo_path_reports_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"

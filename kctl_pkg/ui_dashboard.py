@@ -77,6 +77,7 @@ from .ui_dashboard_runs import (
     render_dashboard_page as render_dashboard,
     render_run_page as render_run,
 )
+from .ui_dashboard_http import handle_api_get, handle_page_get, resolve_action_redirect
 from .ui_dashboard_state import (
     build_plan_cards_from_live_data as build_live_plan_cards,
     build_run_detail_from_live_data as build_live_run_detail,
@@ -932,169 +933,35 @@ def serve_dashboard(
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path == "/api/check-repo":
-                params = parse_qs(parsed.query)
-                path_value = params.get("path", [""])[0]
-                status, message = check_repo_path(path_value)
-                body = json.dumps({"status": status, "message": message}).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path == "/api/resolve-path":
-                params = parse_qs(parsed.query)
-                path_value = params.get("path", [""])[0].strip()
-                resolved = str(Path(path_value).expanduser().resolve()) if path_value else ""
-                body = json.dumps({"resolved": resolved}).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path == "/api/list-plans":
-                params = parse_qs(parsed.query)
-                path_value = params.get("path", [""])[0]
-                status, message, plans = list_plans_in_directory(path_value)
-                body = json.dumps({"status": status, "message": message, "plans": plans}).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path == "/api/preflight":
-                params = parse_qs(parsed.query)
-                target_repo_value = params.get("target_repo", [""])[0]
-                plans_dir_value = params.get("plans_dir", [""])[0]
-                selected_plan_names = [name.strip() for name in params.get("selected_plans", []) if name.strip()]
-                body = json.dumps(
-                    summarize_preflight_for_dashboard(
-                        target_repo_value,
-                        plans_dir_value,
-                        selected_plan_names=selected_plan_names or None,
-                        provider_override=params.get("provider_override", [""])[0].strip() or None,
-                    )
-                ).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path == "/api/run-output":
-                params = parse_qs(parsed.query)
-                run_id = params.get("run_id", [""])[0]
-                run_data = app.load_live_run_data(run_id) if run_id else None
-                output, output_path, status = app.read_live_output(run_data)
-                body = json.dumps(
-                    {
-                        "run_id": run_id,
-                        "status": status or "unknown",
-                        "output_path": output_path,
-                        "output": output or "",
-                    }
-                ).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path == "/api/project-git-status":
-                params = parse_qs(parsed.query)
-                path_value = params.get("path", [""])[0].strip()
-                if path_value:
-                    summary = get_project_git_summary(Path(path_value).expanduser().resolve())
-                else:
-                    summary = {"path": "", "available": False, "error": "no path provided"}
-                body = json.dumps(summary).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path == "/api/project-remote-check":
-                params = parse_qs(parsed.query)
-                path_value = params.get("path", [""])[0].strip()
-                remote_name = params.get("remote", ["origin"])[0].strip()
-                if path_value:
-                    repo = Path(path_value).expanduser().resolve()
-                    result = check_remote_connectivity(repo, remote_name)
-                else:
-                    result = {"ok": False, "remote": remote_name, "message": "no path provided"}
-                body = json.dumps(result).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path == "/api/project-git-diff":
-                params = parse_qs(parsed.query)
-                path_value = params.get("path", [""])[0].strip()
-                if path_value:
-                    repo = Path(path_value).expanduser().resolve()
-                    diff_text = get_full_diff(repo)
-                else:
-                    diff_text = ""
-                body = json.dumps({"diff": diff_text}).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path == "/api/session-output":
-                params = parse_qs(parsed.query)
-                session_id = params.get("id", [""])[0].strip()
-                if session_id:
-                    meta = app.get_session(session_id)
-                    output = app.read_session_output(session_id)
-                    status = str(meta.get("status") or "unknown") if meta else "unknown"
-                    messages = list(meta.get("messages") or []) if meta else []
-                    token_warning = str(meta.get("token_warning") or "") if meta else ""
-                else:
-                    output = ""
-                    status = "unknown"
-                    messages = []
-                    token_warning = ""
-                body = json.dumps({
-                    "id": session_id,
-                    "status": status,
-                    "output": output,
-                    "messages": messages,
-                    "token_warning": token_warning,
-                }).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path not in {
-                "/",
-                "/actions",
-                "/projects",
-                "/projects/detail",
-                "/runs/detail",
-                "/sessions",
-                "/sessions/detail",
-            }:
-                self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
-                return
             params = parse_qs(parsed.query)
             try:
-                body = app.render_route(parsed.path, params)
+                api_response = handle_api_get(
+                    app,
+                    parsed.path,
+                    params,
+                    summarize_preflight=summarize_preflight_for_dashboard,
+                )
+                if api_response is not None:
+                    status_code, content_type, body = api_response
+                    self.send_response(status_code)
+                    self.send_header("Content-Type", content_type)
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                status_code, content_type, body = handle_page_get(app, parsed.path, params)
             except PlanError as exc:
+                if str(exc) == "Not Found":
+                    self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
+                    return
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
-                self.wfile.write(
-                    (
-                        "<!doctype html><html><body><h1>kctl</h1>"
-                        f"<p>{_escape(exc)}</p></body></html>"
-                    ).encode("utf-8")
-                )
+                self.wfile.write((f"<!doctype html><html><body><h1>kctl</h1><p>{_escape(exc)}</p></body></html>").encode("utf-8"))
                 return
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", content_type)
             self.end_headers()
-            self.wfile.write(body.encode("utf-8"))
+            self.wfile.write(body)
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
@@ -1125,27 +992,10 @@ def serve_dashboard(
             try:
                 action_result = app.handle_action(parsed.path, form_data)
                 message = action_result.message
-                redirect_to = action_result.redirect_to
-                run_id = action_result.run_id
             except (PlanError, ValueError) as exc:
                 message = str(exc)
-                redirect_to = "/actions"
-                run_id = None
-            if redirect_to.startswith("/projects/detail?"):
-                if "message=" not in redirect_to:
-                    location = redirect_to + "&" + urlencode({"message": message})
-                else:
-                    location = redirect_to
-            elif redirect_to.startswith("/sessions/detail"):
-                location = redirect_to if "?" in redirect_to else redirect_to + f"?message={message}"
-            elif redirect_to == "/sessions":
-                location = _page_link("/sessions", message=message)
-            elif redirect_to == "/projects":
-                location = _page_link("/projects", message=message)
-            elif redirect_to == "/actions":
-                location = _page_link("/actions", message=message)
-            else:
-                location = _link({}, run_id=run_id, message=message)
+                action_result = DashboardActionResult(redirect_to="/actions", message=message)
+            location = resolve_action_redirect(action_result, message)
             self.send_response(HTTPStatus.SEE_OTHER)
             self.send_header("Location", location)
             self.end_headers()
