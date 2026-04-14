@@ -11,6 +11,7 @@
 - Session runtime and session page rendering now live in `kctl_pkg/ui_dashboard_sessions.py`.
 - GET route dispatch now goes through `DashboardApp.render_route(...)`.
 - POST action dispatch now goes through `DashboardApp.handle_action(...)`.
+- `kctl_pkg/ui_service.py` now forwards `PATH`, present `KCTL_*` variables, and common provider credential env vars into the generated systemd user service so dashboard-launched runs keep the same runtime context as the installing shell.
 - Tests intentionally patch some seams through `kctl_pkg.ui_dashboard`, so preserve those patch points when extracting code.
 
 ## Practical Guidance

@@ -10,9 +10,40 @@ from .paths import project_root
 from .types import PlanError
 
 
+_FORWARDED_SERVICE_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "SSH_AUTH_SOCK",
+)
+
+
 def _systemd_environment_line(name: str, value: str) -> str:
     escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'Environment="{name}={escaped_value}"'
+
+
+def _service_environment_lines() -> list[str]:
+    path_value = os.environ.get("PATH", "")
+    npm_global_bin = Path("~/.npm-global/bin").expanduser().resolve()
+    if npm_global_bin.is_dir():
+        npm_global_str = str(npm_global_bin)
+        existing = path_value.split(":") if path_value else []
+        if npm_global_str not in existing:
+            path_value = npm_global_str + (":" + path_value if path_value else "")
+
+    env_lines = [_systemd_environment_line("PATH", path_value)]
+
+    forwarded_names = set(_FORWARDED_SERVICE_ENV_VARS)
+    forwarded_names.update(name for name in os.environ if name.startswith("KCTL_"))
+    for name in sorted(forwarded_names):
+        value = os.environ.get(name, "")
+        if not value:
+            continue
+        env_lines.append(_systemd_environment_line(name, value))
+    return env_lines
 
 
 def default_service_name() -> str:
@@ -54,20 +85,7 @@ def render_dashboard_service(
         command.extend(["--announce-url", announce_url])
     quoted_command = shlex.join(command)
     working_directory = project_root().resolve()
-    path_value = os.environ.get("PATH", "")
-    npm_global_bin = Path("~/.npm-global/bin").expanduser().resolve()
-    if npm_global_bin.is_dir():
-        npm_global_str = str(npm_global_bin)
-        existing = path_value.split(":") if path_value else []
-        if npm_global_str not in existing:
-            path_value = npm_global_str + (":" + path_value if path_value else "")
-    env_lines = [_systemd_environment_line("PATH", path_value)]
-    ssh_auth_sock = os.environ.get("SSH_AUTH_SOCK", "")
-    if ssh_auth_sock:
-        env_lines.append(_systemd_environment_line("SSH_AUTH_SOCK", ssh_auth_sock))
-    artifact_root = os.environ.get("KCTL_ARTIFACT_ROOT", "")
-    if artifact_root:
-        env_lines.append(_systemd_environment_line("KCTL_ARTIFACT_ROOT", artifact_root))
+    env_lines = _service_environment_lines()
     return "\n".join(
         [
             "[Unit]",

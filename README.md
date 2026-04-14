@@ -97,6 +97,8 @@ python3 kctl.py ui service print /path/to/repo --announce-url http://kctl-node.t
 python3 kctl.py ui service install /path/to/repo --announce-url http://kctl-node.tailnet.ts.net:8421
 ```
 
+The generated systemd user service preserves `PATH`, any present `KCTL_*` variables, and common provider credentials such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` so dashboard-launched runs use the same runtime configuration as the shell that installed the service.
+
 `kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
 
 When `KCTL_ARTIFACT_STORAGE=external` is set, `kctl` stores run metadata outside the target repository. `KCTL_HOME` controls the external root and defaults to `~/.kctl`. When `KCTL_ARTIFACT_ROOT` is set and writable, `kctl` resolves storage as `custom_root` and uses the same external artifact layout under that configured root. If the configured external root cannot be created or written, `kctl` falls back to repo-local storage instead of failing path resolution up front.

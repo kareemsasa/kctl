@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import tempfile
 import unittest
@@ -35,6 +36,36 @@ class UIServiceTests(unittest.TestCase):
             self.assertIn("--tailscale", unit_text)
             self.assertIn("--announce-url", unit_text)
             self.assertIn("erebus.tail172bcd.ts.net:8421", unit_text)
+
+    def test_render_dashboard_service_forwards_provider_and_kctl_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "openai-test-key",
+                    "ANTHROPIC_API_KEY": "anthropic-test-key",
+                    "KCTL_ARTIFACT_STORAGE": "external",
+                    "KCTL_HOME": "/tmp/kctl-home",
+                },
+                clear=False,
+            ):
+                unit_text = render_dashboard_service(
+                    repo_path=repo_path,
+                    host="127.0.0.1",
+                    port=8421,
+                    tailscale=False,
+                    announce_url=None,
+                    db_path=None,
+                    python_executable="/usr/bin/python3",
+                )
+
+            self.assertIn('Environment="OPENAI_API_KEY=openai-test-key"', unit_text)
+            self.assertIn('Environment="ANTHROPIC_API_KEY=anthropic-test-key"', unit_text)
+            self.assertIn('Environment="KCTL_ARTIFACT_STORAGE=external"', unit_text)
+            self.assertIn('Environment="KCTL_HOME=/tmp/kctl-home"', unit_text)
 
     def test_cli_ui_service_print_outputs_unit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
