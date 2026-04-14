@@ -37,11 +37,17 @@ def _adapt_recent_runs_with_live_status(app: object, runs: list[object]) -> list
         if live_run_data is not None and str(live_run_data.get("status") or "") == "running" and bool(
             live_run_data.get("stop_requested")
         ):
+            active_pids = live_run_data.get("active_pids")
+            effective_status = (
+                "stopped"
+                if not (isinstance(active_pids, list) and any(str(value).strip() for value in active_pids))
+                else "stopping"
+            )
             if hasattr(run, "__dataclass_fields__"):
-                adapted_runs.append(replace(run, status="stopping"))
+                adapted_runs.append(replace(run, status=effective_status))
             else:
                 run_data = dict(vars(run))
-                run_data["status"] = "stopping"
+                run_data["status"] = effective_status
                 adapted_runs.append(SimpleNamespace(**run_data))
             continue
         adapted_runs.append(run)

@@ -10,7 +10,38 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .types import PlanError
-from .ui_dashboard_support import _detect_token_warning, _escape, _status_class, available_providers
+from .ui_dashboard_support import (
+    _detect_token_warning,
+    _escape,
+    _page_link,
+    _render_collapsible_section,
+    _status_class,
+    available_providers,
+)
+
+
+def _tail_lines_text(text: str | None, line_count: int = 50) -> str:
+    if not text:
+        return ""
+    return "\n".join(text.splitlines()[-line_count:])
+
+
+def _session_detail_link(session_id: str) -> str:
+    return _page_link(f"/sessions/{session_id}")
+
+
+def _format_session_ts(value: object) -> str:
+    text = str(value or "")
+    if text and "T" in text:
+        return text.replace("T", " ").split(".")[0] + " UTC"
+    return text
+
+
+def _session_status_counts(sessions: list[dict[str, object]]) -> tuple[int, int, int]:
+    running = sum(1 for s in sessions if str(s.get("status") or "") == "running")
+    completed = sum(1 for s in sessions if str(s.get("status") or "") == "completed")
+    failed = sum(1 for s in sessions if str(s.get("status") or "") == "failed")
+    return running, completed, failed
 
 
 def sessions_dir(repo_path: Path) -> Path:
@@ -221,6 +252,7 @@ def render_sessions_page(app: object, *, action_message: str | None = None, pref
     sessions = list_sessions(app.repo_path)
 
     notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
+    running_count, completed_count, failed_count = _session_status_counts(sessions)
 
     project_options = "".join(
         f"<option value='{_escape(p)}'{' selected' if prefill_project and str(Path(prefill_project).expanduser().resolve()) == p else ''}>"
@@ -257,40 +289,55 @@ def render_sessions_page(app: object, *, action_message: str | None = None, pref
             prompt_preview = str(s.get("prompt") or "")
             if len(prompt_preview) > 120:
                 prompt_preview = prompt_preview[:120] + "..."
-            started = str(s.get("started_at") or "")
-            if started and "T" in started:
-                started = started.replace("T", " ").split(".")[0] + " UTC"
+            started = _format_session_ts(s.get("started_at"))
             badge_cls = f"session-badge-{status}" if status in {"running", "completed", "failed"} else "session-badge-provider"
-            detail_url = f"/sessions/detail?id={_escape(sid)}"
+            detail_url = _session_detail_link(sid)
+            turn_count = len(s.get("messages") or []) if isinstance(s.get("messages"), list) else 0
             session_list_html += (
                 f"<a class='session-item {_status_class(status)}' href='{detail_url}'>"
-                f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap'>"
                 f"<strong>{_escape(project_name)}</strong>"
                 f"<div style='display:flex;gap:6px'>"
                 f"<span class='session-badge session-badge-provider'>{_escape(provider_name)}</span>"
                 f"<span class='session-badge {_escape(badge_cls)}'>{_escape(status)}</span>"
                 f"</div></div>"
                 f"<div class='session-prompt-preview'>{_escape(prompt_preview)}</div>"
-                f"<div class='session-meta'><span>{_escape(started)}</span></div>"
+                f"<div class='session-meta' style='display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap'>"
+                f"<span>{_escape(started)}</span>"
+                f"<span>{_escape(turn_count)} turn{'s' if turn_count != 1 else ''}</span>"
+                "</div>"
                 f"</a>"
             )
     else:
         session_list_html = "<div class='empty'>No sessions yet. Launch one above.</div>"
 
+    overview_html = (
+        "<div class='overview-bar'>"
+        f"<span><strong>{_escape(len(sessions))}</strong> sessions</span>"
+        f"<span><strong>{_escape(running_count)}</strong> running</span>"
+        f"<span><strong>{_escape(completed_count)}</strong> completed</span>"
+        f"<span class='{_status_class('failure') if failed_count else ''}'><strong>{_escape(failed_count)}</strong> failed</span>"
+        "</div>"
+    )
+    launch_section = _render_collapsible_section(
+        "Launch Session",
+        (
+            "<div class='help'>Run an ad-hoc prompt against a project using Claude or Codex. No YAML plan required.</div>"
+            "<form method='post' action='/actions/start-session'>"
+            f"{project_select}"
+            f"{provider_select}"
+            "<label for='session_prompt'><strong>Prompt</strong></label>"
+            "<textarea id='session_prompt' name='prompt' rows='6' placeholder='Describe what you want the agent to do...' required></textarea>"
+            "<button type='submit' class='btn-primary'>Launch Session</button>"
+            "</form>"
+        ),
+        open_by_default=not sessions,
+    )
     body = (
+        f"{overview_html}"
         "<main class='single-column'><div class='column'>"
         f"{notice_html}"
-        "<section class='panel'>"
-        "<h2>Launch Agent Session</h2>"
-        "<div class='help'>Run an ad-hoc prompt against a project using Claude or Codex. No YAML plan required.</div>"
-        "<form method='post' action='/actions/start-session'>"
-        f"{project_select}"
-        f"{provider_select}"
-        "<label for='session_prompt'><strong>Prompt</strong></label>"
-        "<textarea id='session_prompt' name='prompt' rows='6' placeholder='Describe what you want the agent to do...' required></textarea>"
-        "<button type='submit' class='btn-primary'>Launch Session</button>"
-        "</form>"
-        "</section>"
+        f"{launch_section}"
         "<section class='panel'>"
         "<h2>Recent Sessions</h2>"
         f"{session_list_html}"
@@ -325,11 +372,10 @@ def render_session_detail_page(app: object, session_id: str) -> str:
     token_warning = meta.get("token_warning")
     output = read_session_output(app.repo_path, session_id)
 
-    started_display = started.replace("T", " ").split(".")[0] + " UTC" if started and "T" in started else started
+    started_display = _format_session_ts(started)
     ended_display = ""
     if ended:
-        ended_str = str(ended)
-        ended_display = ended_str.replace("T", " ").split(".")[0] + " UTC" if "T" in ended_str else ended_str
+        ended_display = _format_session_ts(ended)
 
     badge_cls = f"session-badge-{status}" if status in {"running", "completed", "failed"} else "session-badge-provider"
     message_count = len(messages) if isinstance(messages, list) else 0
@@ -404,7 +450,21 @@ def render_session_detail_page(app: object, session_id: str) -> str:
             "</section>"
         )
 
-    output_html = f"<pre class='session-output' id='session_output'>{_escape(output) if output else '(waiting for output...)'}</pre>"
+    tail_output = _tail_lines_text(output)
+    output_html = (
+        "<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
+        "<h2>Output</h2>"
+        "<button type='button' class='mini-button' data-copy-target='#session_output' data-copy-last-lines='50' onclick='return window.kctlCopyButtonClick(this)'>Copy last 50 lines</button>"
+        "</div>"
+        "<div class='help'>Mobile fallback: tap the tail box below to select text with the browser copy UI.</div>"
+        f"<textarea id='session_output_tail' class='code-block' readonly onclick='this.focus();this.select();' style='min-height:120px'>{_escape(tail_output)}</textarea>"
+        f"<pre class='session-output' id='session_output'>{_escape(output) if output else '(waiting for output...)'}</pre>"
+    )
+    conversation_section = _render_collapsible_section(
+        "Conversation",
+        conversation_html,
+        open_by_default=status != "running",
+    )
 
     body = (
         "<main class='single-column'><div class='column'>"
@@ -418,13 +478,9 @@ def render_session_detail_page(app: object, session_id: str) -> str:
         f"{token_warning_html}"
         "</section>"
         "<section class='panel'>"
-        "<h2>Conversation</h2>"
-        f"{conversation_html}"
-        "</section>"
-        "<section class='panel'>"
-        "<h2>Output</h2>"
         f"{output_html}"
         "</section>"
+        f"{conversation_section}"
         f"{reply_html}"
         "</div></main>"
     )
@@ -475,6 +531,11 @@ def render_session_detail_page(app: object, session_id: str) -> str:
         "    if (!response.ok) return;\n"
         "    const data = await response.json();\n"
         "    outputNode.textContent = data.output || '(waiting for output...)';\n"
+        "    const tailNode = document.getElementById('session_output_tail');\n"
+        "    if (tailNode) {\n"
+        "      const lines = (data.output || '').split(/\\r?\\n/);\n"
+        "      tailNode.value = lines.slice(-50).join('\\n');\n"
+        "    }\n"
         "    outputNode.scrollTop = outputNode.scrollHeight;\n"
         "    if (data.messages) renderMessages(data.messages);\n"
         "    if (data.status !== 'running') {\n"

@@ -767,6 +767,11 @@ class DashboardApp:
         if path == "/sessions/detail":
             session_id = params.get("id", [""])[0]
             return self.render_session_detail_page(session_id)
+        if path.startswith("/sessions/"):
+            session_id = path.removeprefix("/sessions/").strip()
+            if not session_id:
+                raise PlanError("Session id is required.")
+            return self.render_session_detail_page(session_id)
         if path == "/sessions":
             prefill_project = params.get("project", [None])[0]
             return self.render_sessions_page(action_message=action_message, prefill_project=prefill_project)

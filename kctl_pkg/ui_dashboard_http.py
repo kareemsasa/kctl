@@ -120,7 +120,7 @@ def handle_page_get(app: object, path: str, params: dict[str, list[str]]) -> tup
         "/runs/detail",
         "/sessions",
         "/sessions/detail",
-    } and not path.startswith("/runs/"):
+    } and not path.startswith("/runs/") and not path.startswith("/sessions/"):
         raise PlanError("Not Found")
     try:
         body = app.render_route(path, params)

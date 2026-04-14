@@ -30,6 +30,10 @@ from .ui_read import (
 
 def _effective_live_run_status(run_data: dict[str, object]) -> str:
     status = str(run_data.get("status") or "unknown")
+    active_pids = run_data.get("active_pids")
+    has_active_pids = isinstance(active_pids, list) and any(str(value).strip() for value in active_pids)
+    if status == "running" and bool(run_data.get("stop_requested")) and not has_active_pids:
+        return "stopped"
     if status == "running" and bool(run_data.get("stop_requested")):
         return "stopping"
     return status
@@ -37,6 +41,10 @@ def _effective_live_run_status(run_data: dict[str, object]) -> str:
 
 def _effective_live_plan_status(plan_state: dict[str, object], run_data: dict[str, object]) -> str:
     status = str(plan_state.get("status") or "unknown")
+    if status == "blocked" and str(plan_state.get("failure_reason") or "") == "run_stopped":
+        status = "stopped"
+    if status == "running" and _effective_live_run_status(run_data) == "stopped":
+        return "stopped"
     if status == "running" and _effective_live_run_status(run_data) == "stopping":
         return "stopping"
     return status
@@ -44,6 +52,8 @@ def _effective_live_plan_status(plan_state: dict[str, object], run_data: dict[st
 
 def _effective_live_step_status(step_status: object, run_data: dict[str, object]) -> str:
     status = str(step_status or "unknown")
+    if status == "running" and _effective_live_run_status(run_data) == "stopped":
+        return "stopped"
     if status == "running" and _effective_live_run_status(run_data) == "stopping":
         return "stopping"
     return status

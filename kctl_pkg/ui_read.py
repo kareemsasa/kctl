@@ -14,6 +14,12 @@ from .ui_store import UIStateStore
 STALE_RUNNING_THRESHOLD_SECONDS = 1800
 
 
+def _effective_plan_status(status: str | None, failure_reason: str | None) -> str:
+    if status == "blocked" and failure_reason == "run_stopped":
+        return "stopped"
+    return str(status or "unknown")
+
+
 @dataclass(frozen=True)
 class RepositorySummary:
     id: str
@@ -334,7 +340,7 @@ def list_plan_executions(repo_id: str | Path, run_id: str, db_path: Path | None 
             objective=row["objective"] if "objective" in row.keys() else "",
             phase_name=row["phase_name"] if "phase_name" in row.keys() else None,
             group_name=row["group_name"] if "group_name" in row.keys() else None,
-            status=row["status"],
+            status=_effective_plan_status(row["status"], row["failure_reason"]),
             current_step_key=row["current_step_key"],
             verify_status=row["verify_status"],
             started_at=row["started_at"],
@@ -368,7 +374,7 @@ def list_repository_plan_executions(repo_id: str | Path, db_path: Path | None = 
             objective=row["objective"] if "objective" in row.keys() else "",
             phase_name=row["phase_name"] if "phase_name" in row.keys() else None,
             group_name=row["group_name"] if "group_name" in row.keys() else None,
-            status=row["status"],
+            status=_effective_plan_status(row["status"], row["failure_reason"]),
             current_step_key=row["current_step_key"],
             verify_status=row["verify_status"],
             started_at=row["started_at"],
@@ -403,7 +409,7 @@ def get_plan_execution(plan_execution_id: str, repo_id: str | Path, db_path: Pat
         objective=row["objective"],
         phase_name=row["phase_name"],
         group_name=row["group_name"],
-        status=row["status"],
+        status=_effective_plan_status(row["status"], row["failure_reason"]),
         current_step_key=row["current_step_key"],
         verify_status=row["verify_status"],
         started_at=row["started_at"],

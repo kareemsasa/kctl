@@ -450,7 +450,7 @@ def run_many_plans(
             if step_result["verify"] is not None:
                 verify_result = "passed" if step_result["verify"]["exit_code"] == 0 else "failed"
                 break
-        mapped_status = "passed" if final_status == "success" else "blocked" if final_status == "stopped" else "failed"
+        mapped_status = "passed" if final_status == "success" else "stopped" if final_status == "stopped" else "failed"
         last_failure_reason = next(
             (
                 step_result.get("failure_reason")
@@ -469,7 +469,7 @@ def run_many_plans(
                 None
                 if mapped_status == "passed"
                 else "run_stopped"
-                if mapped_status == "blocked"
+                if mapped_status == "stopped"
                 else last_failure_reason or "run_failed"
             ),
         )
@@ -489,7 +489,7 @@ def run_many_plans(
                 output_sink.write_line(style_status_text(f"  [{plan_id}] failed: {exc}", "failure"))
                 continue
             plan_status = plan_state_by_id[plan_id_result]["status"]
-            if plan_status == "blocked":
+            if plan_status == "stopped":
                 stopped_runs += 1
             elif exit_code != 0:
                 failures += 1

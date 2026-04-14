@@ -1368,7 +1368,7 @@ class MultiPlanTests(unittest.TestCase):
             self.assertTrue(run_logs)
             run_state = json.loads(run_logs[-1].read_text())
             self.assertEqual(run_state["status"], "stopped")
-            self.assertEqual(run_state["plans"][0]["status"], "blocked")
+            self.assertEqual(run_state["plans"][0]["status"], "stopped")
             self.assertEqual(run_state["plans"][0]["failure_reason"], "run_stopped")
 
     def test_run_many_plans_persists_active_pids_while_process_callbacks_fire(self) -> None:

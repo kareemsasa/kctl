@@ -463,6 +463,8 @@ def _failure_reason_label(reason: str | None) -> str | None:
 
 
 def _display_status_label(status: str | None, failure_reason: str | None = None) -> str:
+    # Keep older indexed runs with blocked+run_stopped readable after the
+    # write path moved to a first-class stopped status.
     if status == "blocked" and failure_reason == "run_stopped":
         return "stopped"
     return str(status or "unknown")

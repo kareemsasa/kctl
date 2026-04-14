@@ -92,6 +92,14 @@ def build_step_metadata(step_result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def derive_plan_execution_status(plan_state: dict[str, Any], plan_run_data: dict[str, Any]) -> str:
+    status = str(plan_state.get("status") or plan_run_data.get("status") or "unknown")
+    failure_reason = str(plan_state.get("failure_reason") or "")
+    if status == "blocked" and failure_reason == "run_stopped":
+        return "stopped"
+    return status
+
+
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -172,7 +180,7 @@ def index_repository_state(repo_path: Path, db_path: Path | None = None) -> dict
                     id=plan_execution_id,
                     run_id=run_id,
                     plan_definition_id=plan_definition_id,
-                    status=str(plan_state.get("status") or plan_run_data.get("status") or "unknown"),
+                    status=derive_plan_execution_status(plan_state, plan_run_data),
                     current_step_key=plan_state.get("current_step"),
                     verify_status=str(plan_state.get("verify_result") or "not_run"),
                     started_at=str(plan_run_data.get("started_at") or now),
@@ -181,7 +189,8 @@ def index_repository_state(repo_path: Path, db_path: Path | None = None) -> dict
                     branch_name=plan_state.get("branch_name") or plan_run_data.get("branch_after"),
                     log_path=str(plan_log_path),
                     changed_files_count=sum(int(step.get("changed_files_count") or 0) for step in step_results),
-                    failure_reason=next(
+                    failure_reason=str(plan_state.get("failure_reason") or "")
+                    or next(
                         (step.get("failure_reason") for step in reversed(step_results) if step.get("failure_reason")),
                         None,
                     ),
