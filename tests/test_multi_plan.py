@@ -12,8 +12,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kctl_pkg.artifacts import resolve_storage, single_run_dir
+from kctl_pkg.git import create_isolated_workspace
 from kctl_pkg.multi import discover_plan_files, run_many_plans
-from kctl_pkg.plan import normalize_plan
+from kctl_pkg.plan import normalize_plan, validate_plan
 from kctl_pkg.runner import execute_plan_run
 from kctl_pkg.types import CommandResult, PlanError
 
@@ -33,6 +34,21 @@ def init_git_repo(repo_path: Path) -> None:
 
 
 class MultiPlanTests(unittest.TestCase):
+    def test_create_isolated_workspace_links_repo_local_venv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            workspace_path = Path(tmpdir) / "workspace"
+            init_git_repo(repo_path)
+            (repo_path / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+            (repo_path / ".venv" / "bin" / "python").write_text("#!/usr/bin/env python3\n")
+
+            created_path = create_isolated_workspace(repo_path, workspace_path, "kctl/test-workspace")
+
+            self.assertEqual(created_path, workspace_path)
+            self.assertTrue((workspace_path / ".venv").exists())
+            self.assertTrue((workspace_path / ".venv").is_symlink())
+            self.assertEqual((workspace_path / ".venv").resolve(), (repo_path / ".venv").resolve())
+
     def test_execute_plan_run_provider_override_applies_to_preflight_binaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -79,6 +95,94 @@ class MultiPlanTests(unittest.TestCase):
 
             self.assertIn("claude", run_data["preflight"]["required_binaries"])
             self.assertNotIn("codex", run_data["preflight"]["required_binaries"])
+
+    def test_execute_plan_run_can_start_from_named_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_path = Path(tmpdir) / "from-step.yaml"
+            plan_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: partial run
+                    steps:
+                      - id: inspect
+                        prompt: Inspect
+                      - id: implement
+                        prompt: Implement
+                      - id: verify
+                        type: verify
+                        commands:
+                          - printf ok
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            def fake_streaming_command(*args, **kwargs):
+                command = args[0]
+                return CommandResult(command=command, cwd=str(repo_path), exit_code=0, stdout="ok\n", stderr="")
+
+            with patch("kctl_pkg.runner.run_streaming_command", side_effect=fake_streaming_command):
+                run_data = execute_plan_run(
+                    plan_path=plan_path,
+                    verbose=False,
+                    approve_each_step=False,
+                    branch=None,
+                    commit=False,
+                    commit_message=None,
+                    allow_dirty_start=False,
+                    review_enabled=False,
+                    interactive=False,
+                    from_step="implement",
+                )
+
+            self.assertEqual([step["id"] for step in run_data["steps"]], ["implement", "verify"])
+            self.assertEqual(run_data["requested_from_step"], "implement")
+            self.assertIsNone(run_data["requested_only_step"])
+
+    def test_execute_plan_run_can_run_only_named_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_path = Path(tmpdir) / "only-step.yaml"
+            plan_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: single step
+                    steps:
+                      - id: inspect
+                        prompt: Inspect
+                      - id: implement
+                        prompt: Implement
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            def fake_streaming_command(*args, **kwargs):
+                command = args[0]
+                return CommandResult(command=command, cwd=str(repo_path), exit_code=0, stdout="ok\n", stderr="")
+
+            with patch("kctl_pkg.runner.run_streaming_command", side_effect=fake_streaming_command):
+                run_data = execute_plan_run(
+                    plan_path=plan_path,
+                    verbose=False,
+                    approve_each_step=False,
+                    branch=None,
+                    commit=False,
+                    commit_message=None,
+                    allow_dirty_start=False,
+                    review_enabled=False,
+                    interactive=False,
+                    only_step="implement",
+                )
+
+            self.assertEqual([step["id"] for step in run_data["steps"]], ["implement"])
+            self.assertEqual(run_data["requested_only_step"], "implement")
+            self.assertIsNone(run_data["requested_from_step"])
 
     def test_execute_plan_run_classifies_agent_quota_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -321,6 +425,25 @@ class MultiPlanTests(unittest.TestCase):
         self.assertEqual(normalized["steps"][0]["_kctl_mode"]["effective_mode"], "default")
         self.assertEqual(normalized["steps"][1]["_kctl_verify"]["effective_mode"], "legacy")
         self.assertEqual(normalized["steps"][1]["_kctl_verify"]["source"], "inferred")
+
+    def test_validate_plan_rejects_unsupported_review_output_schema(self) -> None:
+        plan = {
+            "repo": "/tmp/repo",
+            "objective": "x",
+            "steps": [
+                {
+                    "id": "review",
+                    "type": "review",
+                    "prompt": "Review",
+                    "output": {"schema": "review_v1"},
+                }
+            ],
+        }
+
+        with self.assertRaises(PlanError) as context:
+            validate_plan(plan)
+
+        self.assertIn("inspect_v1, plan_v1", str(context.exception))
 
     def test_execute_plan_run_explicit_read_only_mode_fails_on_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1065,6 +1188,189 @@ class MultiPlanTests(unittest.TestCase):
             stream_text = (run_logs[-1].parent / "stream.log").read_text()
             self.assertIn("Run:", stream_text)
             self.assertIn("Summary", stream_text)
+
+    def test_run_many_plans_can_reuse_existing_workspace_for_single_plan_partial_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            workspace_path = repo_path / ".kctl" / "worktrees" / "previous-run" / "001-plan"
+            workspace_path.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "worktree", "add", "-b", "kctl/previous/001-plan", str(workspace_path), "HEAD"], cwd=str(repo_path), check=True, capture_output=True)
+            (plans_dir / "001-plan.yaml").write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: plan 0
+                    steps:
+                      - id: inspect
+                        prompt: Inspect 0
+                      - id: verify
+                        type: verify
+                        commands:
+                          - printf ok
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            execute_calls: list[dict[str, object]] = []
+
+            def fake_execute_plan_run(**kwargs):
+                execute_calls.append(kwargs)
+                run_output_dir = kwargs["run_output_dir_override"]
+                run_output_dir.mkdir(parents=True, exist_ok=True)
+                return {
+                    "status": "success",
+                    "steps": [
+                        {
+                            "id": "verify",
+                            "status": "success",
+                            "verify": {"exit_code": 0},
+                            "changed_files_count": 0,
+                        }
+                    ],
+                    "log_path": str(run_output_dir / "run.json"),
+                }
+
+            env = {"KCTL_ARTIFACT_STORAGE": "in_repo"}
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("KCTL_ARTIFACT_ROOT", None)
+                with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=AssertionError("workspace should be reused")), patch(
+                    "kctl_pkg.multi.execute_plan_run", side_effect=fake_execute_plan_run
+                ):
+                    exit_code = run_many_plans(
+                        plans_dir,
+                        concurrency=1,
+                        verbose=False,
+                        selected_plan_names=["001-plan.yaml"],
+                        only_step="verify",
+                        reuse_workspace_path=workspace_path,
+                    )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(execute_calls), 1)
+            self.assertEqual(execute_calls[0]["repo_override"], str(workspace_path.resolve()))
+            self.assertEqual(execute_calls[0]["only_step"], "verify")
+
+    def test_run_many_plans_marks_run_stopped_when_plan_is_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            (plans_dir / "001-plan.yaml").write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: plan 0
+                    steps:
+                      - id: inspect
+                        prompt: Inspect 0
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            def fake_create_workspace(repo_root: Path, workspace_path: Path, branch_name: str) -> Path:
+                workspace_path.mkdir(parents=True, exist_ok=True)
+                return workspace_path
+
+            def fake_execute_plan_run(**kwargs):
+                run_output_dir = kwargs["run_output_dir_override"]
+                run_output_dir.mkdir(parents=True, exist_ok=True)
+                return {
+                    "status": "stopped",
+                    "steps": [
+                        {
+                            "id": "inspect",
+                            "status": "stopped",
+                            "verify": None,
+                            "changed_files_count": 0,
+                            "failure_reason": "run_stopped",
+                        }
+                    ],
+                    "log_path": str(run_output_dir / "run.json"),
+                }
+
+            env = {"KCTL_ARTIFACT_STORAGE": "in_repo"}
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("KCTL_ARTIFACT_ROOT", None)
+                with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=fake_create_workspace), patch(
+                    "kctl_pkg.multi.execute_plan_run", side_effect=fake_execute_plan_run
+                ):
+                    exit_code = run_many_plans(plans_dir, concurrency=1, verbose=False)
+
+            self.assertEqual(exit_code, 1)
+            run_logs = sorted((repo_path / ".kctl" / "runs").glob("*/run.json"))
+            self.assertTrue(run_logs)
+            run_state = json.loads(run_logs[-1].read_text())
+            self.assertEqual(run_state["status"], "stopped")
+            self.assertEqual(run_state["plans"][0]["status"], "blocked")
+            self.assertEqual(run_state["plans"][0]["failure_reason"], "run_stopped")
+
+    def test_run_many_plans_persists_active_pids_while_process_callbacks_fire(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            (plans_dir / "001-plan.yaml").write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: plan 0
+                    steps:
+                      - id: inspect
+                        prompt: Inspect 0
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            def fake_create_workspace(repo_root: Path, workspace_path: Path, branch_name: str) -> Path:
+                workspace_path.mkdir(parents=True, exist_ok=True)
+                return workspace_path
+
+            active_pid_snapshots: list[list[int]] = []
+
+            def fake_execute_plan_run(**kwargs):
+                process_started = kwargs["process_started"]
+                process_finished = kwargs["process_finished"]
+                run_output_dir = kwargs["run_output_dir_override"]
+                run_output_dir.mkdir(parents=True, exist_ok=True)
+                process_started(42424)
+                run_log = run_output_dir.parent / "run.json"
+                active_pid_snapshots.append(json.loads(run_log.read_text())["active_pids"])
+                process_finished(42424)
+                return {
+                    "status": "success",
+                    "steps": [
+                        {
+                            "id": "inspect",
+                            "status": "success",
+                            "verify": None,
+                            "changed_files_count": 0,
+                        }
+                    ],
+                    "log_path": str(run_output_dir / "run.json"),
+                }
+
+            env = {"KCTL_ARTIFACT_STORAGE": "in_repo"}
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("KCTL_ARTIFACT_ROOT", None)
+                with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=fake_create_workspace), patch(
+                    "kctl_pkg.multi.execute_plan_run", side_effect=fake_execute_plan_run
+                ):
+                    exit_code = run_many_plans(plans_dir, concurrency=1, verbose=False)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(active_pid_snapshots, [[42424]])
+            run_logs = sorted((repo_path / ".kctl" / "runs").glob("*/run.json"))
+            self.assertTrue(run_logs)
+            run_state = json.loads(run_logs[-1].read_text())
+            self.assertEqual(run_state["active_pids"], [])
 
     def test_run_many_plans_blocks_before_launch_when_preflight_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

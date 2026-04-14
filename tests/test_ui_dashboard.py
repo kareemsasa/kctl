@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import sqlite3
 import tempfile
 import unittest
@@ -16,12 +17,48 @@ from kctl_pkg.ui_dashboard import (
     list_plans_in_directory,
     summarize_preflight_for_dashboard,
 )
+from kctl_pkg.ui_dashboard_support import _render_collapsible_section, _render_selection_list, _run_detail_link
 from kctl_pkg.ui_dashboard_http import handle_api_get, handle_page_get, resolve_action_redirect
 from kctl_pkg.ui_index import default_db_path, index_repository_state
 from tests.test_ui_index import init_git_repo, write_sample_plan_run
 
 
 class UIDashboardTests(unittest.TestCase):
+    def test_render_collapsible_section_helper(self) -> None:
+        html = _render_collapsible_section(
+            "Launch Snapshot",
+            "<div>body</div>",
+            heading_tag="h3",
+            open_by_default=True,
+            details_id="snapshot",
+            style="margin-top:12px",
+        )
+
+        self.assertIn("<details class='panel actions-details' id='snapshot' style='margin-top:12px' open>", html)
+        self.assertIn("<summary><h3 class='inline-heading'>Launch Snapshot</h3></summary>", html)
+        self.assertIn("<div>body</div>", html)
+
+    def test_render_selection_list_helper(self) -> None:
+        html = _render_selection_list(
+            "selected_plans",
+            [("001-a.yaml", "001-a.yaml"), ("002-b.yaml", "002-b.yaml")],
+            heading="Plans found",
+            selected_values={"002-b.yaml"},
+            item_class="",
+        )
+
+        self.assertIn("<strong>Plans found</strong>", html)
+        self.assertIn("name='selected_plans'", html)
+        self.assertIn("value='001-a.yaml'", html)
+        self.assertIn("value='002-b.yaml' checked", html)
+
+    def test_run_detail_link_helper_builds_real_run_path(self) -> None:
+        self.assertEqual(_run_detail_link("run-123"), "/runs/run-123")
+        self.assertEqual(
+            _run_detail_link("run-123", plan_execution_id="run-123:001-plan"),
+            "/runs/run-123?plan_execution_id=run-123%3A001-plan",
+        )
+
     def test_handle_api_get_preflight_passes_provider_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -105,6 +142,73 @@ class UIDashboardTests(unittest.TestCase):
 
             self.assertIn("Not Found", str(ctx.exception))
 
+    def test_dashboard_recent_runs_is_limited_to_five_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+            fake_runs = [
+                SimpleNamespace(
+                    id=f"run-{index}",
+                    status="passed",
+                    started_at=f"2026-04-14T00:00:0{index}+00:00",
+                    concurrency=1,
+                )
+                for index in range(6)
+            ]
+            with patch("kctl_pkg.ui_dashboard_runs.list_runs", return_value=fake_runs), patch(
+                "kctl_pkg.ui_dashboard_runs.get_repository_overview",
+                return_value=SimpleNamespace(
+                    run_count=6,
+                    active_run_count=0,
+                    failed_run_count=0,
+                    running_plan_count=0,
+                    blocked_plan_count=0,
+                    stale_workspace_count=0,
+                ),
+            ), patch("kctl_pkg.ui_dashboard_runs.list_attention_items", return_value=[]), patch(
+                "kctl_pkg.ui_dashboard_runs.available_providers", return_value=[]
+            ):
+                html = app.render_page()
+
+            self.assertIn("run-0", html)
+            self.assertIn("run-4", html)
+            self.assertNotIn("run-5", html)
+
+    def test_dashboard_recent_runs_uses_live_stopping_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+            fake_runs = [
+                SimpleNamespace(
+                    id="run-1",
+                    status="running",
+                    started_at="2026-04-14T00:00:01+00:00",
+                    concurrency=1,
+                )
+            ]
+            with patch("kctl_pkg.ui_dashboard_runs.list_runs", return_value=fake_runs), patch(
+                "kctl_pkg.ui_dashboard_runs.get_repository_overview",
+                return_value=SimpleNamespace(
+                    run_count=1,
+                    active_run_count=1,
+                    failed_run_count=0,
+                    running_plan_count=1,
+                    blocked_plan_count=0,
+                    stale_workspace_count=0,
+                ),
+            ), patch("kctl_pkg.ui_dashboard_runs.list_attention_items", return_value=[]), patch(
+                "kctl_pkg.ui_dashboard_runs.available_providers", return_value=[]
+            ), patch.object(
+                app,
+                "load_live_run_data",
+                return_value={"run_id": "run-1", "status": "running", "stop_requested": True},
+            ):
+                html = app.render_page()
+
+            self.assertIn("stopping", html)
+
     def test_resolve_action_redirect_keeps_project_detail_message_when_present(self) -> None:
         action_result = SimpleNamespace(
             redirect_to="/projects/detail?path=%2Ftmp%2Frepo&message=existing",
@@ -121,7 +225,7 @@ class UIDashboardTests(unittest.TestCase):
 
         location = resolve_action_redirect(action_result, "Started.")
 
-        self.assertIn("run_id=run-123", location)
+        self.assertIn("/runs/run-123", location)
         self.assertIn("message=Started.", location)
 
     def test_check_repo_path_reports_state(self) -> None:
@@ -245,6 +349,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("kctl", html)
             self.assertIn("overview-bar", html)
             self.assertIn("Attention", html)
+            self.assertIn("<summary><h2 class='inline-heading'>Attention</h2></summary>", html)
             self.assertIn("Workspaces", html)
             self.assertIn("Plans", html)
             self.assertIn("Runs", html)
@@ -260,6 +365,8 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("lifecycle-released", html)
             self.assertIn('name="viewport"', html)
             self.assertIn("table-scroll", html)
+            self.assertIn("dashboard-primary-column", html)
+            self.assertIn("dashboard-secondary-column", html)
             self.assertIn("page-header", html)
             self.assertIn("@media (max-width: 860px)", html)
             self.assertIn("Plan File", html)
@@ -288,6 +395,23 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("run_many_launch_decision", actions_html)
             self.assertIn("PASS", actions_html)
             self.assertIn("run_many_submit_button", actions_html)
+
+    def test_actions_page_prerenders_existing_plans_in_run_plans_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plans_dir = repo_path / ".kctl" / "plans"
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / "001-sample.yaml").write_text(
+                f"repo: {repo_path}\nobjective: x\nsteps:\n  - id: implement\n    prompt: x\n"
+            )
+
+            app = DashboardApp(repo_path)
+            actions_html = app.render_actions_page()
+
+            self.assertIn("plans_dir_preview", actions_html)
+            self.assertIn("001-sample.yaml", actions_html)
+            self.assertIn("Plans found", actions_html)
             self.assertIn("run_single_across_projects_button", actions_html)
             self.assertIn("Tracked Projects", actions_html)
 
@@ -454,6 +578,49 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Live Output", html)
             self.assertIn(run_id, html)
 
+    def test_render_route_dispatches_real_run_detail_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            html = app.render_route(f"/runs/{run_id}", {})
+
+            self.assertIn("&larr; Dashboard", html)
+            self.assertIn("Plan Executions", html)
+            self.assertIn(run_id, html)
+
+    def test_render_route_dispatches_run_stop_confirm_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            html = app.render_route(f"/runs/{run_id}/stop", {})
+
+            self.assertIn("Stop Run", html)
+            self.assertIn("Confirm Stop Run", html)
+            self.assertIn(run_id, html)
+
+    def test_render_route_run_stop_confirm_requests_stop_and_returns_run_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            with patch.object(app, "stop_run_many", return_value=True) as stop_run_many_mock:
+                html = app.render_route(f"/runs/{run_id}/stop", {"message": ["confirm"]})
+
+            stop_run_many_mock.assert_called_once_with(run_id)
+            self.assertIn("Stop requested for", html)
+            self.assertIn("Plan Executions", html)
+
     def test_render_route_rejects_runs_detail_without_id(self) -> None:
         from kctl_pkg.types import PlanError
 
@@ -500,6 +667,12 @@ class UIDashboardTests(unittest.TestCase):
                 selected_plan_names: list[str] | None = None,
                 run_id_override: str | None = None,
                 provider_override: str | None = None,
+                from_step: str | None = None,
+                only_step: str | None = None,
+                reuse_workspace_path: Path | None = None,
+                stop_requested=None,
+                process_started=None,
+                process_finished=None,
             ) -> int:
                 calls.append(
                     (
@@ -510,6 +683,12 @@ class UIDashboardTests(unittest.TestCase):
                         selected_plan_names,
                         run_id_override,
                         provider_override,
+                        from_step,
+                        only_step,
+                        reuse_workspace_path,
+                        callable(stop_requested),
+                        callable(process_started),
+                        callable(process_finished),
                     )
                 )
                 return 0
@@ -534,7 +713,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertEqual(
                 calls,
                 [
-                    ("run_many", app.plans_dir_for_repo(target_repo).resolve(), 2, False, ["001-one.yaml"], run_id, None),
+                    ("run_many", app.plans_dir_for_repo(target_repo).resolve(), 2, False, ["001-one.yaml"], run_id, None, None, None, None, True, True, True),
                     ("index", repo_path.resolve(), None),
                 ],
             )
@@ -601,6 +780,219 @@ class UIDashboardTests(unittest.TestCase):
                 app.handle_action("/actions/rerun-plan", {"plan_file_path": [str(Path(tmpdir) / "missing.yaml")]})
 
             self.assertIn("Plan file not found", str(ctx.exception))
+
+    def test_handle_action_rerun_plan_passes_partial_step_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_path = repo_path / ".kctl" / "plans" / "001-sample.yaml"
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            plan_path.write_text(
+                f"repo: {repo_path}\nobjective: x\nsteps:\n  - id: implement\n    prompt: x\n  - id: verify\n    type: verify\n    commands:\n      - printf ok\n"
+            )
+
+            app = DashboardApp(repo_path)
+            with patch.object(app, "start_run_many", return_value="run-123") as start_run_many_mock:
+                result = app.handle_action(
+                    "/actions/rerun-plan",
+                    {
+                        "plan_file_path": [str(plan_path)],
+                        "from_step": ["verify"],
+                        "provider_override": ["claude"],
+                    },
+                )
+
+            self.assertEqual(result.redirect_to, "/")
+            self.assertEqual(result.run_id, "run-123")
+            self.assertIn("from step verify", result.message)
+            self.assertEqual(start_run_many_mock.call_args.kwargs["from_step"], "verify")
+            self.assertIsNone(start_run_many_mock.call_args.kwargs["only_step"])
+            self.assertEqual(start_run_many_mock.call_args.kwargs["provider_override"], "claude")
+
+    def test_handle_action_partial_rerun_reuses_indexed_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_path = repo_path / ".kctl" / "plans" / "001-sample.yaml"
+            workspace_path = repo_path / ".kctl" / "worktrees" / "run-1" / "001-sample"
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            plan_path.write_text(
+                f"repo: {repo_path}\nobjective: x\nsteps:\n  - id: implement\n    prompt: x\n  - id: verify\n    type: verify\n    commands:\n      - printf ok\n"
+            )
+
+            app = DashboardApp(repo_path)
+            with patch("kctl_pkg.ui_dashboard.get_plan_execution") as get_plan_execution_mock, patch.object(
+                app, "start_run_many", return_value="run-123"
+            ) as start_run_many_mock:
+                get_plan_execution_mock.return_value = SimpleNamespace(
+                    id="plan-exec-1",
+                    plan_file_path=str(plan_path.resolve()),
+                    worktree_path=str(workspace_path.resolve()),
+                )
+                result = app.handle_action(
+                    "/actions/rerun-plan",
+                    {
+                        "plan_file_path": [str(plan_path)],
+                        "plan_execution_id": ["plan-exec-1"],
+                        "only_step": ["verify"],
+                    },
+                )
+
+            self.assertEqual(result.redirect_to, "/")
+            self.assertEqual(result.run_id, "run-123")
+            self.assertEqual(start_run_many_mock.call_args.kwargs["only_step"], "verify")
+            self.assertEqual(
+                start_run_many_mock.call_args.kwargs["reuse_workspace_path"],
+                workspace_path.resolve(),
+            )
+
+    def test_render_run_stop_controls_uses_inline_form_submit(self) -> None:
+        from kctl_pkg.ui_dashboard_runs import _render_run_stop_controls
+
+        html = _render_run_stop_controls("run-123", "running")
+
+        self.assertIn("/runs/run-123/stop", html)
+        self.assertIn("Stop Run", html)
+        self.assertIn("<a", html)
+
+    def test_stop_run_many_persists_stop_request_and_kills_active_pids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id = "20260414T201522347780Z"
+            run_root = repo_path / ".kctl" / "runs" / run_id
+            run_root.mkdir(parents=True, exist_ok=True)
+            (run_root / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "plans_dir": str((repo_path / ".kctl" / "plans").resolve()),
+                        "repo": str(repo_path.resolve()),
+                        "artifact_storage_mode": "in_repo",
+                        "artifact_root_path": str((repo_path / ".kctl" / "runs").resolve()),
+                        "stream_log_path": str((run_root / "stream.log").resolve()),
+                        "active_pids": [11111, 22222],
+                        "stop_requested": False,
+                        "status": "running",
+                        "started_at": "2026-04-14T20:15:22+00:00",
+                        "concurrency": 1,
+                        "preflight": {},
+                        "plans": [],
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+
+            app = DashboardApp(repo_path)
+            killed: list[tuple[int, int]] = []
+            with patch("kctl_pkg.ui_dashboard.os.kill", side_effect=lambda pid, sig: killed.append((pid, sig))):
+                stopped = app.stop_run_many(run_id)
+
+            self.assertTrue(stopped)
+            self.assertEqual(killed, [(11111, signal.SIGTERM), (22222, signal.SIGTERM)])
+            self.assertTrue((run_root / "stop-requested").exists())
+
+    def test_live_run_stop_request_surfaces_as_stopping(self) -> None:
+        from kctl_pkg.ui_dashboard_state import (
+            build_live_steps_from_run_data,
+            build_plan_cards_from_live_data,
+            build_run_detail_from_live_data,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+            run_data = {
+                "run_id": "run-123",
+                "plans_dir": str((repo_path / ".kctl" / "plans").resolve()),
+                "repo": str(repo_path.resolve()),
+                "artifact_root_path": str((repo_path / ".kctl" / "runs").resolve()),
+                "status": "running",
+                "stop_requested": True,
+                "started_at": "2026-04-14T20:15:22+00:00",
+                "ended_at": None,
+                "concurrency": 1,
+                "plans": [
+                    {
+                        "plan_id": "001-plan",
+                        "plan_path": str((repo_path / ".kctl" / "plans" / "001-plan.yaml").resolve()),
+                        "status": "running",
+                        "current_step": "verify",
+                        "step_statuses": {"verify": "running"},
+                        "verify_result": "not-run",
+                        "worktree_path": None,
+                        "branch_name": None,
+                        "log_path": None,
+                    }
+                ],
+            }
+
+            run_detail = build_run_detail_from_live_data(app, run_data)
+            plan_cards = build_plan_cards_from_live_data(app, run_data)
+            live_steps = build_live_steps_from_run_data(app, run_data, "run-123:001-plan")
+
+            self.assertEqual(run_detail.status, "stopping")
+            self.assertEqual(plan_cards[0].status, "stopping")
+            self.assertEqual(live_steps[0].status, "stopping")
+
+    def test_stopped_plan_uses_operator_facing_labels(self) -> None:
+        from kctl_pkg.ui_dashboard_state import build_plan_cards_from_live_data
+        from kctl_pkg.ui_dashboard_support import _failure_reason_label, _status_badge
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+            run_data = {
+                "run_id": "run-123",
+                "plans": [
+                    {
+                        "plan_id": "001-plan",
+                        "plan_path": str((repo_path / ".kctl" / "plans" / "001-plan.yaml").resolve()),
+                        "status": "blocked",
+                        "failure_reason": "run_stopped",
+                        "verify_result": "not-run",
+                    }
+                ],
+            }
+
+            plan_cards = build_plan_cards_from_live_data(app, run_data)
+
+            self.assertEqual(plan_cards[0].failure_reason, "run_stopped")
+            self.assertIn("stopped", _status_badge(plan_cards[0].status, failure_reason=plan_cards[0].failure_reason))
+            self.assertEqual(_failure_reason_label(plan_cards[0].failure_reason), "Stopped by operator")
+
+    def test_load_live_run_data_marks_stop_requested_from_marker_file(self) -> None:
+        from kctl_pkg.ui_dashboard_state import load_live_run_data
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            run_id = "20260414T201522347780Z"
+            run_root = repo_path / ".kctl" / "runs" / run_id
+            repo_path.mkdir(parents=True, exist_ok=True)
+            run_root.mkdir(parents=True, exist_ok=True)
+            (run_root / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "artifact_root_path": str((repo_path / ".kctl" / "runs").resolve()),
+                        "status": "running",
+                        "plans": [],
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            (run_root / "stop-requested").write_text("2026-04-14T21:00:00Z\n")
+
+            app = DashboardApp(repo_path)
+            run_data = load_live_run_data(app, run_id)
+
+            self.assertIsNotNone(run_data)
+            assert run_data is not None
+            self.assertTrue(run_data["stop_requested"])
 
     def test_project_tracking_and_cross_project_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -725,6 +1117,17 @@ class UIDashboardTests(unittest.TestCase):
 
             self.assertIn("Live Output", html)
             self.assertIn("live_output_stream", html)
+            self.assertIn("live_output_tail", html)
+            self.assertIn("<strong>1</strong> active", html)
+            self.assertIn("<strong>1</strong> running", html)
+            self.assertIn("Copy last 50 lines", html)
+            self.assertIn("data-copy-target='#live_output_stream'", html)
+            self.assertIn("data-copy-last-lines='50'", html)
+            self.assertIn("onclick='return window.kctlCopyButtonClick(this)'", html)
+            self.assertIn("tap the tail box below", html)
+            self.assertIn("Step Timeline", html)
+            self.assertIn("<td>inspect</td>", html)
+            self.assertIn(">running</span>", html)
             self.assertIn("[001-review] starting plan", html)
             self.assertIn("/api/run-output", html)
 
@@ -763,6 +1166,21 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Fix:", html)
             self.assertIn("blockers", html)
             self.assertIn("Copy env", html)
+
+    def test_dashboard_plan_detail_renders_partial_rerun_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            html = DashboardApp(repo_path).render_page(run_id=run_id)
+
+            self.assertIn("/actions/rerun-plan", html)
+            self.assertIn("name='plan_execution_id'", html)
+            self.assertIn("Rerun Full Plan", html)
+            self.assertIn("Rerun From verify", html)
+            self.assertIn("Rerun Verify Only", html)
 
     def test_attention_queue_shows_operator_action_labels_and_rerun_button(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -814,6 +1232,7 @@ class UIDashboardTests(unittest.TestCase):
             app = DashboardApp(repo_path)
             html = app.render_page()
 
+            self.assertIn("<summary><h2 class='inline-heading'>Attention</h2></summary>", html)
             self.assertIn("Safe to Rerun", html)
             self.assertIn("/actions/rerun-plan", html)
             self.assertIn("Rerun", html)

@@ -227,8 +227,17 @@ def run_shell_command(
     shell_parts: list[str],
     command_text: str,
     cwd: Path,
+    stop_requested: Callable[[], bool] | None = None,
+    process_started: Callable[[int], None] | None = None,
+    process_finished: Callable[[int], None] | None = None,
 ) -> CommandResult:
-    return run_command([*shell_parts, command_text], cwd=cwd)
+    return run_command(
+        [*shell_parts, command_text],
+        cwd=cwd,
+        stop_requested=stop_requested,
+        process_started=process_started,
+        process_finished=process_finished,
+    )
 
 
 def probe_command(shell_parts: list[str], cwd: Path, command_text: str) -> str | None:
@@ -265,14 +274,24 @@ def run_verify_commands(
     shell_parts: list[str],
     commands: list[str],
     output_sink: OutputSink,
+    stop_requested: Callable[[], bool] | None = None,
+    process_started: Callable[[int], None] | None = None,
+    process_finished: Callable[[int], None] | None = None,
 ) -> list[CommandResult]:
     results: list[CommandResult] = []
     for index, command in enumerate(commands, start=1):
-        result = run_shell_command(shell_parts, command, repo_path)
+        result = run_shell_command(
+            shell_parts,
+            command,
+            repo_path,
+            stop_requested=stop_requested,
+            process_started=process_started,
+            process_finished=process_finished,
+        )
         label = "verify" if len(commands) == 1 else f"verify[{index}]"
         print_command_result(label, result, output_sink)
         results.append(result)
-        if result.exit_code != 0:
+        if result.exit_code != 0 or result.stopped:
             break
     return results
 
@@ -296,6 +315,7 @@ def combine_verify_results(
         ),
         stdout="\n\n".join(result.stdout.rstrip() for result in results if result.stdout.strip()),
         stderr="\n\n".join(result.stderr.rstrip() for result in results if result.stderr.strip()),
+        stopped=any(result.stopped for result in results),
     )
 
 
@@ -661,6 +681,9 @@ def execute_agent_step(
     output_sink: OutputSink,
     provider: str = "codex",
     permission_mode: str = "auto",
+    stop_requested: Callable[[], bool] | None = None,
+    process_started: Callable[[int], None] | None = None,
+    process_finished: Callable[[int], None] | None = None,
 ) -> tuple[str, CommandResult]:
     agent_prompt = build_agent_prompt(
         objective,
@@ -686,6 +709,9 @@ def execute_agent_step(
             hidden_lines=prompt_lines_to_hide if not verbose else None,
             output_sink=output_sink,
             display_filter=should_display_claude_line,
+            stop_requested=stop_requested,
+            process_started=process_started,
+            process_finished=process_finished,
         )
     else:
         agent_result = run_streaming_command(
@@ -696,6 +722,9 @@ def execute_agent_step(
             filter_stream=not verbose,
             hidden_lines=prompt_lines_to_hide if not verbose else None,
             output_sink=output_sink,
+            stop_requested=stop_requested,
+            process_started=process_started,
+            process_finished=process_finished,
         )
     return agent_prompt, agent_result
 
@@ -858,6 +887,9 @@ def execute_step(
     verbose: bool,
     review_enabled: bool,
     output_sink: OutputSink,
+    stop_requested: Callable[[], bool] | None = None,
+    process_started: Callable[[int], None] | None = None,
+    process_finished: Callable[[int], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     step_id = step["id"]
     effective_step_type = get_effective_step_type(step)
@@ -895,6 +927,9 @@ def execute_step(
             output_sink=output_sink,
             provider=provider,
             permission_mode=permission_mode,
+            stop_requested=stop_requested,
+            process_started=process_started,
+            process_finished=process_finished,
         )
     elif effective_step_type == "verify":
         agent_result = CommandResult(
@@ -945,6 +980,10 @@ def execute_step(
     if agent_result.exit_code != 0:
         status = "failure"
         failure_reason, failure_details = classify_agent_failure(agent_result)
+    if agent_result.stopped:
+        status = "stopped"
+        failure_reason = "run_stopped"
+        failure_details = None
     if effective_mode == "read-only" and new_changed_files:
         status = "failure"
         failure_reason = "expected_clean_diff"
@@ -975,7 +1014,11 @@ def execute_step(
         )
         verify_results = run_verify_commands(repo_path, shell_parts, verify_commands, output_sink)
         verify_result = combine_verify_results(verify_results, shell_parts)
-        if verify_result is not None and verify_result.exit_code != 0:
+        if any(result.stopped for result in verify_results):
+            status = "stopped"
+            failure_reason = "run_stopped"
+            failure_details = None
+        elif verify_result is not None and verify_result.exit_code != 0:
             status = "failure"
             failure_reason = "verify_failed"
             failure_details = None
@@ -1058,6 +1101,27 @@ def save_run_log(run_data: dict[str, Any], run_output_dir: Path) -> Path:
     return log_path
 
 
+def select_steps_to_run(
+    steps: list[dict[str, Any]],
+    *,
+    from_step: str | None = None,
+    only_step: str | None = None,
+) -> list[dict[str, Any]]:
+    if from_step and only_step:
+        raise PlanError("--from-step and --only-step cannot be used together.")
+    if only_step:
+        selected = [step for step in steps if step["id"] == only_step]
+        if not selected:
+            raise PlanError(f"Plan step not found: {only_step}")
+        return selected
+    if from_step:
+        for index, step in enumerate(steps):
+            if step["id"] == from_step:
+                return steps[index:]
+        raise PlanError(f"Plan step not found: {from_step}")
+    return steps
+
+
 def execute_plan_run(
     plan_path: Path,
     verbose: bool,
@@ -1073,6 +1137,11 @@ def execute_plan_run(
     run_output_dir_override: Path | None = None,
     status_callback: Callable[[dict[str, Any]], None] | None = None,
     provider_override: str | None = None,
+    from_step: str | None = None,
+    only_step: str | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+    process_started: Callable[[int], None] | None = None,
+    process_finished: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     output_sink = output_sink or ConsoleOutputSink()
     plan = load_plan(plan_path)
@@ -1165,7 +1234,8 @@ def execute_plan_run(
         run_output_dir.mkdir(parents=True, exist_ok=True)
     commit_created = False
     commit_sha: str | None = None
-    steps = plan["steps"]
+    plan_steps = plan["steps"]
+    steps = select_steps_to_run(plan_steps, from_step=from_step, only_step=only_step)
     if status_callback is not None:
         status_callback(
             {
@@ -1177,6 +1247,9 @@ def execute_plan_run(
             }
         )
     for index, step in enumerate(steps, start=1):
+        if stop_requested is not None and stop_requested():
+            run_status = "stopped"
+            break
         if status_callback is not None:
             status_callback(
                 {
@@ -1197,6 +1270,9 @@ def execute_plan_run(
             verbose=verbose,
             review_enabled=review_enabled,
             output_sink=output_sink,
+            stop_requested=stop_requested,
+            process_started=process_started,
+            process_finished=process_finished,
         )
         step_results.append(step_result)
         prior_summaries.append(summarize_step_result(step_result))
@@ -1230,6 +1306,9 @@ def execute_plan_run(
             else:
                 run_status = "stopped"
                 break
+        elif step_result["status"] == "stopped":
+            run_status = "stopped"
+            break
         elif step_result["status"] != "success":
             run_status = "failure"
         if should_stop:
@@ -1255,6 +1334,8 @@ def execute_plan_run(
         "defaults": defaults,
         "provider": plan_provider,
         "permission_mode": plan_permission_mode,
+        "requested_from_step": from_step,
+        "requested_only_step": only_step,
         "review_enabled": review_enabled,
         "repo_dirty_at_start": repo_dirty_at_start,
         "branch_before": branch_before,
@@ -1308,6 +1389,8 @@ def run_plan(
     output_sink: OutputSink | None = None,
     interactive: bool = True,
     provider_override: str | None = None,
+    from_step: str | None = None,
+    only_step: str | None = None,
 ) -> int:
     run_data = execute_plan_run(
         plan_path=plan_path,
@@ -1322,5 +1405,7 @@ def run_plan(
         output_sink=output_sink,
         interactive=interactive,
         provider_override=provider_override,
+        from_step=from_step,
+        only_step=only_step,
     )
     return 1 if run_data["status"] == "failure" else 0

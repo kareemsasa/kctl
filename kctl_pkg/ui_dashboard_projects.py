@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 
 from .git import ensure_git_repo, get_project_git_detail, get_project_git_summary, get_repo_root
 from .types import PlanError
-from .ui_dashboard_support import _escape, _page_link
+from .ui_dashboard_support import _escape, _page_link, _render_collapsible_section
 
 
 def projects_file_path(repo_path: Path) -> Path:
@@ -115,21 +115,24 @@ def render_projects_page(app: object, *, action_message: str | None = None) -> s
         _render_project_card(project_path, summaries[project_path])
         for project_path in tracked_projects
     ) or "<div class='empty'>No tracked projects yet.</div>"
+    add_project_html = _render_collapsible_section(
+        "Add Project",
+        (
+            "<div class='help' style='margin-top:8px'>Add a local git repository path to the tracked projects list.</div>"
+            "<form method='post' action='/actions/add-project' id='add_project_form'>"
+            "<label for='project_path'><strong>Project Path</strong></label>"
+            "<input id='project_path' name='project_path' type='text' placeholder='/path/to/project' required>"
+            "<div id='project_path_status' class='repo-check'></div>"
+            "<div id='project_path_duplicate' class='repo-check'></div>"
+            "<button type='submit' id='add_project_button'>Add Project</button>"
+            "</form>"
+        ),
+    )
     body = (
         "<main class='single-column'>"
         "<div class='column'>"
         f"{notice_html}"
-        "<details class='panel actions-details'>"
-        "<summary><h2 class='inline-heading'>Add Project</h2></summary>"
-        "<div class='help' style='margin-top:8px'>Add a local git repository path to the tracked projects list.</div>"
-        "<form method='post' action='/actions/add-project' id='add_project_form'>"
-        "<label for='project_path'><strong>Project Path</strong></label>"
-        "<input id='project_path' name='project_path' type='text' placeholder='/path/to/project' required>"
-        "<div id='project_path_status' class='repo-check'></div>"
-        "<div id='project_path_duplicate' class='repo-check'></div>"
-        "<button type='submit' id='add_project_button'>Add Project</button>"
-        "</form>"
-        "</details>"
+        f"{add_project_html}"
         "<section class='panel'>"
         "<div style='display:flex;align-items:center;justify-content:space-between'>"
         "<h2 style='margin:0'>Tracked Projects</h2>"

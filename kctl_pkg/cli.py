@@ -67,6 +67,14 @@ def add_run_options(parser: argparse.ArgumentParser) -> None:
         dest="provider_override",
         help="Override the agent provider for this run.",
     )
+    parser.add_argument(
+        "--from-step",
+        help="Start the run at this step id and continue through the remaining steps.",
+    )
+    parser.add_argument(
+        "--only-step",
+        help="Run only this single step id from the plan.",
+    )
 
 
 def discover_git_repos(root_path: Path) -> list[Path]:
@@ -322,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
                 allow_dirty_start=args.allow_dirty_start,
                 review_enabled=args.review,
                 provider_override=args.provider_override,
+                from_step=args.from_step,
+                only_step=args.only_step,
             )
         except PlanError as exc:
             print(style_status_text(f"Error: {exc}", "error", stream=sys.stderr, bold=True), file=sys.stderr)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,21 +12,58 @@ from .terminal import CODEX_STREAM_PREFIX, should_display_codex_line, style_text
 from .types import CommandResult
 
 
-def run_command(command: list[str], cwd: Path, stdin_text: str | None = None) -> CommandResult:
-    completed = subprocess.run(
+def _terminate_process(process: subprocess.Popen[str]) -> None:
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except (subprocess.TimeoutExpired, ProcessLookupError):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+
+
+def run_command(
+    command: list[str],
+    cwd: Path,
+    stdin_text: str | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+    process_started: Callable[[int], None] | None = None,
+    process_finished: Callable[[int], None] | None = None,
+) -> CommandResult:
+    process = subprocess.Popen(
         command,
         cwd=str(cwd),
-        input=stdin_text,
+        stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        capture_output=True,
     )
-    return CommandResult(
-        command=command,
-        cwd=str(cwd),
-        exit_code=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-    )
+    stopped = False
+    if process_started is not None:
+        process_started(process.pid)
+    try:
+        while True:
+            if stop_requested is not None and stop_requested() and process.poll() is None:
+                stopped = True
+                _terminate_process(process)
+            try:
+                stdout, stderr = process.communicate(input=stdin_text, timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                stdin_text = None
+                continue
+        return CommandResult(
+            command=command,
+            cwd=str(cwd),
+            exit_code=process.returncode or 0,
+            stdout=stdout,
+            stderr=stderr,
+            stopped=stopped,
+        )
+    finally:
+        if process_finished is not None:
+            process_finished(process.pid)
 
 
 def run_streaming_command(
@@ -37,6 +75,9 @@ def run_streaming_command(
     hidden_lines: set[str] | None = None,
     output_sink: OutputSink | None = None,
     display_filter: Callable[[str], bool] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+    process_started: Callable[[int], None] | None = None,
+    process_finished: Callable[[int], None] | None = None,
 ) -> CommandResult:
     output_sink = output_sink or ConsoleOutputSink()
     _display_filter = display_filter if display_filter is not None else should_display_codex_line
@@ -48,6 +89,9 @@ def run_streaming_command(
         stderr=subprocess.PIPE,
         bufsize=1,
     )
+    stopped = False
+    if process_started is not None:
+        process_started(process.pid)
 
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
@@ -84,14 +128,25 @@ def run_streaming_command(
     stdout_thread.start()
     stderr_thread.start()
 
-    exit_code = process.wait()
-    stdout_thread.join()
-    stderr_thread.join()
-
-    return CommandResult(
-        command=command,
-        cwd=str(cwd),
-        exit_code=exit_code,
-        stdout="".join(stdout_chunks),
-        stderr="".join(stderr_chunks),
-    )
+    try:
+        while True:
+            if stop_requested is not None and stop_requested() and process.poll() is None:
+                stopped = True
+                _terminate_process(process)
+            exit_code = process.poll()
+            if exit_code is not None:
+                break
+            time.sleep(0.1)
+        stdout_thread.join()
+        stderr_thread.join()
+        return CommandResult(
+            command=command,
+            cwd=str(cwd),
+            exit_code=exit_code,
+            stdout="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
+            stopped=stopped,
+        )
+    finally:
+        if process_finished is not None:
+            process_finished(process.pid)

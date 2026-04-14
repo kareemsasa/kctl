@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import threading
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .multi import build_multi_run_id, load_normalized_multi_plans, resolve_multi_run_log, run_many_plans
+from .multi import build_multi_run_id, load_normalized_multi_plans, resolve_multi_run_log, run_many_plans, stop_request_path
 from .git import (
     create_branch,
     discard_all_changes,
@@ -69,10 +70,12 @@ from .ui_dashboard_runs import (
     render_dashboard_detail_page as render_dashboard_detail,
     render_dashboard_page as render_dashboard,
     render_run_page as render_run,
+    render_run_stop_confirm_page as render_run_stop_confirm,
 )
 from .ui_dashboard_server import serve_dashboard as dashboard_server_serve
 from .ui_dashboard_state import (
     build_plan_cards_from_live_data as build_live_plan_cards,
+    build_live_steps_from_run_data as build_live_steps,
     build_run_detail_from_live_data as build_live_run_detail,
     load_dashboard_state,
     load_live_run_data as load_live_run,
@@ -146,6 +149,35 @@ class DashboardActionResult:
     redirect_to: str
     message: str
     run_id: str | None = None
+
+
+class _RunStopController:
+    def __init__(self) -> None:
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._pids: set[int] = set()
+
+    def is_stop_requested(self) -> bool:
+        return self._stop_event.is_set()
+
+    def register_process(self, pid: int) -> None:
+        with self._lock:
+            self._pids.add(pid)
+
+    def unregister_process(self, pid: int) -> None:
+        with self._lock:
+            self._pids.discard(pid)
+
+    def request_stop(self) -> bool:
+        self._stop_event.set()
+        with self._lock:
+            pids = list(self._pids)
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                continue
+        return bool(pids) or self._stop_event.is_set()
 
 
 def summarize_preflight_for_dashboard(
@@ -276,6 +308,8 @@ class DashboardApp:
     def __init__(self, repo_path: Path, db_path: Path | None = None) -> None:
         self.repo_path = repo_path.resolve()
         self.db_path = db_path.resolve() if db_path is not None else None
+        self._run_controllers: dict[str, _RunStopController] = {}
+        self._run_controllers_lock = threading.Lock()
 
     def _page_shell(self, *, active_nav: str, body: str, extra_script: str = "") -> str:
         repo_name = _escape(self.repo_path.name)
@@ -355,6 +389,13 @@ class DashboardApp:
     def _build_plan_cards_from_live_data(self, run_data: dict[str, object]) -> list[PlanExecutionCard]:
         return build_live_plan_cards(self, run_data)
 
+    def _build_live_steps_from_run_data(
+        self,
+        run_data: dict[str, object],
+        plan_execution_id: str,
+    ) -> list[StepTimelineItem]:
+        return build_live_steps(self, run_data, plan_execution_id)
+
     def run_index_now(self) -> None:
         index_repository_state(self.repo_path, db_path=self.db_path)
 
@@ -391,22 +432,64 @@ class DashboardApp:
         concurrency: int,
         selected_plan_names: list[str] | None = None,
         provider_override: str | None = None,
+        from_step: str | None = None,
+        only_step: str | None = None,
+        reuse_workspace_path: Path | None = None,
     ) -> str:
         run_id = build_multi_run_id()
+        controller = _RunStopController()
+        with self._run_controllers_lock:
+            self._run_controllers[run_id] = controller
 
         def _run() -> None:
-            run_many_plans(
-                plans_dir.resolve(),
-                concurrency=concurrency,
-                verbose=False,
-                selected_plan_names=selected_plan_names,
-                run_id_override=run_id,
-                provider_override=provider_override,
-            )
-            index_repository_state(self.repo_path, db_path=self.db_path)
+            try:
+                run_many_plans(
+                    plans_dir.resolve(),
+                    concurrency=concurrency,
+                    verbose=False,
+                    selected_plan_names=selected_plan_names,
+                    run_id_override=run_id,
+                    provider_override=provider_override,
+                    from_step=from_step,
+                    only_step=only_step,
+                    reuse_workspace_path=reuse_workspace_path,
+                    stop_requested=controller.is_stop_requested,
+                    process_started=controller.register_process,
+                    process_finished=controller.unregister_process,
+                )
+            finally:
+                with self._run_controllers_lock:
+                    self._run_controllers.pop(run_id, None)
+                index_repository_state(self.repo_path, db_path=self.db_path)
 
         threading.Thread(target=_run, daemon=True).start()
         return run_id
+
+    def stop_run_many(self, run_id: str) -> bool:
+        with self._run_controllers_lock:
+            controller = self._run_controllers.get(run_id)
+        controller_requested = controller.request_stop() if controller is not None else False
+        try:
+            run_log = resolve_multi_run_log(self.repo_path, run_id)
+        except PlanError:
+            return controller_requested
+        run_root = run_log.parent
+        stop_path = stop_request_path(run_root)
+        stop_path.parent.mkdir(parents=True, exist_ok=True)
+        stop_path.write_text(datetime.now(timezone.utc).isoformat() + "\n")
+        persisted_requested = False
+        try:
+            run_data = json.loads(run_log.read_text())
+        except (OSError, ValueError):
+            run_data = {}
+        active_pids = run_data.get("active_pids") or []
+        for pid in active_pids:
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+                persisted_requested = True
+            except (OSError, ProcessLookupError, ValueError, TypeError):
+                continue
+        return controller_requested or persisted_requested or stop_path.exists()
 
     def start_run_plan_across_projects(
         self,
@@ -631,8 +714,16 @@ class DashboardApp:
         self,
         run_id: str,
         plan_execution_id: str | None = None,
+        action_message: str | None = None,
     ) -> str:
-        return render_run(self, run_id=run_id, plan_execution_id=plan_execution_id)
+        return render_run(self, run_id=run_id, plan_execution_id=plan_execution_id, action_message=action_message)
+
+    def render_run_stop_confirm_page(
+        self,
+        run_id: str,
+        plan_execution_id: str | None = None,
+    ) -> str:
+        return render_run_stop_confirm(self, run_id=run_id, plan_execution_id=plan_execution_id)
 
     def render_route(
         self,
@@ -660,6 +751,25 @@ class DashboardApp:
             if not run_id:
                 raise PlanError("Run id is required.")
             plan_execution_id = params.get("plan_execution_id", [None])[0]
+            return self.render_run_page(run_id=run_id, plan_execution_id=plan_execution_id)
+        if path.startswith("/runs/"):
+            run_path = path.removeprefix("/runs/").strip()
+            if not run_path:
+                raise PlanError("Run id is required.")
+            run_id, separator, suffix = run_path.partition("/")
+            plan_execution_id = params.get("plan_execution_id", [None])[0]
+            if separator and suffix == "stop":
+                if params.get("message", [""])[0] == "confirm":
+                    stopped = self.stop_run_many(run_id)
+                    message = (
+                        f"Stop requested for {run_id}."
+                        if stopped
+                        else f"Run is not stoppable from this dashboard process: {run_id}"
+                    )
+                    return self.render_run_page(run_id=run_id, plan_execution_id=plan_execution_id, action_message=message)
+                return self.render_run_stop_confirm_page(run_id=run_id, plan_execution_id=plan_execution_id)
+            if separator or not run_id:
+                raise PlanError("Run id is required.")
             return self.render_run_page(run_id=run_id, plan_execution_id=plan_execution_id)
         if path == "/":
             run_id = params.get("run_id", [None])[0]
@@ -692,15 +802,32 @@ class DashboardApp:
             plans_dir = plan_path.parent
             plan_file_name = plan_path.name
             provider_override = form_data.get("provider_override", [""])[0].strip() or None
+            from_step = form_data.get("from_step", [""])[0].strip() or None
+            only_step = form_data.get("only_step", [""])[0].strip() or None
+            reuse_workspace_path: Path | None = None
+            plan_execution_id = form_data.get("plan_execution_id", [""])[0].strip()
+            if plan_execution_id and (from_step or only_step):
+                plan_execution = get_plan_execution(plan_execution_id, self.repo_path, db_path=self.db_path)
+                if plan_execution.plan_file_path == str(plan_path.resolve()) and plan_execution.worktree_path:
+                    reuse_workspace_path = Path(plan_execution.worktree_path)
             run_id = self.start_run_many(
                 plans_dir,
                 concurrency=1,
                 selected_plan_names=[plan_file_name],
                 provider_override=provider_override,
+                from_step=from_step,
+                only_step=only_step,
+                reuse_workspace_path=reuse_workspace_path,
             )
+            if only_step:
+                message = f"Rerun started for {plan_file_name} using only step {only_step}."
+            elif from_step:
+                message = f"Rerun started for {plan_file_name} from step {from_step}."
+            else:
+                message = f"Rerun started for {plan_file_name}."
             return DashboardActionResult(
                 redirect_to="/",
-                message=f"Rerun started for {plan_file_name}.",
+                message=message,
                 run_id=run_id,
             )
 

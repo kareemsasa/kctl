@@ -9,7 +9,9 @@ from .ui_dashboard_support import (
     _preflight_status_tone,
     _provider_select_html,
     _render_preflight_item_html,
+    _render_selection_list,
     available_providers,
+    list_plans_in_directory,
 )
 
 
@@ -26,6 +28,7 @@ def render_actions_page(
     ]
     tracked_projects = app.load_tracked_projects()
     providers = available_providers()
+    plans_status, plans_message, initial_plans = list_plans_in_directory(str(app.default_plans_dir))
     launch_preflight = summarize_preflight(
         str(app.repo_path),
         str(app.default_plans_dir),
@@ -43,13 +46,16 @@ def render_actions_page(
             ("Required Env", preflight_items.get("required_env") or {}),
         )
     )
-    tracked_projects_html = (
-        "".join(
-            f"<label class='checkbox'><input type='checkbox' name='project_paths' value='{_escape(p)}'> {_escape(p)}</label>"
-            for p in tracked_projects
-        )
-        if tracked_projects
-        else "<div class='help'>No tracked projects yet. <a href='/projects'>Manage projects</a></div>"
+    tracked_projects_html = _render_selection_list(
+        "project_paths",
+        [(project_path, project_path) for project_path in tracked_projects],
+        empty_html="<div class='help'>No tracked projects yet. <a href='/projects'>Manage projects</a></div>",
+    )
+    initial_plans_html = _render_selection_list(
+        "selected_plans",
+        [(plan, plan) for plan in initial_plans],
+        heading="Plans found",
+        item_class="",
     )
     notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
     body = (
@@ -73,8 +79,8 @@ def render_actions_page(
         f"<div><strong>Plans Dir</strong>: <code>{_escape(app.default_plans_dir)}</code></div>"
         f"<label for='plans_dir'><strong>Plans Dir Override</strong></label>"
         f"<input id='plans_dir' name='plans_dir' type='text' placeholder='Optional override'>"
-        f"<div id='plans_dir_status' class='repo-check'></div>"
-        f"<div id='plans_dir_preview' class='plans-preview'></div>"
+        f"<div id='plans_dir_status' class='repo-check' data-status='{_escape(plans_status)}'>{_escape(plans_message)}</div>"
+        f"<div id='plans_dir_preview' class='plans-preview'>{initial_plans_html}</div>"
         f"<div><strong>Tracked Projects</strong></div>"
         f"{tracked_projects_html}"
         f"<div class='preflight-summary'>"

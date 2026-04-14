@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from .multi import resolve_multi_run_log
+from .multi import resolve_multi_run_log, stop_request_path
 from .plan import load_plan_templates
 from .paths import project_root
 from .types import PlanError
 from .ui_dashboard_support import _preflight_run_snapshot, available_providers, read_plan_file
 from .ui_read import (
     PlanExecutionCard,
+    RepositoryOverview,
     RunDetail,
     StepTimelineItem,
     WorkspaceDetail,
@@ -27,15 +28,40 @@ from .ui_read import (
 )
 
 
+def _effective_live_run_status(run_data: dict[str, object]) -> str:
+    status = str(run_data.get("status") or "unknown")
+    if status == "running" and bool(run_data.get("stop_requested")):
+        return "stopping"
+    return status
+
+
+def _effective_live_plan_status(plan_state: dict[str, object], run_data: dict[str, object]) -> str:
+    status = str(plan_state.get("status") or "unknown")
+    if status == "running" and _effective_live_run_status(run_data) == "stopping":
+        return "stopping"
+    return status
+
+
+def _effective_live_step_status(step_status: object, run_data: dict[str, object]) -> str:
+    status = str(step_status or "unknown")
+    if status == "running" and _effective_live_run_status(run_data) == "stopping":
+        return "stopping"
+    return status
+
+
 def load_live_run_data(app: object, run_id: str) -> dict[str, object] | None:
     try:
         run_log = resolve_multi_run_log(app.repo_path, run_id)
     except PlanError:
         return None
     try:
-        return json.loads(run_log.read_text())
+        run_data = json.loads(run_log.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+    run_root = run_log.parent
+    if stop_request_path(run_root).exists():
+        run_data["stop_requested"] = True
+    return run_data
 
 
 def load_saved_run_data(run_root_path: str | None) -> dict[str, object] | None:
@@ -63,19 +89,20 @@ def read_live_output(run_data: dict[str, object] | None) -> tuple[str | None, st
         else:
             candidate = Path(str(run_data.get("artifact_root_path") or "")) / str(run_data.get("run_id") or "") / "stream.log"
     if not candidate.exists():
-        return None, str(candidate), str(run_data.get("status") or "unknown")
+        return None, str(candidate), _effective_live_run_status(run_data)
     try:
-        return candidate.read_text(), str(candidate.resolve()), str(run_data.get("status") or "unknown")
+        return candidate.read_text(), str(candidate.resolve()), _effective_live_run_status(run_data)
     except OSError:
-        return None, str(candidate), str(run_data.get("status") or "unknown")
+        return None, str(candidate), _effective_live_run_status(run_data)
 
 
 def build_run_detail_from_live_data(app: object, run_data: dict[str, object]) -> RunDetail:
     plan_states = list(run_data.get("plans") or [])
+    effective_status = _effective_live_run_status(run_data)
     return RunDetail(
         id=str(run_data.get("run_id") or ""),
         repository_id=str(app.repo_path),
-        status=str(run_data.get("status") or "unknown"),
+        status=effective_status,
         launch_source="plans_run_many",
         plans_dir=str(run_data.get("plans_dir") or ""),
         concurrency=int(run_data.get("concurrency") or 1),
@@ -85,8 +112,8 @@ def build_run_detail_from_live_data(app: object, run_data: dict[str, object]) ->
         plan_execution_count=len(plan_states),
         passed_count=sum(1 for plan in plan_states if plan.get("status") == "passed"),
         failed_count=sum(1 for plan in plan_states if plan.get("status") == "failed"),
-        running_count=sum(1 for plan in plan_states if plan.get("status") == "running"),
-        blocked_count=sum(1 for plan in plan_states if plan.get("status") == "blocked"),
+        running_count=sum(1 for plan in plan_states if _effective_live_plan_status(plan, run_data) == "running"),
+        blocked_count=sum(1 for plan in plan_states if _effective_live_plan_status(plan, run_data) in {"blocked", "stopping"}),
     )
 
 
@@ -109,7 +136,7 @@ def build_plan_cards_from_live_data(app: object, run_data: dict[str, object]) ->
                 objective="",
                 phase_name=None,
                 group_name=None,
-                status=str(plan_state.get("status") or "unknown"),
+                status=_effective_live_plan_status(plan_state, run_data),
                 current_step_key=plan_state.get("current_step"),
                 verify_status=str(plan_state.get("verify_result") or "not_run"),
                 started_at=str(run_data.get("started_at") or ""),
@@ -118,10 +145,72 @@ def build_plan_cards_from_live_data(app: object, run_data: dict[str, object]) ->
                 branch_name=plan_state.get("branch_name"),
                 log_path=plan_state.get("log_path"),
                 changed_files_count=0,
-                failure_reason=None,
+                failure_reason=str(plan_state.get("failure_reason") or "") or None,
             )
         )
     return plan_cards
+
+
+def build_live_steps_from_run_data(
+    app: object,
+    run_data: dict[str, object],
+    plan_execution_id: str,
+) -> list[StepTimelineItem]:
+    run_id, _, plan_id = plan_execution_id.partition(":")
+    if not run_id or not plan_id or run_id != str(run_data.get("run_id") or ""):
+        return []
+    for plan_state in run_data.get("plans") or []:
+        if str(plan_state.get("plan_id") or "") != plan_id:
+            continue
+        step_statuses = plan_state.get("step_statuses") or {}
+        if not isinstance(step_statuses, dict):
+            return []
+        items: list[StepTimelineItem] = []
+        started_at = str(run_data.get("started_at") or "")
+        for index, (step_key, status) in enumerate(step_statuses.items(), start=1):
+            items.append(
+                StepTimelineItem(
+                    id=f"{plan_execution_id}:{step_key}",
+                    plan_execution_id=plan_execution_id,
+                    step_key=str(step_key),
+                    step_name=None,
+                    kind="unknown",
+                    sequence_index=index,
+                    status=_effective_live_step_status(status, run_data),
+                    verify_status="not-run",
+                    started_at=started_at,
+                    ended_at=None,
+                    duration_ms=None,
+                    output_path=None,
+                    artifact_path=None,
+                    verify_exit_code=None,
+                    changed_files_count=0,
+                    changed_files=[],
+                    metadata={"source": "live_run_data"},
+                )
+            )
+        return items
+    return []
+
+
+def adapt_overview_for_live_run(
+    overview: RepositoryOverview,
+    run_data: dict[str, object] | None,
+) -> RepositoryOverview:
+    if run_data is None or _effective_live_run_status(run_data) not in {"running", "stopping"}:
+        return overview
+    running_plan_count = sum(1 for plan in (run_data.get("plans") or []) if _effective_live_plan_status(plan, run_data) == "running")
+    blocked_plan_count = sum(1 for plan in (run_data.get("plans") or []) if _effective_live_plan_status(plan, run_data) in {"blocked", "stopping"})
+    return RepositoryOverview(
+        run_count=max(overview.run_count, 1),
+        active_run_count=max(overview.active_run_count, 1),
+        failed_run_count=overview.failed_run_count,
+        blocked_plan_count=max(overview.blocked_plan_count, blocked_plan_count),
+        failed_plan_count=overview.failed_plan_count,
+        running_plan_count=max(overview.running_plan_count, running_plan_count),
+        stale_workspace_count=overview.stale_workspace_count,
+        recent_failure_count=overview.recent_failure_count,
+    )
 
 
 def load_dashboard_state(
@@ -178,12 +267,15 @@ def load_dashboard_state(
                 plan_cards = app._build_plan_cards_from_live_data(live_run_data)
             else:
                 raise
-        if live_run_data is not None and str(live_run_data.get("status") or "") == "running":
+        if live_run_data is not None and (
+            str(live_run_data.get("status") or "") == "running" or bool(live_run_data.get("stop_requested"))
+        ):
             selected_run = app._build_run_detail_from_live_data(live_run_data)
             plan_cards = app._build_plan_cards_from_live_data(live_run_data)
         selected_run_preflight = _preflight_run_snapshot(
             live_run_data or (app.load_saved_run_data(selected_run.run_root_path) if selected_run is not None else None)
         )
+        overview = adapt_overview_for_live_run(overview, live_run_data)
 
     if plan_execution_id is None and plan_cards:
         plan_execution_id = plan_cards[0].id
@@ -195,6 +287,7 @@ def load_dashboard_state(
         except PlanError:
             if live_run_data is not None:
                 selected_plan = next((plan for plan in plan_cards if plan.id == plan_execution_id), None)
+                steps = app._build_live_steps_from_run_data(live_run_data, plan_execution_id)
     if selected_plan_file:
         plan_file_path = Path(selected_plan_file).expanduser().resolve()
         selected_plan_file_name, selected_plan_file_contents = read_plan_file(plan_file_path)

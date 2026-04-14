@@ -21,7 +21,7 @@ def _status_class(status: str | None) -> str:
         return "status-success"
     if status in {"failed", "failure", "blocked"}:
         return "status-failure"
-    if status in {"running"}:
+    if status in {"running", "stopping"}:
         return "status-running"
     return "status-neutral"
 
@@ -41,6 +41,10 @@ def _page_link(route: str, /, **params: str | None) -> str:
     filtered = {k: v for k, v in params.items() if v is not None}
     query = urlencode(filtered)
     return f"{route}?{query}" if query else route
+
+
+def _run_detail_link(run_id: str, plan_execution_id: str | None = None, message: str | None = None) -> str:
+    return _page_link(f"/runs/{run_id}", plan_execution_id=plan_execution_id, message=message)
 
 
 def check_repo_path(path_value: str) -> tuple[str, str]:
@@ -109,6 +113,55 @@ def _provider_select_html(field_name: str, providers: list[tuple[str, str]]) -> 
         "<div class='help'>Override the agent provider for this run. "
         "Leave as Default to use whatever each plan specifies.</div>"
     )
+
+
+def _render_collapsible_section(
+    title: str,
+    body_html: str,
+    *,
+    heading_tag: str = "h2",
+    open_by_default: bool = False,
+    details_id: str | None = None,
+    class_name: str = "panel actions-details",
+    style: str | None = None,
+) -> str:
+    details_attrs: list[str] = [f"class='{_escape(class_name)}'"]
+    if details_id:
+        details_attrs.append(f"id='{_escape(details_id)}'")
+    if style:
+        details_attrs.append(f"style='{_escape(style)}'")
+    if open_by_default:
+        details_attrs.append("open")
+    return (
+        f"<details {' '.join(details_attrs)}>"
+        f"<summary><{heading_tag} class='inline-heading'>{_escape(title)}</{heading_tag}></summary>"
+        f"{body_html}"
+        "</details>"
+    )
+
+
+def _render_selection_list(
+    field_name: str,
+    items: list[tuple[str, str]],
+    *,
+    heading: str | None = None,
+    selected_values: set[str] | None = None,
+    empty_html: str = "",
+    input_type: str = "checkbox",
+    item_class: str = "checkbox",
+) -> str:
+    if not items:
+        return empty_html
+    selected = selected_values or set()
+    heading_html = f"<strong>{_escape(heading)}</strong>" if heading else ""
+    items_html = "".join(
+        f"<label class='{_escape(item_class)}'>"
+        f"<input type='{_escape(input_type)}' name='{_escape(field_name)}' value='{_escape(value)}'"
+        f"{' checked' if value in selected else ''}> {_escape(label)}"
+        "</label>"
+        for value, label in items
+    )
+    return heading_html + items_html
 
 
 def list_plans_in_directory(path_value: str) -> tuple[str, str, list[str]]:
@@ -377,7 +430,15 @@ def _failure_reason_label(reason: str | None) -> str | None:
         return "Blocked by agent rate limit"
     if reason == "agent_failed":
         return "Agent failed"
+    if reason == "run_stopped":
+        return "Stopped by operator"
     return reason
+
+
+def _display_status_label(status: str | None, failure_reason: str | None = None) -> str:
+    if status == "blocked" and failure_reason == "run_stopped":
+        return "stopped"
+    return str(status or "unknown")
 
 
 def _render_attention_card(item: AttentionItem, providers: list[tuple[str, str]] | None = None) -> str:
@@ -442,9 +503,9 @@ def _fmt_ts(ts: str | None) -> str:
     return s
 
 
-def _status_badge(status: str, label: str | None = None) -> str:
+def _status_badge(status: str, label: str | None = None, failure_reason: str | None = None) -> str:
     cls = _status_class(status)
-    return f"<span class='status-badge {_escape(cls)}'>{_escape(label or status)}</span>"
+    return f"<span class='status-badge {_escape(cls)}'>{_escape(label or _display_status_label(status, failure_reason))}</span>"
 
 
 def _lifecycle_badge(lifecycle: str) -> str:
@@ -575,6 +636,8 @@ select {
 }
 button {
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 textarea {
   resize: vertical;
@@ -995,6 +1058,9 @@ a.project-name:hover {
     grid-template-columns: 1fr;
     padding: 12px 0 0;
   }
+  .dashboard-primary-column {
+    order: -1;
+  }
   .page-header {
     padding: 14px 12px;
   }
@@ -1216,24 +1282,101 @@ function wireRepoCheck(inputId, statusId) {
   input.addEventListener('input', scheduleRefresh);
   refreshStatus();
 }
+async function copyTextValue(value) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!ok) {
+    throw new Error('copy failed');
+  }
+}
+function extractCopyValue(node) {
+  let value = node.getAttribute('data-copy') || '';
+  if (!value) {
+    const targetSelector = node.getAttribute('data-copy-target') || '';
+    const targetNode = targetSelector ? document.querySelector(targetSelector) : null;
+    value = targetNode ? (targetNode.textContent || '') : '';
+    const copyLastLines = parseInt(node.getAttribute('data-copy-last-lines') || '', 10);
+    if (copyLastLines > 0) {
+      const lines = value.split(/\r?\n/);
+      value = lines.slice(-copyLastLines).join('\n');
+    }
+  }
+  return value;
+}
+async function triggerCopyForNode(node) {
+  if (!node) return false;
+  let handling = node.dataset.copyHandling === '1';
+  if (handling) return false;
+  node.dataset.copyHandling = '1';
+  node.setAttribute('data-label', node.getAttribute('data-label') || node.textContent || '');
+  const value = extractCopyValue(node);
+  if (!value) {
+    node.dataset.copyHandling = '0';
+    return false;
+  }
+  try {
+    await copyTextValue(value);
+    node.textContent = 'Copied';
+    window.setTimeout(() => {
+      node.textContent = node.getAttribute('data-label') || '';
+    }, 1200);
+    return true;
+  } catch (_error) {
+    node.textContent = 'Copy failed';
+    return false;
+  } finally {
+    window.setTimeout(() => {
+      node.dataset.copyHandling = '0';
+    }, 50);
+  }
+}
+window.kctlCopyButtonClick = function(node) {
+  triggerCopyForNode(node);
+  return false;
+};
+window.kctlSubmitButtonClick = function(node, event) {
+  if (!node || !node.form) return false;
+  if (event && typeof event.preventDefault === 'function') {
+    event.preventDefault();
+  }
+  if (node.dataset.submitHandling === '1') return false;
+  node.dataset.submitHandling = '1';
+  node.disabled = true;
+  node.setAttribute('data-label', node.getAttribute('data-label') || node.textContent || '');
+  node.textContent = 'Stopping...';
+  if (typeof node.form.requestSubmit === 'function') {
+    node.form.requestSubmit();
+  } else {
+    node.form.submit();
+  }
+  return false;
+};
 function wireCopyButtons(root) {
-  (root || document).querySelectorAll('[data-copy]').forEach((node) => {
+  (root || document).querySelectorAll('[data-copy], [data-copy-target]').forEach((node) => {
     if (node.dataset.bound === '1') return;
     node.dataset.bound = '1';
     node.setAttribute('data-label', node.textContent || '');
-    node.addEventListener('click', async () => {
-      const value = node.getAttribute('data-copy') || '';
-      if (!value) return;
-      try {
-        await navigator.clipboard.writeText(value);
-        node.textContent = 'Copied';
-        window.setTimeout(() => {
-          node.textContent = node.getAttribute('data-label') || '';
-        }, 1200);
-      } catch (_error) {
-        node.textContent = 'Copy failed';
-      }
-    });
+    const handleCopy = async (event) => {
+      event.preventDefault();
+      await triggerCopyForNode(node);
+    };
+    node.addEventListener('click', handleCopy);
+    node.addEventListener('touchend', handleCopy, { passive: false });
+    if (window.PointerEvent) {
+      node.addEventListener('pointerup', handleCopy);
+    }
   });
 }
 """

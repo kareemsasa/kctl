@@ -11,6 +11,7 @@ class CommandResult:
     exit_code: int
     stdout: str
     stderr: str
+    stopped: bool = False
 
 
 class PlanError(Exception):

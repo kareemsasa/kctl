@@ -223,8 +223,6 @@ steps:
     prompt: |
       Review the current diff and reduce incidental edits only. Avoid broad refactors
       or unrelated cleanup.
-    output:
-      schema: review_v1
 ```
 
 Explicit fields override legacy inference. When omitted, `kctl` resolves behavior from legacy conventions for compatibility.

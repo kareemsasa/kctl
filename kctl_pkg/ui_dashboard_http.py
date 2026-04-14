@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 
 from .git import check_remote_connectivity, get_full_diff, get_project_git_summary
 from .types import PlanError
-from .ui_dashboard_support import _escape, _link, _page_link, check_repo_path, list_plans_in_directory
+from .ui_dashboard_support import _escape, _link, _page_link, _run_detail_link, check_repo_path, list_plans_in_directory
 
 
 def handle_api_get(
@@ -120,7 +120,7 @@ def handle_page_get(app: object, path: str, params: dict[str, list[str]]) -> tup
         "/runs/detail",
         "/sessions",
         "/sessions/detail",
-    }:
+    } and not path.startswith("/runs/"):
         raise PlanError("Not Found")
     try:
         body = app.render_route(path, params)
@@ -144,4 +144,6 @@ def resolve_action_redirect(action_result: object, message: str) -> str:
         return _page_link("/projects", message=message)
     if redirect_to == "/actions":
         return _page_link("/actions", message=message)
-    return _link({}, run_id=run_id, message=message)
+    if run_id:
+        return _run_detail_link(run_id, message=message)
+    return _link({}, message=message)

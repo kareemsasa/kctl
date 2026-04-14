@@ -492,6 +492,16 @@ def create_isolated_workspace(
     workspace_path: Path,
     branch_name: str,
 ) -> Path:
+    def ensure_runtime_links() -> None:
+        source_venv = repo_path / ".venv"
+        target_venv = workspace_path / ".venv"
+        if not source_venv.exists() or target_venv.exists():
+            return
+        try:
+            target_venv.symlink_to(source_venv, target_is_directory=True)
+        except OSError:
+            return
+
     workspace_path.parent.mkdir(parents=True, exist_ok=True)
     if workspace_path.exists():
         shutil.rmtree(workspace_path)
@@ -501,6 +511,7 @@ def create_isolated_workspace(
         cwd=repo_path,
     )
     if worktree_result.exit_code == 0:
+        ensure_runtime_links()
         return workspace_path
 
     clone_result = run_command(["git", "clone", str(repo_path), str(workspace_path)], cwd=repo_path)
@@ -512,4 +523,5 @@ def create_isolated_workspace(
     if switch_result.exit_code != 0:
         message = get_git_error_message(switch_result)
         raise PlanError(f"Failed to create isolated workspace branch '{branch_name}': {message}")
+    ensure_runtime_links()
     return workspace_path

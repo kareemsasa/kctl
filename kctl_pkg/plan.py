@@ -10,7 +10,7 @@ from .terminal import style_text
 from .types import PlanError
 
 STEP_TYPES = {"analyze", "change", "verify", "review"}
-STRUCTURED_OUTPUT_SCHEMAS = {"inspect_v1", "plan_v1", "review_v1"}
+STRUCTURED_OUTPUT_SCHEMAS = {"inspect_v1", "plan_v1"}
 REVIEW_POLICIES = {"advisory", "blocking", "manual"}
 STEP_MODES = {"default", "read-only"}
 VERIFY_MODES = {"legacy", "full"}
@@ -179,6 +179,11 @@ def validate_plan(plan: dict[str, Any]) -> None:
             output_schema = output.get("schema")
             if output_schema is not None and (not isinstance(output_schema, str) or not output_schema.strip()):
                 raise PlanError(f"Step '{step_id}' field 'output.schema' must be a non-empty string if provided.")
+            if output_schema is not None and output_schema not in STRUCTURED_OUTPUT_SCHEMAS:
+                supported = ", ".join(sorted(STRUCTURED_OUTPUT_SCHEMAS))
+                raise PlanError(
+                    f"Step '{step_id}' field 'output.schema' must be one of: {supported}."
+                )
         review = step.get("review")
         if review is not None:
             if not isinstance(review, dict):

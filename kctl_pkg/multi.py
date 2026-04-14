@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import discover_multi_run_logs, multi_run_dir, resolve_storage, worktree_run_root
-from .git import create_isolated_workspace, ensure_git_repo, get_repo_root, resolve_repo
+from .git import create_isolated_workspace, ensure_git_repo, get_current_branch, get_repo_root, resolve_repo
 from .output import ConsoleOutputSink, FileOutputSink, OutputSink, TeeOutputSink
 from .plan import load_plan, normalize_plan, validate_plan
 from .preflight import freeze_preflight_report, preflight_multi_run
@@ -143,6 +143,10 @@ def build_branch_name(run_id: str, plan_id: str) -> str:
     return f"kctl/{run_id}/{sanitize_plan_id(plan_id)}"
 
 
+def stop_request_path(run_root: Path) -> Path:
+    return run_root / "stop-requested"
+
+
 def write_run_state(run_root: Path, run_data: dict[str, Any]) -> Path:
     run_root.mkdir(parents=True, exist_ok=True)
     run_path = run_root / "run.json"
@@ -196,6 +200,8 @@ def write_blocked_run_state(
         "artifact_storage_mode": preflight_snapshot["environment"]["storage_mode"],
         "artifact_root_path": str(run_root.parent),
         "stream_log_path": str(run_root / "stream.log"),
+        "active_pids": [],
+        "stop_requested": False,
         "status": "blocked",
         "started_at": str(preflight_snapshot["captured_at"]),
         "ended_at": str(preflight_snapshot["captured_at"]),
@@ -232,6 +238,12 @@ def run_many_plans(
     selected_plan_names: list[str] | None = None,
     run_id_override: str | None = None,
     provider_override: str | None = None,
+    from_step: str | None = None,
+    only_step: str | None = None,
+    reuse_workspace_path: Path | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+    process_started: Callable[[int], None] | None = None,
+    process_finished: Callable[[int], None] | None = None,
 ) -> int:
     if concurrency < 1:
         raise PlanError("--concurrency must be at least 1.")
@@ -273,10 +285,16 @@ def run_many_plans(
         raise PlanError("Preflight failed before launch:\n" + "\n".join(preflight_report.format_blockers()))
     repo_root = preflight_report.repo_root
     assert repo_root is not None
+    if reuse_workspace_path is not None:
+        if len(plan_specs) != 1:
+            raise PlanError("Workspace reuse requires exactly one selected plan.")
+        reuse_workspace_path = reuse_workspace_path.expanduser().resolve()
+        ensure_git_repo(reuse_workspace_path)
     storage = resolve_storage()
     artifact_storage_mode = storage.mode
     run_root = multi_run_dir(repo_root, run_id, storage_mode=artifact_storage_mode)
     worktree_root = worktree_run_root(repo_root, run_id, storage_mode=artifact_storage_mode)
+    stop_path = stop_request_path(run_root)
     stream_log_path = run_root / "stream.log"
     output_sink = TeeOutputSink(ConsoleOutputSink(), FileOutputSink(stream_log_path))
     run_data: dict[str, Any] = {
@@ -286,6 +304,8 @@ def run_many_plans(
         "artifact_storage_mode": artifact_storage_mode,
         "artifact_root_path": str(run_root.parent),
         "stream_log_path": str(stream_log_path),
+        "active_pids": [],
+        "stop_requested": False,
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "concurrency": concurrency,
@@ -316,6 +336,30 @@ def run_many_plans(
         with state_lock:
             plan_state = plan_state_by_id[plan_id]
             plan_state.update(updates)
+            run_data["stop_requested"] = stop_path.exists()
+            write_run_state(run_root, run_data)
+
+    def is_stop_requested() -> bool:
+        return stop_path.exists() or (stop_requested is not None and stop_requested())
+
+    def register_process(pid: int) -> None:
+        if process_started is not None:
+            process_started(pid)
+        with state_lock:
+            active_pids = {int(value) for value in run_data.get("active_pids") or []}
+            active_pids.add(pid)
+            run_data["active_pids"] = sorted(active_pids)
+            run_data["stop_requested"] = stop_path.exists()
+            write_run_state(run_root, run_data)
+
+    def unregister_process(pid: int) -> None:
+        if process_finished is not None:
+            process_finished(pid)
+        with state_lock:
+            active_pids = {int(value) for value in run_data.get("active_pids") or []}
+            active_pids.discard(pid)
+            run_data["active_pids"] = sorted(active_pids)
+            run_data["stop_requested"] = stop_path.exists()
             write_run_state(run_root, run_data)
 
     def run_one_plan(spec: PlanSpec) -> tuple[str, int]:
@@ -323,15 +367,20 @@ def run_many_plans(
             ConsoleOutputSink(prefix=f"[{spec.plan_id}] "),
             FileOutputSink(stream_log_path),
         )
-        branch_name = build_branch_name(run_id, spec.plan_id)
-        worktree_path = worktree_root / spec.plan_id
+        if reuse_workspace_path is not None:
+            worktree_path = reuse_workspace_path
+            branch_name = get_current_branch(worktree_path)
+        else:
+            branch_name = build_branch_name(run_id, spec.plan_id)
+            worktree_path = worktree_root / spec.plan_id
         update_plan_state(
             spec.plan_id,
             status="running",
             branch_name=branch_name,
             worktree_path=str(worktree_path),
         )
-        create_isolated_workspace(repo_root, worktree_path, branch_name)
+        if reuse_workspace_path is None:
+            create_isolated_workspace(repo_root, worktree_path, branch_name)
 
         def status_callback(event: dict[str, Any]) -> None:
             if event["type"] == "step_started":
@@ -368,6 +417,11 @@ def run_many_plans(
             run_output_dir_override=run_root / spec.plan_id,
             status_callback=status_callback,
             provider_override=provider_override,
+            from_step=from_step,
+            only_step=only_step,
+            stop_requested=is_stop_requested,
+            process_started=register_process,
+            process_finished=unregister_process,
         )
         final_status = run_data_result["status"]
         verify_result = "not-run"
@@ -401,27 +455,33 @@ def run_many_plans(
         return spec.plan_id, 0 if mapped_status == "passed" else 1
 
     failures = 0
+    stopped_runs = 0
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {executor.submit(run_one_plan, spec): spec.plan_id for spec in plan_specs}
         for future in as_completed(futures):
             plan_id = futures[future]
             try:
-                _, exit_code = future.result()
+                plan_id_result, exit_code = future.result()
             except Exception as exc:
                 update_plan_state(plan_id, status="failed", failure_reason="plan_exception")
                 failures += 1
                 output_sink.write_line(style_status_text(f"  [{plan_id}] failed: {exc}", "failure"))
                 continue
-            if exit_code != 0:
+            plan_status = plan_state_by_id[plan_id_result]["status"]
+            if plan_status == "blocked":
+                stopped_runs += 1
+            elif exit_code != 0:
                 failures += 1
 
     run_data["ended_at"] = datetime.now(timezone.utc).isoformat()
-    run_data["status"] = "failed" if failures else "passed"
+    run_data["active_pids"] = []
+    run_data["stop_requested"] = stop_path.exists()
+    run_data["status"] = "failed" if failures else "stopped" if stopped_runs else "passed"
     write_run_state(run_root, run_data)
     output_sink.write_line("")
     output_sink.write_line(style_text(f"Run: {run_root}", dim=True))
     print_run_summary(run_data, output_sink)
-    return 1 if failures else 0
+    return 1 if failures or stopped_runs else 0
 
 
 def resolve_status_run_path(target: str) -> Path:
