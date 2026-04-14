@@ -3520,6 +3520,45 @@ window.addEventListener('DOMContentLoaded', () => {{
         )
         return self._page_shell(active_nav="Dashboard", body=body, extra_script=run_script)
 
+    def render_route(
+        self,
+        path: str,
+        params: dict[str, list[str]] | None = None,
+    ) -> str:
+        params = params or {}
+        action_message = params.get("message", [None])[0]
+
+        if path == "/actions":
+            return self.render_actions_page(action_message=action_message)
+        if path == "/projects/detail":
+            project_path = params.get("path", [""])[0]
+            return self.render_project_detail_page(project_path, action_message=action_message)
+        if path == "/projects":
+            return self.render_projects_page(action_message=action_message)
+        if path == "/sessions/detail":
+            session_id = params.get("id", [""])[0]
+            return self.render_session_detail_page(session_id)
+        if path == "/sessions":
+            prefill_project = params.get("project", [None])[0]
+            return self.render_sessions_page(action_message=action_message, prefill_project=prefill_project)
+        if path == "/runs/detail":
+            run_id = params.get("id", [""])[0]
+            if not run_id:
+                raise PlanError("Run id is required.")
+            plan_execution_id = params.get("plan_execution_id", [None])[0]
+            return self.render_run_page(run_id=run_id, plan_execution_id=plan_execution_id)
+        if path == "/":
+            run_id = params.get("run_id", [None])[0]
+            plan_execution_id = params.get("plan_execution_id", [None])[0]
+            selected_plan_file = params.get("selected_plan_file", [None])[0]
+            return self.render_page(
+                run_id=run_id,
+                plan_execution_id=plan_execution_id,
+                action_message=action_message,
+                selected_plan_file=selected_plan_file,
+            )
+        raise PlanError(f"Unsupported route: {path}")
+
 
 def serve_dashboard(
     repo_path: Path,
@@ -3681,37 +3720,8 @@ def serve_dashboard(
                 self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
                 return
             params = parse_qs(parsed.query)
-            action_message = params.get("message", [None])[0]
             try:
-                if parsed.path == "/actions":
-                    body = app.render_actions_page(action_message=action_message)
-                elif parsed.path == "/projects/detail":
-                    project_path = params.get("path", [""])[0]
-                    body = app.render_project_detail_page(project_path, action_message=action_message)
-                elif parsed.path == "/projects":
-                    body = app.render_projects_page(action_message=action_message)
-                elif parsed.path == "/sessions/detail":
-                    session_id = params.get("id", [""])[0]
-                    body = app.render_session_detail_page(session_id)
-                elif parsed.path == "/sessions":
-                    prefill_project = params.get("project", [None])[0]
-                    body = app.render_sessions_page(action_message=action_message, prefill_project=prefill_project)
-                elif parsed.path == "/runs/detail":
-                    run_id = params.get("id", [""])[0]
-                    if not run_id:
-                        raise PlanError("Run id is required.")
-                    plan_execution_id = params.get("plan_execution_id", [None])[0]
-                    body = app.render_run_page(run_id=run_id, plan_execution_id=plan_execution_id)
-                else:
-                    run_id = params.get("run_id", [None])[0]
-                    plan_execution_id = params.get("plan_execution_id", [None])[0]
-                    selected_plan_file = params.get("selected_plan_file", [None])[0]
-                    body = app.render_page(
-                        run_id=run_id,
-                        plan_execution_id=plan_execution_id,
-                        action_message=action_message,
-                        selected_plan_file=selected_plan_file,
-                    )
+                body = app.render_route(parsed.path, params)
             except PlanError as exc:
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")

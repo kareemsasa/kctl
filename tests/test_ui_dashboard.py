@@ -321,6 +321,66 @@ class UIDashboardTests(unittest.TestCase):
 
             self.assertIn("Started run-many for /tmp/plans.", html)
 
+    def test_render_route_dispatches_root_dashboard_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            html = app.render_route("/", {"run_id": [run_id]})
+
+            self.assertIn("Run Detail", html)
+            self.assertIn(run_id, html)
+            self.assertIn("Plan Executions", html)
+
+    def test_render_route_dispatches_runs_detail_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_id, _ = write_sample_plan_run(repo_path)
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            html = app.render_route("/runs/detail", {"id": [run_id]})
+
+            self.assertIn("&larr; Dashboard", html)
+            self.assertIn("Plan Executions", html)
+            self.assertIn("Live Output", html)
+            self.assertIn(run_id, html)
+
+    def test_render_route_rejects_runs_detail_without_id(self) -> None:
+        from kctl_pkg.types import PlanError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            with self.assertRaises(PlanError) as ctx:
+                app.render_route("/runs/detail", {})
+
+            self.assertIn("Run id is required", str(ctx.exception))
+
+    def test_render_route_dispatches_selected_plan_file_from_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_dir = repo_path / ".kctl" / "plans"
+            plan_dir.mkdir(parents=True, exist_ok=True)
+            plan_path = plan_dir / "001-sample.yaml"
+            plan_path.write_text("repo: /tmp\nobjective: inspect\nsteps:\n  - id: inspect\n    prompt: look\n")
+            index_repository_state(repo_path)
+
+            app = DashboardApp(repo_path)
+            html = app.render_route("/", {"selected_plan_file": [str(plan_path)]})
+
+            self.assertIn("Plan File", html)
+            self.assertIn("001-sample.yaml", html)
+            self.assertIn("objective: inspect", html)
+
     def test_start_run_many_runs_and_reindexes_in_background(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
