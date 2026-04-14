@@ -256,9 +256,17 @@ def get_repository(repo_root_or_id: str | Path, db_path: Path | None = None) -> 
     )
 
 
-def list_runs(repo_id: str | Path, db_path: Path | None = None) -> list[RunListItem]:
+def _resolve_repository_context(
+    repo_id: str | Path,
+    db_path: Path | None = None,
+) -> tuple[RepositorySummary, Path]:
     repository = get_repository(repo_id, db_path=db_path)
     _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    return repository, resolved_db_path
+
+
+def list_runs(repo_id: str | Path, db_path: Path | None = None) -> list[RunListItem]:
+    repository, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         rows = store.list_runs(repository.id)
@@ -281,8 +289,7 @@ def list_runs(repo_id: str | Path, db_path: Path | None = None) -> list[RunListI
 
 
 def get_run(repo_id: str | Path, run_id: str, db_path: Path | None = None) -> RunDetail:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    repository, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         row = store.get_run_with_counts(run_id)
@@ -309,8 +316,7 @@ def get_run(repo_id: str | Path, run_id: str, db_path: Path | None = None) -> Ru
 
 
 def list_plan_executions(repo_id: str | Path, run_id: str, db_path: Path | None = None) -> list[PlanExecutionCard]:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    repository, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         rows = store.list_plan_executions_for_run(run_id)
@@ -344,8 +350,7 @@ def list_plan_executions(repo_id: str | Path, run_id: str, db_path: Path | None 
 
 
 def list_repository_plan_executions(repo_id: str | Path, db_path: Path | None = None) -> list[PlanExecutionCard]:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    repository, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         rows = store.list_plan_executions_for_repository(repository.id)
@@ -379,8 +384,7 @@ def list_repository_plan_executions(repo_id: str | Path, db_path: Path | None = 
 
 
 def get_plan_execution(plan_execution_id: str, repo_id: str | Path, db_path: Path | None = None) -> PlanExecutionCard:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    repository, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         row = store.get_plan_execution(plan_execution_id)
@@ -413,8 +417,7 @@ def get_plan_execution(plan_execution_id: str, repo_id: str | Path, db_path: Pat
 
 
 def list_step_executions(plan_execution_id: str, repo_id: str | Path, db_path: Path | None = None) -> list[StepTimelineItem]:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    _, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         rows = store.list_step_executions_for_plan_execution(plan_execution_id)
@@ -449,8 +452,7 @@ def list_step_executions(plan_execution_id: str, repo_id: str | Path, db_path: P
 
 
 def get_workspace(plan_execution_id: str, repo_id: str | Path, db_path: Path | None = None) -> WorkspaceDetail | None:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    _, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         row = store.get_workspace_for_plan_execution(plan_execution_id)
@@ -486,8 +488,7 @@ def derive_workspace_lifecycle(
 
 
 def list_workspaces(repo_id: str | Path, db_path: Path | None = None) -> list[WorkspaceSummary]:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    repository, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         rows = store.list_workspaces_for_repository(repository.id)
@@ -647,8 +648,7 @@ def list_attention_items(repo_id: str | Path, db_path: Path | None = None) -> li
 
 
 def list_agent_profiles(repo_id: str | Path, db_path: Path | None = None) -> list[AgentProfileSummary]:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    _, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         rows = store.list_agent_profiles()
@@ -675,8 +675,7 @@ def list_agent_assignments(
     plan_execution_id: str | None = None,
     active_only: bool = False,
 ) -> list[AgentAssignmentSummary]:
-    repository = get_repository(repo_id, db_path=db_path)
-    _, resolved_db_path = resolve_db_path(repository.root_path, db_path=db_path)
+    _, resolved_db_path = _resolve_repository_context(repo_id, db_path=db_path)
     store = _open_store(resolved_db_path)
     try:
         rows = store.list_agent_assignments(plan_execution_id=plan_execution_id, active_only=active_only)
