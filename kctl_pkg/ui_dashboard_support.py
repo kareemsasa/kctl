@@ -149,19 +149,46 @@ def _render_selection_list(
     empty_html: str = "",
     input_type: str = "checkbox",
     item_class: str = "checkbox",
+    input_attrs: str = "",
 ) -> str:
     if not items:
         return empty_html
     selected = selected_values or set()
     heading_html = f"<strong>{_escape(heading)}</strong>" if heading else ""
+    item_class_name = item_class or "selection-list-item"
     items_html = "".join(
-        f"<label class='{_escape(item_class)}'>"
+        f"<label class='{_escape(item_class_name)}'>"
+        "<span class='selection-list-control'>"
         f"<input type='{_escape(input_type)}' name='{_escape(field_name)}' value='{_escape(value)}'"
-        f"{' checked' if value in selected else ''}> {_escape(label)}"
+        f"{(' ' + input_attrs.strip()) if input_attrs.strip() else ''}"
+        f"{' checked' if value in selected else ''}>"
+        "</span>"
+        f"<span class='selection-list-label'>{_escape(label)}</span>"
         "</label>"
         for value, label in items
     )
     return heading_html + items_html
+
+
+def _render_action_button(
+    label: str,
+    *,
+    action_name: str,
+    button_id: str | None = None,
+    class_name: str | None = None,
+) -> str:
+    id_html = f" id='{_escape(button_id)}'" if button_id else ""
+    class_html = f" class='{_escape(class_name or 'btn-primary')}'"
+    action_html = _escape(action_name)
+    return (
+        f"<a href='#' role='button' tabindex='0'{id_html}{class_html} "
+        f"onclick='return window.kctlActionButtonClick(this, \"{action_html}\")' "
+        f"ontouchend='return window.kctlActionButtonClick(this, \"{action_html}\", event)' "
+        f"onpointerup='return window.kctlActionButtonClick(this, \"{action_html}\", event)' "
+        f"onkeydown='return window.kctlKeyActionButton(this, \"{action_html}\", event)'>"
+        f"{_escape(label)}"
+        "</a>"
+    )
 
 
 def list_plans_in_directory(path_value: str) -> tuple[str, str, list[str]]:
@@ -648,6 +675,27 @@ textarea {
   align-items: center;
   gap: 8px;
 }
+.selection-list-item {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: start;
+  column-gap: 10px;
+  margin: 4px 0;
+}
+.selection-list-control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+}
+.selection-list-control input {
+  margin: 0;
+}
+.selection-list-label {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .notice {
   margin-bottom: 12px;
   padding: 10px 12px;
@@ -682,9 +730,6 @@ textarea {
   padding-left: 18px;
 }
 .plans-preview label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   margin: 4px 0;
 }
 .preflight-summary {
@@ -1345,6 +1390,28 @@ async function triggerCopyForNode(node) {
 window.kctlCopyButtonClick = function(node) {
   triggerCopyForNode(node);
   return false;
+};
+window.kctlActionButtonClick = function(node, actionName, event) {
+  if (!node || !actionName) return false;
+  if (event && typeof event.preventDefault === 'function') {
+    event.preventDefault();
+  }
+  if (event && typeof event.stopPropagation === 'function') {
+    event.stopPropagation();
+  }
+  if (node.dataset.actionHandling === '1') return false;
+  node.dataset.actionHandling = '1';
+  window.setTimeout(() => {
+    node.dataset.actionHandling = '0';
+  }, 100);
+  const action = window[actionName];
+  if (typeof action !== 'function') return false;
+  return action(node);
+};
+window.kctlKeyActionButton = function(node, actionName, event) {
+  if (!event) return false;
+  if (event.key !== 'Enter' && event.key !== ' ') return true;
+  return window.kctlActionButtonClick(node, actionName, event);
 };
 window.kctlSubmitButtonClick = function(node, event) {
   if (!node || !node.form) return false;

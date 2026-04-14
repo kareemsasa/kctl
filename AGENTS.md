@@ -24,6 +24,10 @@
 - Before changing dashboard behavior, run `bash scripts/test`.
 - Prefer extracting cohesive subsystems into helper modules while keeping `DashboardApp` as the public integration surface.
 - If you move logic out of `ui_dashboard.py`, keep wrapper methods or compatibility imports when tests patch module-level names there.
+- For dashboard UX, prefer server-driven stage transitions for critical workflows instead of relying on client-side button handlers.
+- For small dependent field behavior, prefer inline control wiring that still works if page-init JS never runs.
+- Treat page-init JS as progressive enhancement only. Do not make core mobile interactions depend on it.
+- When a mobile control seems flaky, prefer plain links or ordinary form submits over richer custom button handling.
 - The next clean extractions after the current work are:
   - import/cleanup consolidation inside `kctl_pkg/ui_dashboard.py` as behavior-neutral follow-up only
 

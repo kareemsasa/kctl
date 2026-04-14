@@ -4,7 +4,7 @@ import json
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,17 @@ def _apply_provider_override_to_plan(
     updated_plan["defaults"] = defaults
     updated_plan["_kctl_provider"] = provider_override
     updated_plan["_kctl_permission_mode"] = defaults.get("permission_mode") or "auto"
+    return updated_plan
+
+
+def _apply_repo_override_to_plan(
+    plan: dict[str, Any],
+    repo_override: Path | None,
+) -> dict[str, Any]:
+    if repo_override is None:
+        return plan
+    updated_plan = dict(plan)
+    updated_plan["repo"] = str(repo_override.resolve())
     return updated_plan
 
 
@@ -238,6 +249,7 @@ def run_many_plans(
     selected_plan_names: list[str] | None = None,
     run_id_override: str | None = None,
     provider_override: str | None = None,
+    repo_override: Path | None = None,
     from_step: str | None = None,
     only_step: str | None = None,
     reuse_workspace_path: Path | None = None,
@@ -248,10 +260,19 @@ def run_many_plans(
     if concurrency < 1:
         raise PlanError("--concurrency must be at least 1.")
     selected_filenames = {name.strip() for name in (selected_plan_names or []) if name.strip()}
+    normalized_repo_override = repo_override.expanduser().resolve() if repo_override is not None else None
+    if normalized_repo_override is not None:
+        ensure_git_repo(normalized_repo_override)
     run_id = run_id_override or build_multi_run_id()
     plan_specs, normalized_plans = load_normalized_multi_plans(
         plans_dir, selected_filenames=selected_filenames or None
     )
+    if normalized_repo_override is not None:
+        plan_specs = [replace(spec, repo_path=normalized_repo_override) for spec in plan_specs]
+        normalized_plans = {
+            plan_id: _apply_repo_override_to_plan(plan, normalized_repo_override)
+            for plan_id, plan in normalized_plans.items()
+        }
     normalized_plans = {
         plan_id: _apply_provider_override_to_plan(plan, provider_override)
         for plan_id, plan in normalized_plans.items()

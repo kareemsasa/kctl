@@ -432,6 +432,7 @@ class DashboardApp:
         concurrency: int,
         selected_plan_names: list[str] | None = None,
         provider_override: str | None = None,
+        repo_override: Path | None = None,
         from_step: str | None = None,
         only_step: str | None = None,
         reuse_workspace_path: Path | None = None,
@@ -450,6 +451,7 @@ class DashboardApp:
                     selected_plan_names=selected_plan_names,
                     run_id_override=run_id,
                     provider_override=provider_override,
+                    repo_override=repo_override,
                     from_step=from_step,
                     only_step=only_step,
                     reuse_workspace_path=reuse_workspace_path,
@@ -666,11 +668,23 @@ class DashboardApp:
     def render_session_detail_page(self, session_id: str) -> str:
         return render_session_detail(self, session_id)
 
-    def render_actions_page(self, *, action_message: str | None = None) -> str:
+    def render_actions_page(
+        self,
+        *,
+        action_message: str | None = None,
+        selected_plan_names: list[str] | None = None,
+        selected_project_paths: list[str] | None = None,
+        concurrency_value: str | None = None,
+        stage: str | None = None,
+    ) -> str:
         return render_actions(
             self,
             action_message=action_message,
             summarize_preflight=summarize_preflight_for_dashboard,
+            selected_plan_names=selected_plan_names,
+            selected_project_paths=selected_project_paths,
+            concurrency_value=concurrency_value,
+            stage=stage,
         )
 
     def render_project_detail_page(self, project_path: str, *, action_message: str | None = None) -> str:
@@ -734,7 +748,17 @@ class DashboardApp:
         action_message = params.get("message", [None])[0]
 
         if path == "/actions":
-            return self.render_actions_page(action_message=action_message)
+            selected_plan_names = [name.strip() for name in params.get("selected_plans", []) if name.strip()]
+            selected_project_paths = [path_value.strip() for path_value in params.get("project_paths", []) if path_value.strip()]
+            concurrency_value = params.get("concurrency", [None])[0]
+            stage = params.get("stage", [None])[0]
+            return self.render_actions_page(
+                action_message=action_message,
+                selected_plan_names=selected_plan_names or None,
+                selected_project_paths=selected_project_paths or None,
+                concurrency_value=concurrency_value,
+                stage=stage,
+            )
         if path == "/projects/detail":
             project_path = params.get("path", [""])[0]
             return self.render_project_detail_page(project_path, action_message=action_message)
@@ -849,38 +873,6 @@ class DashboardApp:
             return DashboardActionResult(
                 redirect_to="/projects",
                 message=f"Removed tracked project: {Path(project_path_value).expanduser().resolve()}",
-            )
-
-        if path == "/actions/run-plan-across-projects":
-            selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
-            if len(selected_plan_names) != 1:
-                raise PlanError("Select exactly one plan to run across projects.")
-            project_paths = [
-                Path(path_value).expanduser().resolve()
-                for path_value in form_data.get("project_paths", [])
-                if path_value.strip()
-            ]
-            if not project_paths:
-                raise PlanError("Select at least one tracked project.")
-            target_repo_value = form_data.get("target_repo", [""])[0].strip()
-            if not target_repo_value:
-                raise PlanError("Target repo is required.")
-            target_repo = Path(target_repo_value).expanduser().resolve()
-            plans_dir_value = form_data.get("plans_dir", [""])[0].strip()
-            plans_dir = Path(plans_dir_value).expanduser() if plans_dir_value else self.plans_dir_for_repo(target_repo)
-            plan_path = plans_dir.resolve() / selected_plan_names[0]
-            if not plan_path.exists():
-                raise PlanError(f"Plan file not found: {plan_path}")
-            provider_override = form_data.get("provider_override", [""])[0].strip() or None
-            run_id = self.start_run_plan_across_projects(
-                plan_path=plan_path,
-                project_paths=project_paths,
-                provider_override=provider_override,
-            )
-            return DashboardActionResult(
-                redirect_to="/",
-                message=f"Started single-plan run for {selected_plan_names[0]} across {len(project_paths)} project(s).",
-                run_id=run_id,
             )
 
         if path == "/actions/index":
@@ -1023,17 +1015,39 @@ class DashboardApp:
             if concurrency < 1:
                 raise PlanError("Concurrency must be at least 1.")
             selected_plan_names = [name.strip() for name in form_data.get("selected_plans", []) if name.strip()]
+            if not selected_plan_names:
+                raise PlanError("Select at least one plan to run.")
             provider_override = form_data.get("provider_override", [""])[0].strip() or None
+            project_paths = [
+                Path(path_value).expanduser().resolve()
+                for path_value in form_data.get("project_paths", [])
+                if path_value.strip()
+            ]
+            if len(selected_plan_names) == 1 and len(project_paths) > 1:
+                plan_path = plans_dir.resolve() / selected_plan_names[0]
+                if not plan_path.exists():
+                    raise PlanError(f"Plan file not found: {plan_path}")
+                self.start_run_plan_across_projects(
+                    plan_path=plan_path,
+                    project_paths=project_paths,
+                    provider_override=provider_override,
+                )
+                return DashboardActionResult(
+                    redirect_to="/actions",
+                    message=f"Started single-plan run for {selected_plan_names[0]} across {len(project_paths)} project(s).",
+                )
+            repo_override = project_paths[0] if project_paths else target_repo
             run_id = self.start_run_many(
                 plans_dir,
                 concurrency,
                 selected_plan_names=selected_plan_names or None,
                 provider_override=provider_override,
+                repo_override=repo_override,
             )
             if len(selected_plan_names) == 1:
-                message = f"Started plan run for {selected_plan_names[0]} in {plans_dir}."
+                message = f"Started plan run for {selected_plan_names[0]} in {repo_override}."
             else:
-                message = f"Started run-many for {plans_dir}."
+                message = f"Started {len(selected_plan_names)} plans in {repo_override}."
             return DashboardActionResult(redirect_to="/", message=message, run_id=run_id)
 
         raise PlanError(f"Unsupported action: {path}")

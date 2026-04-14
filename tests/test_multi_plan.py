@@ -792,6 +792,67 @@ class MultiPlanTests(unittest.TestCase):
                 self.assertIn("## Plans", summary_text)
                 self.assertIn("- 001-plan: passed (verification: not-run)", summary_text)
 
+    def test_run_many_plans_can_override_target_repo_for_all_selected_plans(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            target_repo = Path(tmpdir) / "target-repo"
+            init_git_repo(repo_path)
+            init_git_repo(target_repo)
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            for index in range(2):
+                (plans_dir / f"{index + 1:03d}-plan.yaml").write_text(
+                    textwrap.dedent(
+                        f"""
+                        repo: {repo_path}
+                        objective: plan {index}
+                        steps:
+                          - id: inspect
+                            prompt: Inspect {index}
+                        """
+                    ).strip()
+                    + "\n"
+                )
+
+            execute_calls: list[dict[str, object]] = []
+
+            def fake_create_workspace(repo_root: Path, workspace_path: Path, branch_name: str) -> Path:
+                self.assertEqual(repo_root.resolve(), target_repo.resolve())
+                workspace_path.mkdir(parents=True, exist_ok=True)
+                return workspace_path
+
+            def fake_execute_plan_run(**kwargs):
+                execute_calls.append(kwargs)
+                run_output_dir = kwargs["run_output_dir_override"]
+                run_output_dir.mkdir(parents=True, exist_ok=True)
+                return {
+                    "status": "success",
+                    "steps": [
+                        {
+                            "id": "inspect",
+                            "status": "success",
+                            "verify": None,
+                            "changed_files_count": 0,
+                        }
+                    ],
+                    "log_path": str(run_output_dir / "run.json"),
+                }
+
+            with patch("kctl_pkg.multi.create_isolated_workspace", side_effect=fake_create_workspace), patch(
+                "kctl_pkg.multi.execute_plan_run", side_effect=fake_execute_plan_run
+            ):
+                exit_code = run_many_plans(
+                    plans_dir,
+                    concurrency=1,
+                    verbose=False,
+                    selected_plan_names=["001-plan.yaml", "002-plan.yaml"],
+                    repo_override=target_repo,
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(execute_calls), 2)
+            self.assertTrue(all("/worktrees/" in str(call["repo_override"]) for call in execute_calls))
+
     def test_execute_plan_run_explicit_output_schema_is_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"

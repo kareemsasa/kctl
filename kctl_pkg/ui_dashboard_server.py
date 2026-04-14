@@ -17,7 +17,6 @@ _POST_ACTION_PATHS = {
     "/actions/rerun-plan",
     "/actions/add-project",
     "/actions/remove-project",
-    "/actions/run-plan-across-projects",
     "/actions/start-session",
     "/actions/stop-session",
     "/actions/session-reply",

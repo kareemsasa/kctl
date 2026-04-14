@@ -17,7 +17,7 @@ from kctl_pkg.ui_dashboard import (
     list_plans_in_directory,
     summarize_preflight_for_dashboard,
 )
-from kctl_pkg.ui_dashboard_support import _render_collapsible_section, _render_selection_list, _run_detail_link
+from kctl_pkg.ui_dashboard_support import _render_action_button, _render_collapsible_section, _render_selection_list, _run_detail_link
 from kctl_pkg.ui_dashboard_http import handle_api_get, handle_page_get, resolve_action_redirect
 from kctl_pkg.ui_index import default_db_path, index_repository_state
 from tests.test_ui_index import init_git_repo, write_sample_plan_run
@@ -51,6 +51,20 @@ class UIDashboardTests(unittest.TestCase):
         self.assertIn("name='selected_plans'", html)
         self.assertIn("value='001-a.yaml'", html)
         self.assertIn("value='002-b.yaml' checked", html)
+        self.assertIn("class='selection-list-item'", html)
+        self.assertIn("class='selection-list-control'", html)
+        self.assertIn("class='selection-list-label'>002-b.yaml</span>", html)
+
+    def test_render_action_button_helper(self) -> None:
+        html = _render_action_button("Save", action_name="kctlTestAction", button_id="save_btn")
+
+        self.assertIn("id='save_btn'", html)
+        self.assertIn("href='#'", html)
+        self.assertIn("role='button'", html)
+        self.assertIn('window.kctlActionButtonClick(this, "kctlTestAction")', html)
+        self.assertIn('window.kctlKeyActionButton(this, "kctlTestAction", event)', html)
+        self.assertIn("ontouchend=", html)
+        self.assertIn("onpointerup=", html)
 
     def test_run_detail_link_helper_builds_real_run_path(self) -> None:
         self.assertEqual(_run_detail_link("run-123"), "/runs/run-123")
@@ -381,20 +395,14 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Create Plan", actions_html)
             self.assertIn("template_name", actions_html)
             self.assertIn(".kctl/plans", actions_html)
-            self.assertIn("Plans Dir Override", actions_html)
-            self.assertIn("Target Repo", actions_html)
-            self.assertIn("target_repo_run_many_status", actions_html)
-            self.assertIn("/api/check-repo", actions_html)
-            self.assertIn("plans_dir_preview", actions_html)
-            self.assertIn("/api/list-plans", actions_html)
-            self.assertIn("/api/preflight", actions_html)
-            self.assertIn("selected_plans", actions_html)
-            self.assertIn("Launch Preflight", actions_html)
-            self.assertIn("run_many_preflight", actions_html)
-            self.assertIn("preflight-badge", actions_html)
-            self.assertIn("run_many_launch_decision", actions_html)
-            self.assertIn("PASS", actions_html)
-            self.assertIn("run_many_submit_button", actions_html)
+            self.assertIn("Plans source", actions_html)
+            self.assertIn("Save Plan Selection", actions_html)
+            self.assertIn("method='get' action='/actions'", actions_html)
+            self.assertIn("name='stage' value='project'", actions_html)
+            self.assertIn("<summary><h2 class='inline-heading'>Create Plan</h2></summary>", actions_html)
+            self.assertIn("data-objective='Make one small, low-risk change in this repo.'", actions_html)
+            self.assertIn("onchange=\"var o=this.options[this.selectedIndex];var t=document.getElementById('objective');", actions_html)
+            self.assertIn(">Make one small, low-risk change in this repo.</textarea>", actions_html)
 
     def test_actions_page_prerenders_existing_plans_in_run_plans_container(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -409,11 +417,37 @@ class UIDashboardTests(unittest.TestCase):
             app = DashboardApp(repo_path)
             actions_html = app.render_actions_page()
 
-            self.assertIn("plans_dir_preview", actions_html)
             self.assertIn("001-sample.yaml", actions_html)
-            self.assertIn("Plans found", actions_html)
-            self.assertIn("run_single_across_projects_button", actions_html)
-            self.assertIn("Tracked Projects", actions_html)
+            self.assertIn("Plans", actions_html)
+
+            project_stage_html = app.render_route(
+                "/actions",
+                {"selected_plans": ["001-sample.yaml"], "stage": ["project"]},
+            )
+            self.assertIn("Saved Plan:", project_stage_html)
+            self.assertIn("Current Repo", project_stage_html)
+            self.assertIn("Save Project Selection", project_stage_html)
+            self.assertIn("Choose one or more projects to run this plan.", project_stage_html)
+            self.assertIn("Edit Previous Step", project_stage_html)
+
+            concurrency_stage_html = app.render_route(
+                "/actions",
+                {
+                    "selected_plans": ["001-sample.yaml"],
+                    "project_paths": [str(repo_path.resolve())],
+                    "stage": ["concurrency"],
+                },
+            )
+            self.assertIn("Saved Project:", concurrency_stage_html)
+            self.assertIn("Save Concurrency", concurrency_stage_html)
+            self.assertIn("run_plans_concurrency", concurrency_stage_html)
+
+            plan_stage_html = app.render_route(
+                "/actions",
+                {"selected_plans": ["001-sample.yaml"], "stage": ["plan"]},
+            )
+            self.assertIn("Save Plan Selection", plan_stage_html)
+            self.assertNotIn("Save Project Selection", plan_stage_html)
 
     def test_dashboard_attention_queue_surfaces_blocked_and_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -667,6 +701,7 @@ class UIDashboardTests(unittest.TestCase):
                 selected_plan_names: list[str] | None = None,
                 run_id_override: str | None = None,
                 provider_override: str | None = None,
+                repo_override: Path | None = None,
                 from_step: str | None = None,
                 only_step: str | None = None,
                 reuse_workspace_path: Path | None = None,
@@ -683,6 +718,7 @@ class UIDashboardTests(unittest.TestCase):
                         selected_plan_names,
                         run_id_override,
                         provider_override,
+                        repo_override,
                         from_step,
                         only_step,
                         reuse_workspace_path,
@@ -713,7 +749,7 @@ class UIDashboardTests(unittest.TestCase):
             self.assertEqual(
                 calls,
                 [
-                    ("run_many", app.plans_dir_for_repo(target_repo).resolve(), 2, False, ["001-one.yaml"], run_id, None, None, None, None, True, True, True),
+                    ("run_many", app.plans_dir_for_repo(target_repo).resolve(), 2, False, ["001-one.yaml"], run_id, None, None, None, None, None, True, True, True),
                     ("index", repo_path.resolve(), None),
                 ],
             )
@@ -734,6 +770,7 @@ class UIDashboardTests(unittest.TestCase):
                         "target_repo": [str(target_repo)],
                         "concurrency": ["2"],
                         "selected_plans": ["001-one.yaml"],
+                        "project_paths": [str(target_repo)],
                         "provider_override": ["claude"],
                     },
                 )
@@ -742,6 +779,67 @@ class UIDashboardTests(unittest.TestCase):
             self.assertEqual(result.run_id, "run-123")
             self.assertIn("Started plan run for 001-one.yaml", result.message)
             self.assertEqual(start_run_many_mock.call_args.kwargs["provider_override"], "claude")
+            self.assertEqual(start_run_many_mock.call_args.kwargs["repo_override"], target_repo.resolve())
+
+    def test_handle_action_run_many_uses_tracked_projects_for_cross_project_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_a = Path(tmpdir) / "project-a"
+            project_b = Path(tmpdir) / "project-b"
+            init_git_repo(repo_path)
+            init_git_repo(project_a)
+            init_git_repo(project_b)
+            plans_dir = repo_path / ".kctl" / "plans"
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / "001-one.yaml").write_text(
+                f"repo: {repo_path}\nobjective: x\nsteps:\n  - id: inspect\n    prompt: x\n"
+            )
+
+            app = DashboardApp(repo_path)
+            with patch.object(app, "start_run_plan_across_projects", return_value="run-xyz") as start_cross_mock:
+                result = app.handle_action(
+                    "/actions/run-many",
+                    {
+                        "target_repo": [str(repo_path)],
+                        "concurrency": ["1"],
+                        "selected_plans": ["001-one.yaml"],
+                        "project_paths": [str(project_a), str(project_b)],
+                        "provider_override": ["claude"],
+                    },
+                )
+
+            self.assertEqual(result.redirect_to, "/actions")
+            self.assertIsNone(result.run_id)
+            self.assertIn("across 2 project(s)", result.message)
+            self.assertEqual(start_cross_mock.call_args.kwargs["provider_override"], "claude")
+            self.assertEqual(
+                sorted(str(path) for path in start_cross_mock.call_args.kwargs["project_paths"]),
+                sorted([str(project_a.resolve()), str(project_b.resolve())]),
+            )
+
+    def test_handle_action_run_many_multiple_plans_target_one_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_a = Path(tmpdir) / "project-a"
+            init_git_repo(repo_path)
+            init_git_repo(project_a)
+
+            app = DashboardApp(repo_path)
+            with patch.object(app, "start_run_many", return_value="run-456") as start_run_many_mock:
+                result = app.handle_action(
+                    "/actions/run-many",
+                    {
+                        "target_repo": [str(repo_path)],
+                        "concurrency": ["1"],
+                        "selected_plans": ["001-one.yaml", "002-two.yaml"],
+                        "project_paths": [str(project_a)],
+                    },
+                )
+
+            self.assertEqual(result.redirect_to, "/")
+            self.assertEqual(result.run_id, "run-456")
+            self.assertIn("Started 2 plans", result.message)
+            self.assertEqual(start_run_many_mock.call_args.kwargs["repo_override"], project_a.resolve())
 
     def test_handle_action_start_session_uses_default_provider_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
