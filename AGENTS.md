@@ -4,6 +4,7 @@
 
 - `kctl_pkg/ui_dashboard.py` has been partially decomposed.
 - Shared stateless helpers, styles, shared scripts, and small HTML builders live in `kctl_pkg/ui_dashboard_support.py`.
+- Actions page rendering and its preflight/plan-preview browser script now live in `kctl_pkg/ui_dashboard_actions.py`.
 - Project tracking and project page rendering now live in `kctl_pkg/ui_dashboard_projects.py`.
 - Session runtime and session page rendering now live in `kctl_pkg/ui_dashboard_sessions.py`.
 - GET route dispatch now goes through `DashboardApp.render_route(...)`.
@@ -17,7 +18,6 @@
 - If you move logic out of `ui_dashboard.py`, keep wrapper methods or compatibility imports when tests patch module-level names there.
 - The next clean extractions after the current work are:
   - run/dashboard detail page rendering
-  - actions page rendering and preflight form JS
   - dashboard overview/detail page rendering
 
 ## Known Constraints
