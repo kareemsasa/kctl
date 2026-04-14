@@ -71,6 +71,27 @@ def derive_step_kind(step_result: dict[str, Any]) -> str:
     return "verify" if step_result["id"] == "verify" or step_result.get("verify") is not None else "agent"
 
 
+def build_step_metadata(step_result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "structured_artifacts": step_result.get("structured_artifacts") or {},
+        "artifact_parse_error": step_result.get("artifact_parse_error"),
+        "verify_environment": step_result.get("verify_environment"),
+        "before_git_status": step_result.get("before_git_status"),
+        "after_git_status": step_result.get("after_git_status"),
+        "diff_stat": step_result.get("diff_stat"),
+        "failure_reason": step_result.get("failure_reason"),
+        "failure_details": step_result.get("failure_details"),
+        "step_type": step_result.get("step_type"),
+        "output": step_result.get("output"),
+        "review_policy": step_result.get("review_policy"),
+        "mode": step_result.get("mode"),
+        "verify_mode": step_result.get("verify_mode"),
+        "provider": step_result.get("provider"),
+        "permission_mode": step_result.get("permission_mode"),
+        "reviews": step_result.get("reviews") or [],
+    }
+
+
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -188,14 +209,7 @@ def index_repository_state(repo_path: Path, db_path: Path | None = None) -> dict
                     artifact_path = None
                     if structured_artifacts:
                         artifact_path = sorted(structured_artifacts.values())[0]
-                    metadata = {
-                        "structured_artifacts": structured_artifacts,
-                        "artifact_parse_error": step_result.get("artifact_parse_error"),
-                        "verify_environment": step_result.get("verify_environment"),
-                        "before_git_status": step_result.get("before_git_status"),
-                        "after_git_status": step_result.get("after_git_status"),
-                        "diff_stat": step_result.get("diff_stat"),
-                    }
+                    metadata = build_step_metadata(step_result)
                     started_at = str(step_result.get("started_at") or now)
                     ended_at = step_result.get("ended_at")
                     duration_ms = None
@@ -285,14 +299,7 @@ def index_repository_state(repo_path: Path, db_path: Path | None = None) -> dict
             for index, step_result in enumerate(step_results, start=1):
                 structured_artifacts = step_result.get("structured_artifacts") or {}
                 artifact_path = sorted(structured_artifacts.values())[0] if structured_artifacts else None
-                metadata = {
-                    "structured_artifacts": structured_artifacts,
-                    "artifact_parse_error": step_result.get("artifact_parse_error"),
-                    "verify_environment": step_result.get("verify_environment"),
-                    "before_git_status": step_result.get("before_git_status"),
-                    "after_git_status": step_result.get("after_git_status"),
-                    "diff_stat": step_result.get("diff_stat"),
-                }
+                metadata = build_step_metadata(step_result)
                 started_at = str(step_result.get("started_at") or now)
                 ended_at = step_result.get("ended_at")
                 duration_ms = None

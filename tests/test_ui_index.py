@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from kctl_pkg.artifacts import single_run_dir
 from kctl_pkg.ui_index import (
+    build_step_metadata,
     default_db_path,
     derive_step_kind,
     index_repository_state,
@@ -104,6 +105,10 @@ def write_sample_plan_run(repo_path: Path) -> tuple[str, Path]:
                 "codex": {"command": ["codex"], "cwd": str(repo_path), "exit_code": 0, "stdout": "ok", "stderr": ""},
                 "verify": None,
                 "step_type": {"effective_type": "analyze"},
+                "output": {"schema": "inspect_v1"},
+                "mode": {"effective_mode": "read-only"},
+                "provider": "codex",
+                "permission_mode": None,
                 "verify_environment": None,
                 "reviews": [],
                 "raw_artifact_path": str(raw_output_path),
@@ -137,6 +142,9 @@ def write_sample_plan_run(repo_path: Path) -> tuple[str, Path]:
                     "environment": {"cwd": str(repo_path), "shell": "sh -lc"},
                 },
                 "step_type": {"effective_type": "verify"},
+                "verify_mode": {"effective_mode": "legacy"},
+                "provider": "codex",
+                "permission_mode": None,
                 "verify_environment": {"cwd": str(repo_path), "shell": "sh -lc"},
                 "reviews": [],
                 "raw_artifact_path": str(plan_run_dir / "step-02-raw.md"),
@@ -180,6 +188,35 @@ def write_sample_plan_run(repo_path: Path) -> tuple[str, Path]:
 
 
 class UIIndexTests(unittest.TestCase):
+    def test_build_step_metadata_preserves_execution_context(self) -> None:
+        metadata = build_step_metadata(
+            {
+                "structured_artifacts": {"inspect_v1": "/tmp/inspect.json"},
+                "artifact_parse_error": None,
+                "verify_environment": {"shell": "sh -lc"},
+                "before_git_status": {"stdout": ""},
+                "after_git_status": {"stdout": " M app.py"},
+                "diff_stat": {"stdout": " app.py | 2 +-"},
+                "failure_reason": "agent_rate_limited",
+                "failure_details": {"reset_hint": "3pm"},
+                "step_type": {"effective_type": "analyze"},
+                "output": {"schema": "inspect_v1"},
+                "review_policy": {"effective_policy": "advisory"},
+                "mode": {"effective_mode": "read-only"},
+                "verify_mode": {"effective_mode": "legacy"},
+                "provider": "claude",
+                "permission_mode": "plan",
+                "reviews": [{"reviewer": "scope", "verdict": "pass"}],
+            }
+        )
+
+        self.assertEqual(metadata["failure_reason"], "agent_rate_limited")
+        self.assertEqual(metadata["failure_details"], {"reset_hint": "3pm"})
+        self.assertEqual(metadata["step_type"], {"effective_type": "analyze"})
+        self.assertEqual(metadata["provider"], "claude")
+        self.assertEqual(metadata["permission_mode"], "plan")
+        self.assertEqual(metadata["reviews"], [{"reviewer": "scope", "verdict": "pass"}])
+
     def test_derive_step_kind_prefers_effective_step_type(self) -> None:
         self.assertEqual(derive_step_kind({"id": "inspect", "step_type": {"effective_type": "analyze"}}), "analyze")
         self.assertEqual(derive_step_kind({"id": "implement", "step_type": {"effective_type": "change"}}), "change")
@@ -248,6 +285,9 @@ class UIIndexTests(unittest.TestCase):
                 step_rows = connection.execute(
                     "SELECT step_key, kind, verify_status, changed_files_count FROM step_executions ORDER BY sequence_index"
                 ).fetchall()
+                metadata_rows = connection.execute(
+                    "SELECT step_key, metadata_json FROM step_executions ORDER BY sequence_index"
+                ).fetchall()
             finally:
                 connection.close()
 
@@ -260,6 +300,13 @@ class UIIndexTests(unittest.TestCase):
                     ("verify", "verify", "passed", 1),
                 ],
             )
+            inspect_metadata = json.loads(metadata_rows[0][1])
+            verify_metadata = json.loads(metadata_rows[1][1])
+            self.assertEqual(inspect_metadata["step_type"], {"effective_type": "analyze"})
+            self.assertEqual(inspect_metadata["output"], {"schema": "inspect_v1"})
+            self.assertEqual(inspect_metadata["mode"], {"effective_mode": "read-only"})
+            self.assertEqual(inspect_metadata["provider"], "codex")
+            self.assertEqual(verify_metadata["verify_mode"], {"effective_mode": "legacy"})
 
     def test_ui_print_commands_read_indexed_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

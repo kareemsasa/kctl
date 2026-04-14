@@ -15,6 +15,7 @@
 - POST action dispatch now goes through `DashboardApp.handle_action(...)`.
 - `kctl_pkg/ui_service.py` now forwards `PATH`, present `KCTL_*` variables, and common provider credential env vars into the generated systemd user service so dashboard-launched runs keep the same runtime context as the installing shell.
 - `kctl_pkg/ui_index.py` now preserves explicit effective step types (`analyze`, `change`, `verify`, `review`) when indexing step timelines instead of collapsing non-verify work into `agent`.
+- `kctl_pkg/ui_index.py` now also preserves richer step metadata in `step_executions.metadata_json`, including failure details, step/output/review/mode metadata, provider info, and recorded reviews from the runner.
 - `kctl_pkg/ui_read.py` now centralizes repository/db resolution through an internal `_resolve_repository_context(...)` helper; use that path for read-model additions instead of repeating `get_repository(...)` plus `resolve_db_path(...)`.
 - Tests intentionally patch some seams through `kctl_pkg.ui_dashboard`, so preserve those patch points when extracting code.
 
