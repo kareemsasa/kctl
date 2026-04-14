@@ -62,6 +62,15 @@ def derive_verify_status(step_result: dict[str, Any]) -> str:
     return "failed"
 
 
+def derive_step_kind(step_result: dict[str, Any]) -> str:
+    step_type = step_result.get("step_type")
+    if isinstance(step_type, dict):
+        effective_type = step_type.get("effective_type")
+        if effective_type in {"analyze", "change", "verify", "review"}:
+            return str(effective_type)
+    return "verify" if step_result["id"] == "verify" or step_result.get("verify") is not None else "agent"
+
+
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -195,7 +204,7 @@ def index_repository_state(repo_path: Path, db_path: Path | None = None) -> dict
                         ended_dt = datetime.fromisoformat(str(ended_at))
                         duration_ms = int(max(0.0, (ended_dt - started_dt).total_seconds()) * 1000)
                     step_name = step_result["id"].replace("-", " ").title()
-                    step_kind = "verify" if step_result["id"] == "verify" or step_result.get("verify") is not None else "agent"
+                    step_kind = derive_step_kind(step_result)
                     step_record = StepExecutionRecord(
                         id=f"{plan_execution_id}:{index:02d}",
                         plan_execution_id=plan_execution_id,
@@ -296,7 +305,7 @@ def index_repository_state(repo_path: Path, db_path: Path | None = None) -> dict
                     plan_execution_id=plan_execution_id,
                     step_key=str(step_result["id"]),
                     step_name=str(step_result["id"]).replace("-", " ").title(),
-                    kind="verify" if step_result["id"] == "verify" or step_result.get("verify") is not None else "agent",
+                        kind=derive_step_kind(step_result),
                     sequence_index=index,
                     status=str(step_result.get("status") or "unknown"),
                     verify_status=derive_verify_status(step_result),

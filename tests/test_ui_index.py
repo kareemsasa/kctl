@@ -13,7 +13,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kctl_pkg.artifacts import single_run_dir
-from kctl_pkg.ui_index import default_db_path, index_repository_state, print_ui_run_detail, print_ui_runs, print_ui_workspaces
+from kctl_pkg.ui_index import (
+    default_db_path,
+    derive_step_kind,
+    index_repository_state,
+    print_ui_run_detail,
+    print_ui_runs,
+    print_ui_workspaces,
+)
 
 
 def run_checked(command: list[str], cwd: Path) -> None:
@@ -96,6 +103,7 @@ def write_sample_plan_run(repo_path: Path) -> tuple[str, Path]:
                 "codex_summary": "done",
                 "codex": {"command": ["codex"], "cwd": str(repo_path), "exit_code": 0, "stdout": "ok", "stderr": ""},
                 "verify": None,
+                "step_type": {"effective_type": "analyze"},
                 "verify_environment": None,
                 "reviews": [],
                 "raw_artifact_path": str(raw_output_path),
@@ -128,6 +136,7 @@ def write_sample_plan_run(repo_path: Path) -> tuple[str, Path]:
                     "stderr": "",
                     "environment": {"cwd": str(repo_path), "shell": "sh -lc"},
                 },
+                "step_type": {"effective_type": "verify"},
                 "verify_environment": {"cwd": str(repo_path), "shell": "sh -lc"},
                 "reviews": [],
                 "raw_artifact_path": str(plan_run_dir / "step-02-raw.md"),
@@ -171,6 +180,12 @@ def write_sample_plan_run(repo_path: Path) -> tuple[str, Path]:
 
 
 class UIIndexTests(unittest.TestCase):
+    def test_derive_step_kind_prefers_effective_step_type(self) -> None:
+        self.assertEqual(derive_step_kind({"id": "inspect", "step_type": {"effective_type": "analyze"}}), "analyze")
+        self.assertEqual(derive_step_kind({"id": "implement", "step_type": {"effective_type": "change"}}), "change")
+        self.assertEqual(derive_step_kind({"id": "review", "step_type": {"effective_type": "review"}}), "review")
+        self.assertEqual(derive_step_kind({"id": "verify", "verify": {"exit_code": 0}}), "verify")
+
     def test_default_db_path_uses_custom_root_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -230,15 +245,21 @@ class UIIndexTests(unittest.TestCase):
                     "SELECT status, verify_status, current_step_key FROM plan_executions WHERE run_id = ?",
                     (run_id,),
                 ).fetchone()
-                step_row = connection.execute(
-                    "SELECT kind, verify_status, changed_files_count FROM step_executions WHERE step_key = 'verify'"
-                ).fetchone()
+                step_rows = connection.execute(
+                    "SELECT step_key, kind, verify_status, changed_files_count FROM step_executions ORDER BY sequence_index"
+                ).fetchall()
             finally:
                 connection.close()
 
             self.assertEqual(run_count, 1)
             self.assertEqual(plan_execution_row, ("passed", "passed", "verify"))
-            self.assertEqual(step_row, ("verify", "passed", 1))
+            self.assertEqual(
+                step_rows,
+                [
+                    ("inspect", "analyze", "not_run", 1),
+                    ("verify", "verify", "passed", 1),
+                ],
+            )
 
     def test_ui_print_commands_read_indexed_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

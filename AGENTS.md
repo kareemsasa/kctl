@@ -14,6 +14,7 @@
 - GET route dispatch now goes through `DashboardApp.render_route(...)`.
 - POST action dispatch now goes through `DashboardApp.handle_action(...)`.
 - `kctl_pkg/ui_service.py` now forwards `PATH`, present `KCTL_*` variables, and common provider credential env vars into the generated systemd user service so dashboard-launched runs keep the same runtime context as the installing shell.
+- `kctl_pkg/ui_index.py` now preserves explicit effective step types (`analyze`, `change`, `verify`, `review`) when indexing step timelines instead of collapsing non-verify work into `agent`.
 - Tests intentionally patch some seams through `kctl_pkg.ui_dashboard`, so preserve those patch points when extracting code.
 
 ## Practical Guidance
