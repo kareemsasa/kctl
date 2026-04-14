@@ -8,6 +8,7 @@
 - Dashboard overview/detail rendering and run detail rendering now live in `kctl_pkg/ui_dashboard_runs.py`.
 - Dashboard state loading and live-run adaptation now live in `kctl_pkg/ui_dashboard_state.py`, but `DashboardApp` still exposes wrapper methods for compatibility.
 - Dashboard HTTP/API dispatch helpers now live in `kctl_pkg/ui_dashboard_http.py`; `serve_dashboard(...)` remains the integration point.
+- Server bootstrap and the request handler now live in `kctl_pkg/ui_dashboard_server.py`; `kctl_pkg.ui_dashboard.serve_dashboard(...)` is a wrapper for compatibility.
 - Project tracking and project page rendering now live in `kctl_pkg/ui_dashboard_projects.py`.
 - Session runtime and session page rendering now live in `kctl_pkg/ui_dashboard_sessions.py`.
 - GET route dispatch now goes through `DashboardApp.render_route(...)`.
@@ -21,7 +22,7 @@
 - Prefer extracting cohesive subsystems into helper modules while keeping `DashboardApp` as the public integration surface.
 - If you move logic out of `ui_dashboard.py`, keep wrapper methods or compatibility imports when tests patch module-level names there.
 - The next clean extractions after the current work are:
-  - optional final split of `serve_dashboard(...)` server bootstrap from the nested request handler
+  - import/cleanup consolidation inside `kctl_pkg/ui_dashboard.py` as behavior-neutral follow-up only
 
 ## Known Constraints
 
