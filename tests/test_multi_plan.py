@@ -13,7 +13,24 @@ from unittest.mock import patch
 
 from kctl_pkg.artifacts import resolve_storage, single_run_dir
 from kctl_pkg.git import create_isolated_workspace
-from kctl_pkg.multi import discover_plan_files, run_many_plans
+from kctl_pkg.multi import (
+    _apply_provider_override_to_plan,
+    _apply_repo_override_to_plan,
+    build_branch_name,
+    build_multi_run_id,
+    discover_plan_files,
+    format_status_line,
+    load_normalized_multi_plans,
+    load_plan_specs,
+    print_run_status,
+    resolve_multi_run_log,
+    resolve_status_run_path,
+    run_many_plans,
+    sanitize_plan_id,
+    stop_request_path,
+    write_blocked_run_state,
+    write_run_state,
+)
 from kctl_pkg.plan import normalize_plan, validate_plan
 from kctl_pkg.runner import execute_plan_run
 from kctl_pkg.types import CommandResult, PlanError
@@ -34,6 +51,172 @@ def init_git_repo(repo_path: Path) -> None:
 
 
 class MultiPlanTests(unittest.TestCase):
+    def test_provider_override_updates_defaults(self) -> None:
+        plan = {"defaults": {"provider": "claude"}}
+
+        updated_codex = _apply_provider_override_to_plan(plan, "codex")
+        self.assertEqual(updated_codex["defaults"]["provider"], "codex")
+        self.assertNotIn("permission_mode", updated_codex["defaults"])
+        self.assertEqual(updated_codex["_kctl_provider"], "codex")
+
+        updated_claude = _apply_provider_override_to_plan({"defaults": {}}, "claude")
+        self.assertEqual(updated_claude["defaults"]["provider"], "claude")
+        self.assertEqual(updated_claude["defaults"]["permission_mode"], "auto")
+        self.assertEqual(updated_claude["_kctl_permission_mode"], "auto")
+
+        with self.assertRaisesRegex(PlanError, "provider override must be one of"):
+            _apply_provider_override_to_plan({}, "other")
+
+    def test_repo_override_updates_repo_field(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir)
+            updated = _apply_repo_override_to_plan({"repo": "/tmp/old"}, repo_path)
+            self.assertEqual(updated["repo"], str(repo_path.resolve()))
+
+        original = {"repo": "/tmp/old"}
+        self.assertIs(_apply_repo_override_to_plan(original, None), original)
+
+    def test_basic_multi_helpers(self) -> None:
+        self.assertEqual(sanitize_plan_id("  weird / plan  "), "weird-plan")
+        self.assertEqual(build_branch_name("run-1", "plan one"), "kctl/run-1/plan-one")
+        self.assertTrue(build_multi_run_id().endswith("Z"))
+        self.assertEqual(stop_request_path(Path("/tmp/run")), Path("/tmp/run/stop-requested"))
+        self.assertEqual(
+            format_status_line({"plan_id": "001-plan", "status": "passed", "current_step": "verify", "verify_result": "passed"}),
+            "  001-plan: passed  step=verify  verify=passed",
+        )
+
+    def test_load_plan_specs_rejects_mixed_repo_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_a = Path(tmpdir) / "repo-a"
+            repo_b = Path(tmpdir) / "repo-b"
+            init_git_repo(repo_a)
+            init_git_repo(repo_b)
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            (plans_dir / "001-a.yaml").write_text(
+                f"repo: {repo_a}\nobjective: a\nsteps:\n  - id: inspect\n    prompt: Inspect\n"
+            )
+            (plans_dir / "002-b.yaml").write_text(
+                f"repo: {repo_b}\nobjective: b\nsteps:\n  - id: inspect\n    prompt: Inspect\n"
+            )
+
+            with self.assertRaisesRegex(PlanError, "must target the same git repository"):
+                load_plan_specs(plans_dir)
+
+    def test_load_normalized_multi_plans_disambiguates_duplicate_plan_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            (plans_dir / "same name.yaml").write_text(
+                f"repo: {repo_path}\nobjective: one\nsteps:\n  - id: inspect\n    prompt: Inspect\n"
+            )
+            (plans_dir / "same@name.yml").write_text(
+                f"repo: {repo_path}\nobjective: two\nsteps:\n  - id: inspect\n    prompt: Inspect\n"
+            )
+
+            specs, plans = load_normalized_multi_plans(plans_dir)
+
+            self.assertEqual([spec.plan_id for spec in specs], ["same-name", "same-name-02"])
+            self.assertEqual(sorted(plans), ["same-name", "same-name-02"])
+
+    def test_write_blocked_run_state_persists_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_root = Path(tmpdir) / "runs" / "run-1"
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            plan_path = plans_dir / "001-plan.yaml"
+            plan_path.write_text("repo: /tmp\nobjective: x\nsteps: []\n")
+            spec = type("Spec", (), {
+                "plan_id": "001-plan",
+                "filename": "001-plan.yaml",
+                "plan_path": plan_path,
+                "step_ids": ["inspect"],
+            })()
+            snapshot = {
+                "captured_at": "2026-01-01T00:00:00+00:00",
+                "environment": {"storage_mode": "in_repo"},
+                "repo_root": str(Path(tmpdir) / "repo"),
+                "worktree_root": str(Path(tmpdir) / "worktrees" / "run-1"),
+            }
+
+            run_data = write_blocked_run_state(
+                plans_dir=plans_dir,
+                run_root=run_root,
+                run_id="run-1",
+                concurrency=2,
+                plan_specs=[spec],
+                preflight_snapshot=snapshot,
+            )
+
+            self.assertEqual(run_data["status"], "blocked")
+            self.assertEqual(run_data["plans"][0]["failure_reason"], "preflight_failed")
+            self.assertTrue((run_root / "run.json").exists())
+
+    def test_write_run_state_and_resolve_log_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_root = repo_path / ".kctl" / "runs" / "run-1"
+            run_data = {
+                "run_id": "run-1",
+                "plans": [{"plan_id": "001-plan", "status": "passed", "current_step": "inspect", "verify_result": "not-run"}],
+            }
+
+            run_path = write_run_state(run_root, run_data)
+
+            self.assertEqual(run_path, run_root / "run.json")
+            self.assertEqual(resolve_multi_run_log(repo_path, "run-1"), run_path.resolve())
+
+    def test_resolve_status_run_path_accepts_run_directory_and_plans_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plans_dir = repo_path / "plans"
+            plans_dir.mkdir()
+            (plans_dir / "001-plan.yaml").write_text(
+                f"repo: {repo_path}\nobjective: x\nsteps:\n  - id: inspect\n    prompt: Inspect\n"
+            )
+            run_root = repo_path / ".kctl" / "runs" / "run-1"
+            write_run_state(
+                run_root,
+                {
+                    "run_id": "run-1",
+                    "plans_dir": str(plans_dir.resolve()),
+                    "plans": [{"plan_id": "001-plan", "status": "passed", "current_step": "inspect", "verify_result": "not-run"}],
+                },
+            )
+
+            self.assertEqual(resolve_status_run_path(str(run_root)), (run_root / "run.json").resolve())
+            self.assertEqual(resolve_status_run_path(str(plans_dir)), (run_root / "run.json").resolve())
+
+    def test_resolve_status_run_path_rejects_unknown_target(self) -> None:
+        with self.assertRaisesRegex(PlanError, "Could not resolve run status target"):
+            resolve_status_run_path("missing-run-id")
+
+    def test_print_run_status_renders_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            run_root = repo_path / ".kctl" / "runs" / "run-1"
+            write_run_state(
+                run_root,
+                {
+                    "run_id": "run-1",
+                    "plans": [{"plan_id": "001-plan", "status": "passed", "current_step": "inspect", "verify_result": "not-run"}],
+                },
+            )
+
+            with patch("sys.stdout.write") as mock_write:
+                exit_code = print_run_status(str(run_root))
+
+            rendered = "".join(call.args[0] for call in mock_write.call_args_list)
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Run:", rendered)
+            self.assertIn("001-plan: passed", rendered)
+
     def test_create_isolated_workspace_links_repo_local_venv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"

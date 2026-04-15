@@ -41,6 +41,13 @@ bash scripts/test
 
 The script hard-requires `.venv/bin/python`, forces `KCTL_ARTIFACT_STORAGE=in_repo` (and unsets external artifact overrides), then runs `unittest` discovery from this repository root.
 
+To collect line and branch coverage for `kctl_pkg`, run:
+
+```bash
+bash scripts/coverage
+.venv/bin/python -m coverage report
+```
+
 ## Usage
 
 Run a plan:

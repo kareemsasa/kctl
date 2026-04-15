@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import io
 import signal
 import sqlite3
 import tempfile
 import unittest
 from http import HTTPStatus
+from contextlib import redirect_stdout
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,9 +20,47 @@ from kctl_pkg.ui_dashboard import (
     list_plans_in_directory,
     summarize_preflight_for_dashboard,
 )
-from kctl_pkg.ui_dashboard_support import _render_action_button, _render_collapsible_section, _render_selection_list, _run_detail_link
+from kctl_pkg.types import PlanError
+from kctl_pkg.ui_dashboard_support import (
+    _detect_token_warning,
+    _display_status_label,
+    _failure_reason_label,
+    _fmt_ts,
+    _lifecycle_badge,
+    _link,
+    _normalize_token_warning_text,
+    _operator_action_label,
+    _page_link,
+    _provider_select_html,
+    _preflight_run_snapshot,
+    _render_action_button,
+    _render_attention_card,
+    _render_collapsible_section,
+    _render_preflight_item_html,
+    _render_selection_list,
+    _run_detail_link,
+    _status_badge,
+    _status_class,
+    available_providers,
+    read_plan_file,
+)
+from kctl_pkg.ui_dashboard_server import serve_dashboard
 from kctl_pkg.ui_dashboard_http import handle_api_get, handle_page_get, resolve_action_redirect
 from kctl_pkg.ui_index import default_db_path, index_repository_state
+from kctl_pkg.ui_dashboard_sessions import (
+    _format_session_ts,
+    _render_transcript_html,
+    _session_status_counts,
+    _split_session_output_turns,
+    _tail_lines_text,
+    list_sessions as list_sessions_direct,
+    reply_to_session as reply_to_session_direct,
+    run_session_subprocess,
+    start_agent_session as start_agent_session_direct,
+    stop_agent_session as stop_agent_session_direct,
+    write_session_meta as write_session_meta_direct,
+)
+from kctl_pkg.ui_read import AttentionItem
 from tests.test_ui_index import init_git_repo, write_sample_plan_run
 
 
@@ -66,12 +107,104 @@ class UIDashboardTests(unittest.TestCase):
         self.assertIn("ontouchend=", html)
         self.assertIn("onpointerup=", html)
 
+    def test_support_helper_primitives(self) -> None:
+        self.assertEqual(_status_class("success"), "status-success")
+        self.assertEqual(_status_class("blocked"), "status-failure")
+        self.assertEqual(_status_class("stopping"), "status-running")
+        self.assertEqual(_status_class("mystery"), "status-neutral")
+        self.assertEqual(_link({"run_id": "r1"}, plan_execution_id="p1"), "/?run_id=r1&plan_execution_id=p1")
+        self.assertEqual(_link({"run_id": "r1"}, run_id=None), "/")
+        self.assertEqual(_page_link("/runs/r1", message="done"), "/runs/r1?message=done")
+        self.assertEqual(_operator_action_label("active"), "Running")
+        self.assertEqual(_operator_action_label("custom"), "custom")
+        self.assertEqual(_failure_reason_label("agent_rate_limited"), "Blocked by agent rate limit")
+        self.assertEqual(_failure_reason_label("agent_failed"), "Agent failed")
+        self.assertEqual(_display_status_label("blocked", "run_stopped"), "stopped")
+        self.assertEqual(_display_status_label("running", None), "running")
+        self.assertEqual(_fmt_ts(None), "—")
+        self.assertEqual(_fmt_ts("2026-01-01T00:00:01+00:00"), "2026-01-01 00:00:01 UTC")
+        self.assertIn("released", _lifecycle_badge("released"))
+        self.assertIn("stopped", _status_badge("blocked", failure_reason="run_stopped"))
+
+    def test_support_helpers_for_provider_and_preflight_markup(self) -> None:
+        with patch("kctl_pkg.ui_dashboard_support.shutil.which", side_effect=lambda name: f"/usr/bin/{name}" if name == "codex" else None):
+            self.assertEqual(available_providers(), [("codex", "Codex")])
+
+        provider_html = _provider_select_html("provider_override", [("codex", "Codex")])
+        self.assertIn("Default (from plan)", provider_html)
+        self.assertIn("Provider Override", provider_html)
+
+        preflight_html = _render_preflight_item_html(
+            "Binaries",
+            {
+                "status": "blocked",
+                "summary": "Missing binary",
+                "details": "codex",
+                "remediation": "Install codex",
+                "action_label": "Copy binary",
+                "action_value": "codex",
+            },
+        )
+        self.assertIn("preflight-badge-block", preflight_html)
+        self.assertIn("Copy binary", preflight_html)
+
+    def test_token_warning_helpers(self) -> None:
+        self.assertIsNone(_normalize_token_warning_text(""))
+        self.assertIsNone(_normalize_token_warning_text('self.assertIn("hit your limit", html)'))
+        self.assertEqual(_normalize_token_warning_text("You have hit your limit"), "You have hit your limit")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "output.log"
+            output_path.write_text("ok\nrate limit reached\n")
+            self.assertEqual(_detect_token_warning(output_path), "rate limit reached")
+            missing_path = Path(tmpdir) / "missing.log"
+            self.assertIsNone(_detect_token_warning(missing_path))
+
     def test_run_detail_link_helper_builds_real_run_path(self) -> None:
         self.assertEqual(_run_detail_link("run-123"), "/runs/run-123")
         self.assertEqual(
             _run_detail_link("run-123", plan_execution_id="run-123:001-plan"),
             "/runs/run-123?plan_execution_id=run-123%3A001-plan",
         )
+
+    def test_session_helpers(self) -> None:
+        self.assertEqual(_tail_lines_text("a\nb\nc\n", line_count=2), "b\nc")
+        self.assertEqual(
+            _split_session_output_turns(
+                "first\n\n"
+                + f"{'─' * 60}\n"
+                + "[follow-up #2]\n"
+                + f"{'─' * 60}\n\n"
+                + "second\n"
+            ),
+            ["first", "second"],
+        )
+        self.assertEqual(_format_session_ts("2026-01-01T00:00:01+00:00"), "2026-01-01 00:00:01+00:00 UTC")
+        self.assertEqual(_session_status_counts([{"status": "running"}, {"status": "completed"}, {"status": "failed"}]), (1, 1, 1))
+
+    def test_render_transcript_html_handles_prompt_only_and_empty_state(self) -> None:
+        html = _render_transcript_html([], "", status="completed", provider_label="Codex", prompt="seed prompt")
+        self.assertIn("seed prompt", html)
+        self.assertIn("Codex", html)
+
+        empty_html = _render_transcript_html([], "", status="completed", provider_label="Codex", prompt="")
+        self.assertIn("No transcript yet", empty_html)
+
+    def test_render_transcript_html_handles_string_and_agent_messages(self) -> None:
+        html = _render_transcript_html(
+            [
+                "plain user turn",
+                {"role": "assistant", "content": "agent turn", "timestamp": "2026-01-01T00:00:02+00:00"},
+            ],
+            "",
+            status="running",
+            provider_label="Codex",
+            prompt="",
+        )
+        self.assertIn("plain user turn", html)
+        self.assertIn("agent turn", html)
+        self.assertIn("session-chat-row-agent", html)
+        self.assertIn("2026-01-01 00:00:02+00:00 UTC", html)
 
     def test_handle_api_get_preflight_passes_provider_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -142,6 +275,139 @@ class UIDashboardTests(unittest.TestCase):
                     "output": "stream text",
                 },
             )
+
+    def test_handle_api_get_check_repo_returns_status_payload(self) -> None:
+        app = SimpleNamespace()
+        response = handle_api_get(
+            app,
+            "/api/check-repo",
+            {"path": ["/tmp"]},
+            summarize_preflight=lambda *args, **kwargs: {},
+        )
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        _, _, body = response
+        payload = json.loads(body.decode("utf-8"))
+        self.assertIn("status", payload)
+        self.assertIn("message", payload)
+
+    def test_handle_api_get_resolve_path_returns_resolved_value(self) -> None:
+        app = SimpleNamespace()
+        response = handle_api_get(
+            app,
+            "/api/resolve-path",
+            {"path": ["."]},
+            summarize_preflight=lambda *args, **kwargs: {},
+        )
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        _, _, body = response
+        self.assertEqual(json.loads(body.decode("utf-8"))["resolved"], str(Path(".").resolve()))
+
+    def test_handle_api_get_list_plans_returns_plan_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            (plans_dir / "001-a.yaml").write_text("repo: /tmp\nobjective: test\nsteps: []\n")
+            app = SimpleNamespace()
+
+            response = handle_api_get(
+                app,
+                "/api/list-plans",
+                {"path": [str(plans_dir)]},
+                summarize_preflight=lambda *args, **kwargs: {},
+            )
+
+            self.assertIsNotNone(response)
+            assert response is not None
+            _, _, body = response
+            payload = json.loads(body.decode("utf-8"))
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["plans"], ["001-a.yaml"])
+
+    def test_handle_api_get_project_git_status_without_path_reports_error(self) -> None:
+        app = SimpleNamespace()
+        response = handle_api_get(
+            app,
+            "/api/project-git-status",
+            {"path": [""]},
+            summarize_preflight=lambda *args, **kwargs: {},
+        )
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        _, _, body = response
+        payload = json.loads(body.decode("utf-8"))
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["error"], "no path provided")
+
+    def test_handle_api_get_project_remote_check_without_path_reports_error(self) -> None:
+        app = SimpleNamespace()
+        response = handle_api_get(
+            app,
+            "/api/project-remote-check",
+            {"path": [""], "remote": ["upstream"]},
+            summarize_preflight=lambda *args, **kwargs: {},
+        )
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        _, _, body = response
+        payload = json.loads(body.decode("utf-8"))
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["remote"], "upstream")
+        self.assertEqual(payload["message"], "no path provided")
+
+    def test_handle_api_get_project_git_diff_without_path_returns_empty_diff(self) -> None:
+        app = SimpleNamespace()
+        response = handle_api_get(
+            app,
+            "/api/project-git-diff",
+            {"path": [""]},
+            summarize_preflight=lambda *args, **kwargs: {},
+        )
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        _, _, body = response
+        self.assertEqual(json.loads(body.decode("utf-8")), {"diff": ""})
+
+    def test_handle_api_get_session_output_filters_false_positive_warning(self) -> None:
+        app = SimpleNamespace(
+            get_session=lambda session_id: {
+                "status": "completed",
+                "messages": [{"role": "user", "content": "hello"}],
+                "token_warning": 'self.assertIn("hit your limit", html)',
+            },
+            read_session_output=lambda session_id: "output text",
+        )
+        response = handle_api_get(
+            app,
+            "/api/session-output",
+            {"id": ["sess-1"]},
+            summarize_preflight=lambda *args, **kwargs: {},
+        )
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        _, _, body = response
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["output"], "output text")
+        self.assertEqual(payload["token_warning"], "")
+
+    def test_handle_api_get_unknown_path_returns_none(self) -> None:
+        app = SimpleNamespace()
+        self.assertIsNone(
+            handle_api_get(
+                app,
+                "/api/unknown",
+                {},
+                summarize_preflight=lambda *args, **kwargs: {},
+            )
+        )
 
     def test_handle_page_get_rejects_unknown_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -276,6 +542,24 @@ class UIDashboardTests(unittest.TestCase):
         self.assertIn("/runs/run-123", location)
         self.assertIn("message=Started.", location)
 
+    def test_resolve_action_redirect_handles_common_routes(self) -> None:
+        self.assertEqual(
+            resolve_action_redirect(SimpleNamespace(redirect_to="/sessions", run_id=None), "done"),
+            "/sessions?message=done",
+        )
+        self.assertEqual(
+            resolve_action_redirect(SimpleNamespace(redirect_to="/actions", run_id=None), "done"),
+            "/actions?message=done",
+        )
+        self.assertEqual(
+            resolve_action_redirect(SimpleNamespace(redirect_to="/projects", run_id=None), "done"),
+            "/projects?message=done",
+        )
+        self.assertEqual(
+            resolve_action_redirect(SimpleNamespace(redirect_to="/sessions/detail", run_id=None), "done"),
+            "/sessions/detail?message=done",
+        )
+
     def test_check_repo_path_reports_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -300,6 +584,18 @@ class UIDashboardTests(unittest.TestCase):
             self.assertEqual(status, "ok")
             self.assertIn("Found 2 plan file(s)", message)
             self.assertEqual(plans, ["001-first.yaml", "002-second.yml"])
+
+    def test_list_plans_in_directory_handles_empty_missing_and_not_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plans_dir = Path(tmpdir) / "plans"
+            plans_dir.mkdir()
+            file_path = Path(tmpdir) / "plans.txt"
+            file_path.write_text("x\n")
+
+            self.assertEqual(list_plans_in_directory("")[0], "empty")
+            self.assertEqual(list_plans_in_directory(str(Path(tmpdir) / "missing"))[0], "missing")
+            self.assertEqual(list_plans_in_directory(str(file_path))[0], "not_dir")
+            self.assertEqual(list_plans_in_directory(str(plans_dir))[0], "empty")
 
     def test_summarize_preflight_for_dashboard_surfaces_ready_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -363,6 +659,105 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("claude", binaries_details)
             self.assertNotIn("codex", binaries_details)
 
+    def test_summarize_preflight_for_dashboard_blocks_on_invalid_inputs_and_plan_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            plans_dir = repo_path / ".kctl" / "plans"
+            init_git_repo(repo_path)
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / "001-first.yaml").write_text("placeholder\n")
+
+            blocked = summarize_preflight_for_dashboard("", "")
+            self.assertEqual(blocked["status"], "block")
+            self.assertEqual(blocked["decision"], "Blocked")
+
+            with patch("kctl_pkg.ui_dashboard.load_normalized_multi_plans", side_effect=PlanError("bad plans")):
+                errored = summarize_preflight_for_dashboard(str(repo_path), str(plans_dir))
+
+            self.assertEqual(errored["status"], "block")
+            self.assertEqual(errored["items"]["plans_dir"]["status"], "block")
+            self.assertIn("bad plans", errored["message"])
+
+    def test_summarize_preflight_for_dashboard_reports_blocking_issues_and_codex_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            plans_dir = repo_path / ".kctl" / "plans"
+            init_git_repo(repo_path)
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / "001-first.yaml").write_text("placeholder\n")
+            plan_specs = [SimpleNamespace(filename="001-first.yaml")]
+            normalized_plan = {
+                "defaults": {"provider": "claude", "permission_mode": "manual"},
+                "steps": [{"id": "implement"}],
+            }
+
+            class FakeIssue:
+                def __init__(self, code: str, message: str, fix: str) -> None:
+                    self.code = code
+                    self.message = message
+                    self.fix = fix
+
+            class FakeReport:
+                ok = False
+                repo_root = repo_path
+                run_root = repo_path / ".kctl" / "runs" / "r1"
+                worktree_root = repo_path / ".kctl" / "worktrees" / "r1"
+                required_binaries = ["codex"]
+                required_env = ["OPENAI_API_KEY"]
+                issues = [
+                    FakeIssue("missing_binary", "Missing codex", "Install codex"),
+                    FakeIssue("workspace_dir_unwritable", "Workspace path not writable", "Fix permissions"),
+                    FakeIssue("missing_env", "OPENAI_API_KEY missing", "Export OPENAI_API_KEY"),
+                ]
+
+            with patch(
+                "kctl_pkg.ui_dashboard.load_normalized_multi_plans",
+                return_value=(plan_specs, {"001-first": normalized_plan}),
+            ) as load_mock, patch(
+                "kctl_pkg.ui_dashboard.preflight_multi_run",
+                return_value=FakeReport(),
+            ) as preflight_mock:
+                summary = summarize_preflight_for_dashboard(
+                    str(repo_path),
+                    str(plans_dir),
+                    selected_plan_names=["001-first.yaml"],
+                    provider_override="codex",
+                )
+
+            load_mock.assert_called_once()
+            mutated = preflight_mock.call_args.kwargs["normalized_plans"]["001-first"]
+            self.assertEqual(mutated["_kctl_provider"], "codex")
+            self.assertEqual(mutated["_kctl_permission_mode"], "auto")
+            self.assertNotIn("permission_mode", mutated["defaults"])
+            self.assertEqual(summary["status"], "block")
+            self.assertEqual(summary["items"]["binaries"]["summary"], "Missing codex")
+            self.assertEqual(summary["items"]["required_env"]["summary"], "OPENAI_API_KEY missing")
+            self.assertIn("001-first.yaml", summary["items"]["plans_dir"]["details"])
+
+    def test_preflight_run_snapshot_handles_issue_and_non_issue_shapes(self) -> None:
+        self.assertIsNone(_preflight_run_snapshot(None))
+        self.assertIsNone(_preflight_run_snapshot({"preflight": []}))
+
+        snapshot = _preflight_run_snapshot(
+            {
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "preflight": {
+                    "issues": [
+                        {"code": "missing_env", "message": "OPENAI_API_KEY missing", "fix": "Export key"},
+                        "ignored",
+                    ],
+                    "required_binaries": ["codex"],
+                    "required_env": ["OPENAI_API_KEY"],
+                    "run_root": "/tmp/run",
+                    "worktree_root": "/tmp/worktree",
+                },
+            }
+        )
+        assert snapshot is not None
+        self.assertEqual(snapshot["status"], "block")
+        self.assertEqual(snapshot["items"]["required_env"]["summary"], "OPENAI_API_KEY missing")
+        self.assertEqual(snapshot["items"]["binaries"]["action_value"], "codex")
+
     def test_build_dashboard_access_urls_prefers_announce_url(self) -> None:
         urls = build_dashboard_access_urls(
             "0.0.0.0",
@@ -383,6 +778,14 @@ class UIDashboardTests(unittest.TestCase):
     def test_build_dashboard_access_urls_adds_tailscale_hostname_hint(self) -> None:
         urls = build_dashboard_access_urls("0.0.0.0", 8421, tailscale=True, hostname="kctl-node")
         self.assertEqual(urls, ["http://localhost:8421", "http://kctl-node:8421"])
+
+    def test_build_dashboard_access_urls_handles_direct_host_and_hostname_fallback(self) -> None:
+        self.assertEqual(build_dashboard_access_urls("127.0.0.1", 8421), ["http://127.0.0.1:8421"])
+
+        with patch("kctl_pkg.ui_dashboard_support.socket.gethostname", return_value="tail-host"):
+            urls = build_dashboard_access_urls("0.0.0.0", 8421, announce_url="http://localhost:8421", tailscale=True)
+
+        self.assertEqual(urls, ["http://localhost:8421", "http://tail-host:8421"])
 
     def test_dashboard_renders_runs_plan_cards_steps_and_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -720,6 +1123,77 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("001-sample.yaml", html)
             self.assertIn("objective: inspect", html)
 
+    def test_render_route_dispatches_actions_projects_and_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_path = Path(tmpdir) / "project"
+            init_git_repo(repo_path)
+            init_git_repo(project_path)
+            plans_dir = repo_path / ".kctl" / "plans"
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / "001-one.yaml").write_text(
+                f"repo: {repo_path}\nobjective: x\nsteps:\n  - id: inspect\n    prompt: x\n"
+            )
+            app = DashboardApp(repo_path)
+            app.add_tracked_project(project_path)
+
+            actions_html = app.render_route(
+                "/actions",
+                {
+                    "selected_plans": ["001-one.yaml"],
+                    "project_paths": [str(project_path)],
+                    "concurrency": ["2"],
+                    "stage": ["concurrency"],
+                },
+            )
+            projects_html = app.render_route("/projects", {"message": ["done"]})
+            project_detail_html = app.render_route("/projects/detail", {"path": [str(project_path)]})
+            sessions_html = app.render_route("/sessions", {"project": [str(project_path)]})
+
+            self.assertIn("Run Plans", actions_html)
+            self.assertIn("Concurrency", actions_html)
+            self.assertIn("Tracked Projects", projects_html)
+            self.assertIn(str(project_path), project_detail_html)
+            self.assertIn("Launch Session", sessions_html)
+            self.assertIn("selected", sessions_html)
+
+    def test_render_route_dispatches_session_detail_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-1"
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": tmpdir,
+                "project_name": "proj",
+                "prompt": "hello",
+                "provider": "codex",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "messages": [],
+            }
+            app._write_session_meta(meta)
+
+            html_query = app.render_route("/sessions/detail", {"id": [session_id]})
+            html_path = app.render_route(f"/sessions/{session_id}", {})
+
+            self.assertIn("proj", html_query)
+            self.assertIn("proj", html_path)
+
+    def test_render_route_rejects_invalid_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+
+            with self.assertRaises(PlanError):
+                app.render_route("/runs/", {})
+            with self.assertRaises(PlanError):
+                app.render_route("/runs/run-1/other", {})
+            with self.assertRaises(PlanError):
+                app.render_route("/sessions/", {})
+            with self.assertRaises(PlanError):
+                app.render_route("/nope", {})
+
     def test_start_run_many_runs_and_reindexes_in_background(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -899,6 +1373,166 @@ class UIDashboardTests(unittest.TestCase):
             self.assertEqual(result.redirect_to, "/sessions/detail?id=session-123")
             self.assertEqual(result.message, "Session started.")
             self.assertEqual(start_session_mock.call_args.kwargs["provider"], "claude")
+
+    def test_handle_action_project_tracking_and_index_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_path = Path(tmpdir) / "project"
+            init_git_repo(repo_path)
+            init_git_repo(project_path)
+            app = DashboardApp(repo_path)
+
+            add_result = app.handle_action("/actions/add-project", {"project_path": [str(project_path)]})
+            self.assertEqual(add_result.redirect_to, "/projects")
+            self.assertIn(str(project_path.resolve()), add_result.message)
+
+            index_result = app.handle_action("/actions/index", {})
+            self.assertEqual(index_result.redirect_to, "/actions")
+            self.assertEqual(index_result.message, "Index refreshed.")
+
+            remove_result = app.handle_action("/actions/remove-project", {"project_path": [str(project_path)]})
+            self.assertEqual(remove_result.redirect_to, "/projects")
+            self.assertIn("Removed tracked project", remove_result.message)
+
+    def test_handle_action_create_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            target_repo = Path(tmpdir) / "target"
+            init_git_repo(repo_path)
+            init_git_repo(target_repo)
+            app = DashboardApp(repo_path)
+
+            result = app.handle_action(
+                "/actions/create-plan",
+                {
+                    "target_repo": [str(target_repo)],
+                    "template_name": ["tooling_change"],
+                    "output_path": ["001-new-plan.yaml"],
+                    "objective": ["Do a thing"],
+                },
+            )
+
+            self.assertEqual(result.redirect_to, "/actions")
+            self.assertIn("Created plan at", result.message)
+            self.assertTrue((target_repo / ".kctl" / "plans" / "001-new-plan.yaml").exists())
+
+    def test_handle_action_stop_and_reply_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_path = Path(tmpdir) / "project"
+            init_git_repo(repo_path)
+            init_git_repo(project_path)
+            app = DashboardApp(repo_path)
+
+            with patch.object(app, "stop_agent_session", return_value=True) as stop_mock:
+                stop_result = app.handle_action("/actions/stop-session", {"session_id": ["sess-1"]})
+            self.assertEqual(stop_result.redirect_to, "/sessions/detail?id=sess-1")
+            self.assertEqual(stop_result.message, "Session stop signal sent.")
+            stop_mock.assert_called_once_with("sess-1")
+
+            with patch.object(app, "reply_to_session") as reply_mock:
+                reply_result = app.handle_action(
+                    "/actions/session-reply",
+                    {"session_id": ["sess-1"], "reply": ["continue"]},
+                )
+            self.assertEqual(reply_result.redirect_to, "/sessions/detail?id=sess-1")
+            self.assertEqual(reply_result.message, "Reply sent.")
+            reply_mock.assert_called_once_with("sess-1", "continue")
+
+    def test_handle_action_project_git_branches_and_remote_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_path = Path(tmpdir) / "project"
+            init_git_repo(repo_path)
+            init_git_repo(project_path)
+            app = DashboardApp(repo_path)
+
+            with patch("kctl_pkg.ui_dashboard.create_branch") as create_branch_mock:
+                result = app.handle_action(
+                    "/actions/project-git-create-branch",
+                    {"path": [str(project_path)], "branch": ["feature/test"]},
+                )
+            self.assertIn("Created and switched to feature/test", result.message)
+            create_branch_mock.assert_called_once()
+
+            with patch("kctl_pkg.ui_dashboard.switch_branch") as switch_branch_mock:
+                result = app.handle_action(
+                    "/actions/project-git-switch",
+                    {"path": [str(project_path)], "branch": ["main"]},
+                )
+            self.assertIn("Switched to main", result.message)
+            switch_branch_mock.assert_called_once()
+
+            with patch("kctl_pkg.ui_dashboard.git_pull", return_value="Already up to date.") as pull_mock:
+                result = app.handle_action(
+                    "/actions/project-git-pull",
+                    {"path": [str(project_path)], "remote": ["origin"]},
+                )
+            self.assertIn("Pulled from origin", result.message)
+            pull_mock.assert_called_once()
+
+            with patch("kctl_pkg.ui_dashboard.git_push", side_effect=[PlanError("no upstream"), "done"]) as push_mock:
+                result = app.handle_action(
+                    "/actions/project-git-push",
+                    {"path": [str(project_path)], "remote": ["origin"]},
+                )
+            self.assertIn("Pushed to origin", result.message)
+            self.assertEqual(push_mock.call_count, 2)
+
+    def test_handle_action_project_git_stash_commit_and_discard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_path = Path(tmpdir) / "project"
+            init_git_repo(repo_path)
+            init_git_repo(project_path)
+            app = DashboardApp(repo_path)
+
+            with patch("kctl_pkg.ui_dashboard.git_stash_save") as stash_mock:
+                result = app.handle_action(
+                    "/actions/project-git-stash",
+                    {"path": [str(project_path)], "stash_message": ["wip"]},
+                )
+            self.assertEqual(result.message, "Changes stashed")
+            stash_mock.assert_called_once()
+
+            with patch("kctl_pkg.ui_dashboard.git_stash_pop") as stash_pop_mock:
+                result = app.handle_action("/actions/project-git-stash-pop", {"path": [str(project_path)]})
+            self.assertEqual(result.message, "Stash popped")
+            stash_pop_mock.assert_called_once()
+
+            with patch("kctl_pkg.ui_dashboard.stage_and_commit", return_value="abc123") as commit_mock:
+                result = app.handle_action(
+                    "/actions/project-git-commit",
+                    {"path": [str(project_path)], "message": ["commit msg"]},
+                )
+            self.assertIn("Committed abc123", result.message)
+            commit_mock.assert_called_once()
+
+            with patch("kctl_pkg.ui_dashboard.discard_all_changes") as discard_mock:
+                result = app.handle_action("/actions/project-git-discard", {"path": [str(project_path)]})
+            self.assertEqual(result.message, "All changes discarded")
+            discard_mock.assert_called_once()
+
+    def test_handle_action_rejects_missing_required_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+
+            with self.assertRaises(PlanError):
+                app.handle_action("/actions/add-project", {})
+            with self.assertRaises(PlanError):
+                app.handle_action("/actions/create-plan", {})
+            with self.assertRaises(PlanError):
+                app.handle_action("/actions/start-session", {})
+            with self.assertRaises(PlanError):
+                app.handle_action("/actions/session-reply", {})
+            with self.assertRaises(PlanError):
+                app.handle_action("/actions/project-git-commit", {"path": [tmpdir]})
+            with self.assertRaises(PlanError):
+                app.handle_action("/actions/project-git-switch", {"path": [tmpdir]})
+            with self.assertRaises(PlanError):
+                app.handle_action("/actions/run-many", {"target_repo": [tmpdir], "selected_plans": []})
 
     def test_handle_action_rerun_plan_requires_existing_plan_file(self) -> None:
         from kctl_pkg.types import PlanError
@@ -1251,6 +1885,125 @@ class UIDashboardTests(unittest.TestCase):
                 app.add_tracked_project(project_a)
             self.assertIn("already tracked", str(ctx.exception).lower())
 
+    def test_load_tracked_projects_ignores_invalid_file_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            repo_path.mkdir(parents=True, exist_ok=True)
+            tracked_path = repo_path / ".kctl" / "dashboard-projects.json"
+            tracked_path.parent.mkdir(parents=True, exist_ok=True)
+            tracked_path.write_text("{not-json}\n")
+
+            app = DashboardApp(repo_path)
+            self.assertEqual(app.load_tracked_projects(), [])
+
+            tracked_path.write_text(json.dumps({"project": "/tmp"}) + "\n")
+            self.assertEqual(app.load_tracked_projects(), [])
+
+    def test_render_projects_page_shows_unavailable_project_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project = Path(tmpdir) / "project-a"
+            init_git_repo(repo_path)
+            init_git_repo(project)
+            app = DashboardApp(repo_path)
+            app.add_tracked_project(project)
+
+            with patch("kctl_pkg.ui_dashboard_projects.get_project_git_summary", return_value={"available": False, "error": "broken git"}):
+                html = app.render_projects_page()
+
+            self.assertIn("broken git", html)
+            self.assertIn("Tracked Projects", html)
+            self.assertIn("Refresh", html)
+
+    def test_render_project_detail_page_shows_unavailable_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project = Path(tmpdir) / "project-a"
+            init_git_repo(repo_path)
+            init_git_repo(project)
+            app = DashboardApp(repo_path)
+            app.add_tracked_project(project)
+
+            with patch("kctl_pkg.ui_dashboard_projects.get_project_git_detail", return_value={"available": False, "name": "project-a", "error": "git detail failed"}):
+                html = app.render_project_detail_page(str(project))
+
+            self.assertIn("git detail failed", html)
+            self.assertIn("All Projects", html)
+
+    def test_render_project_detail_page_shows_clean_empty_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project = Path(tmpdir) / "project-a"
+            init_git_repo(repo_path)
+            init_git_repo(project)
+            app = DashboardApp(repo_path)
+            app.add_tracked_project(project)
+
+            detail = {
+                "available": True,
+                "name": "project-a",
+                "branch": "main",
+                "dirty": False,
+                "changed_count": 0,
+                "ahead_behind": (0, 0),
+                "remotes": [],
+                "status_output": "",
+                "diff_stat": "",
+                "branches": [],
+                "stash_list": [],
+                "recent_commits": [],
+            }
+            with patch("kctl_pkg.ui_dashboard_projects.get_project_git_detail", return_value=detail):
+                html = app.render_project_detail_page(str(project), action_message="Saved")
+
+            self.assertIn("action-ok", html)
+            self.assertIn("No remotes configured.", html)
+            self.assertIn("Clean working tree.", html)
+            self.assertIn("No branches found.", html)
+            self.assertIn("No stashed changes.", html)
+            self.assertIn("Launch Agent", html)
+
+    def test_render_project_detail_page_shows_dirty_repo_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project = Path(tmpdir) / "project-a"
+            init_git_repo(repo_path)
+            init_git_repo(project)
+            app = DashboardApp(repo_path)
+            app.add_tracked_project(project)
+
+            detail = {
+                "available": True,
+                "name": "project-a",
+                "branch": "feature/test",
+                "dirty": True,
+                "changed_count": 2,
+                "ahead_behind": (1, 0),
+                "remotes": [
+                    {"name": "origin", "url": "git@example.com:repo.git", "direction": "fetch"},
+                    {"name": "origin", "url": "git@example.com:repo.git", "direction": "push"},
+                ],
+                "status_output": " M app.py",
+                "diff_stat": " app.py | 2 +-",
+                "branches": [{"name": "feature/test", "current": "true"}, {"name": "main", "current": "false"}],
+                "stash_list": ["stash@{0}: WIP on feature/test"],
+                "recent_commits": [
+                    {"sha": "abc1234", "subject": "Update UI", "author": "Test User", "date": "2026-01-01"},
+                ],
+            }
+            with patch("kctl_pkg.ui_dashboard_projects.get_project_git_detail", return_value=detail):
+                html = app.render_project_detail_page(str(project), action_message="Error: failed")
+
+            self.assertIn("action-error", html)
+            self.assertIn("Show full diff", html)
+            self.assertIn("Commit All", html)
+            self.assertIn("Discard All Changes", html)
+            self.assertIn("Pull", html)
+            self.assertIn("Push", html)
+            self.assertIn("Create &amp; Switch", html)
+            self.assertIn("stash@{0}: WIP on feature/test", html)
+            self.assertIn("Recent Commits (1)", html)
+
     def test_dashboard_renders_live_output_for_running_unindexed_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -1467,6 +2220,78 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("Blocked at launch", html)
             self.assertNotIn("/actions/rerun-plan", html)
 
+    def test_render_attention_card_variants_and_read_plan_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "001-plan.yaml"
+            plan_path.write_text("objective: test\n")
+            workspace_path = str(Path(tmpdir) / "worktree")
+
+            safe_rerun_html = _render_attention_card(
+                AttentionItem(
+                    kind="plan_execution",
+                    run_id="run-1",
+                    plan_execution_id="run-1:001-plan",
+                    plan_slug="001-plan",
+                    status="failed",
+                    operator_action="safe_rerun",
+                    current_step_key="verify",
+                    verify_status="failed",
+                    failure_reason="agent_failed",
+                    reset_hint=None,
+                    plan_file_path=str(plan_path),
+                    workspace_path=None,
+                    started_at="2026-01-01T00:00:01+00:00",
+                ),
+                providers=[("codex", "Codex")],
+            )
+            self.assertIn("/actions/rerun-plan", safe_rerun_html)
+            self.assertIn("Provider Override", safe_rerun_html)
+            self.assertIn("Agent failed", safe_rerun_html)
+
+            review_html = _render_attention_card(
+                AttentionItem(
+                    kind="plan_execution",
+                    run_id="run-2",
+                    plan_execution_id="run-2:001-plan",
+                    plan_slug="001-plan",
+                    status="failed",
+                    operator_action="review_workspace",
+                    current_step_key="implement",
+                    verify_status="not_run",
+                    failure_reason=None,
+                    reset_hint=None,
+                    plan_file_path=None,
+                    workspace_path=workspace_path,
+                    started_at="2026-01-01T00:00:01+00:00",
+                )
+            )
+            self.assertIn("Review Workspace", review_html)
+            self.assertIn("Copy workspace path", review_html)
+
+            stale_html = _render_attention_card(
+                AttentionItem(
+                    kind="plan_execution",
+                    run_id="run-3",
+                    plan_execution_id="run-3:001-plan",
+                    plan_slug="001-plan",
+                    status="running",
+                    operator_action="investigate_stale",
+                    current_step_key=None,
+                    verify_status="running",
+                    failure_reason=None,
+                    reset_hint=None,
+                    plan_file_path=None,
+                    workspace_path=None,
+                    started_at="2026-01-01T00:00:01+00:00",
+                )
+            )
+            self.assertIn("Stale", stale_html)
+            self.assertIn("no completion after", stale_html)
+
+            self.assertEqual(read_plan_file(plan_path), ("001-plan.yaml", "objective: test\n"))
+            with self.assertRaises(PlanError):
+                read_plan_file(Path(tmpdir) / "missing.yaml")
+
     def test_create_plan_writes_template_based_plan_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "repo"
@@ -1505,6 +2330,367 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("001-sample.yaml", html)
             self.assertIn("objective: review", html)
 
+    def test_serve_dashboard_handler_get_writes_page_response(self) -> None:
+        app = SimpleNamespace()
+        captured: dict[str, object] = {}
+
+        class FakeServer:
+            def __init__(self, address: tuple[str, int], handler_cls: object) -> None:
+                self.handler_cls = handler_cls
+
+            def serve_forever(self) -> None:
+                class FakeHandler(self.handler_cls):  # type: ignore[misc]
+                    def __init__(self) -> None:
+                        self.path = "/"
+                        self.headers = {}
+                        self.rfile = BytesIO()
+                        self.wfile = BytesIO()
+
+                    def send_response(self, code: int, message: str | None = None) -> None:
+                        captured["status"] = code
+
+                    def send_header(self, name: str, value: str) -> None:
+                        captured.setdefault("headers", []).append((name, value))
+
+                    def end_headers(self) -> None:
+                        return
+
+                    def send_error(self, code: int, message: str | None = None) -> None:
+                        captured["error"] = (code, message)
+
+                handler = FakeHandler()
+                handler.do_GET()
+                captured["body"] = handler.wfile.getvalue().decode("utf-8")
+
+            def server_close(self) -> None:
+                captured["closed"] = True
+
+        with patch("kctl_pkg.ui_dashboard_server.ThreadingHTTPServer", FakeServer), patch(
+            "kctl_pkg.ui_dashboard_server.handle_api_get",
+            return_value=None,
+        ), patch(
+            "kctl_pkg.ui_dashboard_server.handle_page_get",
+            return_value=(HTTPStatus.OK, "text/html; charset=utf-8", b"<html>ok</html>"),
+        ), patch("kctl_pkg.ui_dashboard_server.build_dashboard_access_urls", return_value=[]):
+            result = serve_dashboard(app=app, host="127.0.0.1", port=8421, summarize_preflight=object())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["status"], HTTPStatus.OK)
+        self.assertIn(("Content-Type", "text/html; charset=utf-8"), captured["headers"])
+        self.assertEqual(captured["body"], "<html>ok</html>")
+        self.assertTrue(captured["closed"])
+
+    def test_serve_dashboard_handler_get_404s_not_found(self) -> None:
+        app = SimpleNamespace()
+        captured: dict[str, object] = {}
+
+        class FakeServer:
+            def __init__(self, address: tuple[str, int], handler_cls: object) -> None:
+                self.handler_cls = handler_cls
+
+            def serve_forever(self) -> None:
+                class FakeHandler(self.handler_cls):  # type: ignore[misc]
+                    def __init__(self) -> None:
+                        self.path = "/missing"
+                        self.headers = {}
+                        self.rfile = BytesIO()
+                        self.wfile = BytesIO()
+
+                    def send_response(self, code: int, message: str | None = None) -> None:
+                        captured["status"] = code
+
+                    def send_header(self, name: str, value: str) -> None:
+                        return
+
+                    def end_headers(self) -> None:
+                        return
+
+                    def send_error(self, code: int, message: str | None = None) -> None:
+                        captured["error"] = (code, message)
+
+                handler = FakeHandler()
+                handler.do_GET()
+
+            def server_close(self) -> None:
+                return
+
+        with patch("kctl_pkg.ui_dashboard_server.ThreadingHTTPServer", FakeServer), patch(
+            "kctl_pkg.ui_dashboard_server.handle_api_get",
+            return_value=None,
+        ), patch(
+            "kctl_pkg.ui_dashboard_server.handle_page_get",
+            side_effect=PlanError("Not Found"),
+        ), patch("kctl_pkg.ui_dashboard_server.build_dashboard_access_urls", return_value=[]):
+            result = serve_dashboard(app=app, host="127.0.0.1", port=8421, summarize_preflight=object())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["error"], (HTTPStatus.NOT_FOUND, "Not Found"))
+
+    def test_serve_dashboard_handler_get_writes_api_response(self) -> None:
+        app = SimpleNamespace()
+        captured: dict[str, object] = {}
+
+        class FakeServer:
+            def __init__(self, address: tuple[str, int], handler_cls: object) -> None:
+                self.handler_cls = handler_cls
+
+            def serve_forever(self) -> None:
+                class FakeHandler(self.handler_cls):  # type: ignore[misc]
+                    def __init__(self) -> None:
+                        self.path = "/api/check-repo?path=%2Ftmp"
+                        self.headers = {}
+                        self.rfile = BytesIO()
+                        self.wfile = BytesIO()
+
+                    def send_response(self, code: int, message: str | None = None) -> None:
+                        captured["status"] = code
+
+                    def send_header(self, name: str, value: str) -> None:
+                        captured.setdefault("headers", []).append((name, value))
+
+                    def end_headers(self) -> None:
+                        return
+
+                    def send_error(self, code: int, message: str | None = None) -> None:
+                        captured["error"] = (code, message)
+
+                handler = FakeHandler()
+                handler.do_GET()
+                captured["body"] = handler.wfile.getvalue().decode("utf-8")
+
+            def server_close(self) -> None:
+                return
+
+        with patch("kctl_pkg.ui_dashboard_server.ThreadingHTTPServer", FakeServer), patch(
+            "kctl_pkg.ui_dashboard_server.handle_api_get",
+            return_value=(HTTPStatus.OK, "application/json; charset=utf-8", b'{"ok":true}'),
+        ), patch("kctl_pkg.ui_dashboard_server.build_dashboard_access_urls", return_value=[]):
+            result = serve_dashboard(app=app, host="127.0.0.1", port=8421, summarize_preflight=object())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["status"], HTTPStatus.OK)
+        self.assertIn(("Content-Type", "application/json; charset=utf-8"), captured["headers"])
+        self.assertEqual(captured["body"], '{"ok":true}')
+
+    def test_serve_dashboard_handler_get_renders_generic_plan_error_html(self) -> None:
+        app = SimpleNamespace()
+        captured: dict[str, object] = {}
+
+        class FakeServer:
+            def __init__(self, address: tuple[str, int], handler_cls: object) -> None:
+                self.handler_cls = handler_cls
+
+            def serve_forever(self) -> None:
+                class FakeHandler(self.handler_cls):  # type: ignore[misc]
+                    def __init__(self) -> None:
+                        self.path = "/"
+                        self.headers = {}
+                        self.rfile = BytesIO()
+                        self.wfile = BytesIO()
+
+                    def send_response(self, code: int, message: str | None = None) -> None:
+                        captured["status"] = code
+
+                    def send_header(self, name: str, value: str) -> None:
+                        captured.setdefault("headers", []).append((name, value))
+
+                    def end_headers(self) -> None:
+                        return
+
+                    def send_error(self, code: int, message: str | None = None) -> None:
+                        captured["error"] = (code, message)
+
+                handler = FakeHandler()
+                handler.do_GET()
+                captured["body"] = handler.wfile.getvalue().decode("utf-8")
+
+            def server_close(self) -> None:
+                return
+
+        with patch("kctl_pkg.ui_dashboard_server.ThreadingHTTPServer", FakeServer), patch(
+            "kctl_pkg.ui_dashboard_server.handle_api_get",
+            return_value=None,
+        ), patch(
+            "kctl_pkg.ui_dashboard_server.handle_page_get",
+            side_effect=PlanError("bad page"),
+        ), patch("kctl_pkg.ui_dashboard_server.build_dashboard_access_urls", return_value=[]):
+            result = serve_dashboard(app=app, host="127.0.0.1", port=8421, summarize_preflight=object())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["status"], HTTPStatus.OK)
+        self.assertIn("bad page", captured["body"])
+
+    def test_serve_dashboard_handler_post_redirects_action_result(self) -> None:
+        action_result = SimpleNamespace(redirect_to="/actions", message="done", run_id=None)
+        app = SimpleNamespace(handle_action=lambda path, form: action_result)
+        captured: dict[str, object] = {}
+
+        class FakeServer:
+            def __init__(self, address: tuple[str, int], handler_cls: object) -> None:
+                self.handler_cls = handler_cls
+
+            def serve_forever(self) -> None:
+                body = b"project_path=%2Ftmp%2Frepo"
+
+                class FakeHandler(self.handler_cls):  # type: ignore[misc]
+                    def __init__(self) -> None:
+                        self.path = "/actions/start-session"
+                        self.headers = {"Content-Length": str(len(body))}
+                        self.rfile = BytesIO(body)
+                        self.wfile = BytesIO()
+
+                    def send_response(self, code: int, message: str | None = None) -> None:
+                        captured["status"] = code
+
+                    def send_header(self, name: str, value: str) -> None:
+                        captured.setdefault("headers", []).append((name, value))
+
+                    def end_headers(self) -> None:
+                        return
+
+                    def send_error(self, code: int, message: str | None = None) -> None:
+                        captured["error"] = (code, message)
+
+                handler = FakeHandler()
+                handler.do_POST()
+
+            def server_close(self) -> None:
+                return
+
+        with patch("kctl_pkg.ui_dashboard_server.ThreadingHTTPServer", FakeServer), patch(
+            "kctl_pkg.ui_dashboard_server.build_dashboard_access_urls",
+            return_value=[],
+        ):
+            result = serve_dashboard(app=app, host="127.0.0.1", port=8421, summarize_preflight=object())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["status"], HTTPStatus.SEE_OTHER)
+        self.assertIn(("Location", "/actions?message=done"), captured["headers"])
+
+    def test_serve_dashboard_handler_post_falls_back_on_plan_error(self) -> None:
+        app = SimpleNamespace(handle_action=lambda path, form: (_ for _ in ()).throw(PlanError("bad action")))
+        captured: dict[str, object] = {}
+
+        class FakeServer:
+            def __init__(self, address: tuple[str, int], handler_cls: object) -> None:
+                self.handler_cls = handler_cls
+
+            def serve_forever(self) -> None:
+                body = b"project_path=%2Ftmp%2Frepo"
+
+                class FakeHandler(self.handler_cls):  # type: ignore[misc]
+                    def __init__(self) -> None:
+                        self.path = "/actions/start-session"
+                        self.headers = {"Content-Length": str(len(body))}
+                        self.rfile = BytesIO(body)
+                        self.wfile = BytesIO()
+
+                    def send_response(self, code: int, message: str | None = None) -> None:
+                        captured["status"] = code
+
+                    def send_header(self, name: str, value: str) -> None:
+                        captured.setdefault("headers", []).append((name, value))
+
+                    def end_headers(self) -> None:
+                        return
+
+                    def send_error(self, code: int, message: str | None = None) -> None:
+                        captured["error"] = (code, message)
+
+                handler = FakeHandler()
+                handler.do_POST()
+
+            def server_close(self) -> None:
+                return
+
+        with patch("kctl_pkg.ui_dashboard_server.ThreadingHTTPServer", FakeServer), patch(
+            "kctl_pkg.ui_dashboard_server.build_dashboard_access_urls",
+            return_value=[],
+        ):
+            result = serve_dashboard(app=app, host="127.0.0.1", port=8421, summarize_preflight=object())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["status"], HTTPStatus.SEE_OTHER)
+        self.assertIn(("Location", "/actions?message=bad+action"), captured["headers"])
+
+    def test_serve_dashboard_handler_post_404s_unknown_action(self) -> None:
+        app = SimpleNamespace(handle_action=lambda path, form: None)
+        captured: dict[str, object] = {}
+
+        class FakeServer:
+            def __init__(self, address: tuple[str, int], handler_cls: object) -> None:
+                self.handler_cls = handler_cls
+
+            def serve_forever(self) -> None:
+                body = b""
+
+                class FakeHandler(self.handler_cls):  # type: ignore[misc]
+                    def __init__(self) -> None:
+                        self.path = "/actions/unknown"
+                        self.headers = {"Content-Length": str(len(body))}
+                        self.rfile = BytesIO(body)
+                        self.wfile = BytesIO()
+
+                    def send_response(self, code: int, message: str | None = None) -> None:
+                        captured["status"] = code
+
+                    def send_header(self, name: str, value: str) -> None:
+                        captured.setdefault("headers", []).append((name, value))
+
+                    def end_headers(self) -> None:
+                        return
+
+                    def send_error(self, code: int, message: str | None = None) -> None:
+                        captured["error"] = (code, message)
+
+                handler = FakeHandler()
+                handler.do_POST()
+
+            def server_close(self) -> None:
+                return
+
+        with patch("kctl_pkg.ui_dashboard_server.ThreadingHTTPServer", FakeServer), patch(
+            "kctl_pkg.ui_dashboard_server.build_dashboard_access_urls",
+            return_value=[],
+        ):
+            result = serve_dashboard(app=app, host="127.0.0.1", port=8421, summarize_preflight=object())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured["error"], (HTTPStatus.NOT_FOUND, "Not Found"))
+
+    def test_serve_dashboard_prints_access_urls_and_tailscale_note(self) -> None:
+        app = SimpleNamespace()
+
+        class FakeServer:
+            def __init__(self, address: tuple[str, int], handler_cls: object) -> None:
+                self.handler_cls = handler_cls
+
+            def serve_forever(self) -> None:
+                return
+
+            def server_close(self) -> None:
+                return
+
+        with patch("kctl_pkg.ui_dashboard_server.ThreadingHTTPServer", FakeServer), patch(
+            "kctl_pkg.ui_dashboard_server.build_dashboard_access_urls",
+            return_value=["http://127.0.0.1:8421", "http://tailnet:8421"],
+        ):
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                result = serve_dashboard(
+                    app=app,
+                    host="0.0.0.0",
+                    port=8421,
+                    summarize_preflight=object(),
+                    tailscale=True,
+                )
+
+        self.assertEqual(result, 0)
+        text = buffer.getvalue()
+        self.assertIn("kctl dashboard listening on 0.0.0.0:8421", text)
+        self.assertIn("dashboard url: http://127.0.0.1:8421", text)
+        self.assertIn("tailscale note:", text)
+
 
 class AgentSessionTests(unittest.TestCase):
     # ------------------------------------------------------------------
@@ -1538,6 +2724,15 @@ class AgentSessionTests(unittest.TestCase):
             self.assertEqual(sessions[0]["id"], "20260101-000002-aabbccdd")
             self.assertEqual(sessions[1]["id"], "20260101-000001-aabbccdd")
 
+    def test_list_sessions_ignores_invalid_meta_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            bad_dir = app._session_dir("bad-session")
+            bad_dir.mkdir(parents=True, exist_ok=True)
+            (bad_dir / "meta.json").write_text("{not json")
+
+            self.assertEqual(app.list_sessions(), [])
+
     def test_read_session_output_returns_empty_for_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             app = DashboardApp(Path(tmpdir) / "repo")
@@ -1552,10 +2747,31 @@ class AgentSessionTests(unittest.TestCase):
             output_path.write_text("agent output line\n")
             self.assertEqual(app.read_session_output(session_id), "agent output line\n")
 
+    def test_read_session_output_returns_empty_on_os_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-oserror"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("agent output line\n")
+
+            with patch.object(Path, "read_text", side_effect=OSError("boom")):
+                self.assertEqual(app.read_session_output(session_id), "")
+
     def test_get_session_returns_none_for_missing_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             app = DashboardApp(Path(tmpdir) / "repo")
             self.assertIsNone(app.get_session("nonexistent"))
+
+    def test_get_session_returns_none_for_invalid_meta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "broken-session"
+            session_dir = app._session_dir(session_id)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / "meta.json").write_text("{oops")
+
+            self.assertIsNone(app.get_session(session_id))
 
     def test_get_session_returns_meta_for_existing_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1711,6 +2927,31 @@ class AgentSessionTests(unittest.TestCase):
             self.assertIn("--resume", cmd)
             self.assertIn("uuid-abc", cmd)
 
+    def test_reply_to_session_uses_codex_resume_for_codex_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-codex"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("first turn output\n")
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": tmpdir,
+                "prompt": "first turn",
+                "provider": "codex",
+                "provider_session_id": "",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "messages": [{"role": "user", "content": "first turn", "timestamp": "2026-01-01T00:00:01+00:00"}],
+            }
+            app._write_session_meta(meta)
+            launched: list[list[str]] = []
+
+            with patch.object(app, "_run_session_subprocess", side_effect=lambda m, command, output_path: launched.append(command)):
+                app.reply_to_session(session_id, "continue")
+
+            self.assertEqual(launched[0][:5], ["codex", "exec", "resume", "--last", "--full-auto"])
+
     # ------------------------------------------------------------------
     # stop_agent_session
     # ------------------------------------------------------------------
@@ -1735,6 +2976,23 @@ class AgentSessionTests(unittest.TestCase):
             app._write_session_meta(meta)
             self.assertFalse(app.stop_agent_session("sess-done"))
 
+    def test_stop_agent_session_tolerates_os_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            meta: dict[str, object] = {
+                "id": "sess-running",
+                "project_path": tmpdir,
+                "prompt": "go",
+                "provider": "codex",
+                "status": "running",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "pid": 12345,
+            }
+            app._write_session_meta(meta)
+
+            with patch("kctl_pkg.ui_dashboard.os.kill", side_effect=ProcessLookupError):
+                self.assertTrue(app.stop_agent_session("sess-running"))
+
     def test_stop_agent_session_sends_sigterm_to_pid(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             app = DashboardApp(Path(tmpdir) / "repo")
@@ -1757,6 +3015,94 @@ class AgentSessionTests(unittest.TestCase):
             self.assertTrue(result)
             self.assertEqual(killed, [(99999, _signal.SIGTERM)])
 
+    def test_run_session_subprocess_updates_meta_on_success(self) -> None:
+        class FakeStdout:
+            def __init__(self, lines: list[str]) -> None:
+                self._lines = iter(lines)
+
+            def readline(self) -> str:
+                return next(self._lines, "")
+
+            def close(self) -> None:
+                return None
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.pid = 4321
+                self.stdout = FakeStdout(["line 1\n", "line 2\n"])
+
+            def wait(self) -> int:
+                return 0
+
+        class ImmediateThread:
+            def __init__(self, *, target: object, daemon: bool) -> None:
+                self._target = target
+
+            def start(self) -> None:
+                assert callable(self._target)
+                self._target()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_path = Path(tmpdir) / "project"
+            project_path.mkdir()
+            session_id = "sess-success"
+            output_path = repo_path / ".kctl" / "sessions" / session_id / "output.log"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": str(project_path),
+                "status": "running",
+            }
+
+            with patch("kctl_pkg.ui_dashboard_sessions.subprocess.Popen", return_value=FakeProcess()), patch(
+                "kctl_pkg.ui_dashboard_sessions.threading.Thread", ImmediateThread
+            ), patch("kctl_pkg.ui_dashboard_sessions._detect_token_warning", return_value="quota"):
+                run_session_subprocess(repo_path, meta, ["codex", "exec"], output_path)
+
+            written_meta = json.loads((repo_path / ".kctl" / "sessions" / session_id / "meta.json").read_text())
+            self.assertEqual(written_meta["status"], "completed")
+            self.assertEqual(written_meta["exit_code"], 0)
+            self.assertIsNone(written_meta["pid"])
+            self.assertEqual(written_meta["token_warning"], "quota")
+            self.assertIn("line 1\nline 2\n", output_path.read_text())
+
+    def test_run_session_subprocess_records_exceptions(self) -> None:
+        class ImmediateThread:
+            def __init__(self, *, target: object, daemon: bool) -> None:
+                self._target = target
+
+            def start(self) -> None:
+                assert callable(self._target)
+                self._target()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project_path = Path(tmpdir) / "project"
+            project_path.mkdir()
+            session_id = "sess-error"
+            output_path = repo_path / ".kctl" / "sessions" / session_id / "output.log"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": str(project_path),
+                "status": "running",
+            }
+
+            with patch(
+                "kctl_pkg.ui_dashboard_sessions.subprocess.Popen",
+                side_effect=RuntimeError("spawn failed"),
+            ), patch("kctl_pkg.ui_dashboard_sessions.threading.Thread", ImmediateThread), patch(
+                "kctl_pkg.ui_dashboard_sessions._detect_token_warning",
+                return_value=None,
+            ):
+                run_session_subprocess(repo_path, meta, ["codex", "exec"], output_path)
+
+            written_meta = json.loads((repo_path / ".kctl" / "sessions" / session_id / "meta.json").read_text())
+            self.assertEqual(written_meta["status"], "failed")
+            self.assertEqual(written_meta["exit_code"], -1)
+            self.assertIn("[kctl] session error: spawn failed", output_path.read_text())
+
     # ------------------------------------------------------------------
     # Page renderers
     # ------------------------------------------------------------------
@@ -1769,6 +3115,128 @@ class AgentSessionTests(unittest.TestCase):
             self.assertIn("Add a project", html)
             self.assertIn("No sessions yet", html)
             self.assertIn("Launch Session", html)
+
+    def test_render_sessions_page_without_available_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            project = Path(tmpdir) / "project"
+            init_git_repo(project)
+            app.add_tracked_project(project)
+
+            with patch("kctl_pkg.ui_dashboard_sessions.available_providers", return_value=[]):
+                html = app.render_sessions_page()
+
+            self.assertIn("No agent providers found", html)
+
+    def test_render_sessions_page_truncates_prompt_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            meta: dict[str, object] = {
+                "id": "20260101-000001-aabbccdd",
+                "project_path": tmpdir,
+                "project_name": "proj",
+                "prompt": "x" * 140,
+                "provider": "codex",
+                "status": "paused",
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "messages": "not-a-list",
+            }
+            app._write_session_meta(meta)
+
+            html = app.render_sessions_page()
+            self.assertIn(("x" * 120) + "...", html)
+            self.assertIn("0 turns", html)
+
+    def test_list_sessions_direct_ignores_non_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            sessions_root = repo_path / ".kctl" / "sessions"
+            sessions_root.mkdir(parents=True, exist_ok=True)
+            (sessions_root / "note.txt").write_text("ignore me\n")
+            write_session_meta_direct(
+                repo_path,
+                {
+                    "id": "sess-1",
+                    "project_path": tmpdir,
+                    "status": "completed",
+                    "started_at": "2026-01-01T00:00:01+00:00",
+                },
+            )
+
+            sessions = list_sessions_direct(repo_path)
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["id"], "sess-1")
+
+    def test_start_agent_session_direct_uses_codex_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project = Path(tmpdir) / "project"
+            project.mkdir()
+            launched: list[list[str]] = []
+
+            def fake_run(repo_value: Path, meta: dict[str, object], command: list[str], output_path: Path) -> None:
+                self.assertEqual(repo_value, repo_path)
+                self.assertEqual(output_path.name, "output.log")
+                launched.append(command)
+
+            with patch("kctl_pkg.ui_dashboard_sessions.run_session_subprocess", side_effect=fake_run):
+                session_id = start_agent_session_direct(repo_path, str(project), "write a test", "codex")
+
+            self.assertTrue(session_id)
+            self.assertEqual(launched[0][:4], ["codex", "exec", "--full-auto", "--cd"])
+
+    def test_reply_to_session_direct_uses_claude_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            project = Path(tmpdir) / "project"
+            project.mkdir()
+            session_id = "sess-direct"
+            output_path = repo_path / ".kctl" / "sessions" / session_id / "output.log"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("first response\n")
+            write_session_meta_direct(
+                repo_path,
+                {
+                    "id": session_id,
+                    "project_path": str(project),
+                    "provider": "claude",
+                    "provider_session_id": "uuid-direct",
+                    "status": "completed",
+                    "started_at": "2026-01-01T00:00:01+00:00",
+                    "messages": [{"role": "user", "content": "first", "timestamp": "2026-01-01T00:00:01+00:00"}],
+                },
+            )
+            launched: list[list[str]] = []
+
+            with patch(
+                "kctl_pkg.ui_dashboard_sessions.run_session_subprocess",
+                side_effect=lambda repo_value, meta, command, output_path: launched.append(command),
+            ):
+                reply_to_session_direct(repo_path, session_id, "second")
+
+            self.assertIn("--resume", launched[0])
+            self.assertIn("uuid-direct", launched[0])
+
+    def test_stop_agent_session_direct_sends_sigterm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            session_id = "sess-stop"
+            write_session_meta_direct(
+                repo_path,
+                {
+                    "id": session_id,
+                    "project_path": tmpdir,
+                    "status": "running",
+                    "pid": 2468,
+                },
+            )
+            killed: list[tuple[int, int]] = []
+
+            with patch("kctl_pkg.ui_dashboard_sessions.os.kill", side_effect=lambda pid, sig: killed.append((pid, sig))):
+                result = stop_agent_session_direct(repo_path, session_id)
+
+            self.assertTrue(result)
+            self.assertEqual(killed, [(2468, signal.SIGTERM)])
 
     def test_render_sessions_page_lists_existing_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1833,9 +3301,15 @@ class AgentSessionTests(unittest.TestCase):
             self.assertIn("completed", html)
             self.assertIn("agent did a lot", html)
             self.assertIn("Exit code", html)
+            self.assertIn("session-chat-shell", html)
+            self.assertIn("session-chat-row-user", html)
+            self.assertIn("session-chat-row-agent", html)
             self.assertIn("reply", html.lower())
             self.assertIn("Copy last 50 lines", html)
-            self.assertIn("Conversation", html)
+            self.assertIn("data-copy-target='#session_output_tail'", html)
+            self.assertIn("Raw Output", html)
+            self.assertIn("Send a follow-up message", html)
+            self.assertIn("scrollToBottom(transcriptNode)", html)
 
     def test_render_session_detail_page_shows_stop_button_when_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1863,6 +3337,8 @@ class AgentSessionTests(unittest.TestCase):
             html = app.render_session_detail_page(session_id)
             self.assertIn("Stop Session", html)
             self.assertIn("/actions/stop-session", html)
+            self.assertIn("session-chat-form-disabled", html)
+            self.assertIn("is responding", html)
 
     def test_render_session_detail_page_shows_token_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1890,6 +3366,99 @@ class AgentSessionTests(unittest.TestCase):
             html = app.render_session_detail_page(session_id)
             self.assertIn("Token/quota warning", html)
             self.assertIn("hit your limit", html)
+
+    def test_render_session_detail_page_ignores_false_positive_token_warning_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-false-warning"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text('self.assertIn("hit your limit", html)\n')
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": tmpdir,
+                "project_name": "proj",
+                "prompt": "run tests",
+                "provider": "codex",
+                "provider_session_id": "uuid-4",
+                "status": "completed",
+                "exit_code": 0,
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "ended_at": "2026-01-01T00:01:00+00:00",
+                "pid": None,
+                "token_warning": 'self.assertIn("hit your limit", html)',
+                "messages": [],
+            }
+            app._write_session_meta(meta)
+            html = app.render_session_detail_page(session_id)
+            self.assertNotIn('id=\'token_warning\'', html)
+
+    def test_render_session_detail_page_interleaves_follow_up_output_as_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-follow-up"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                "first response\n"
+                "\n"
+                f"{'─' * 60}\n"
+                "[follow-up #2]\n"
+                f"{'─' * 60}\n"
+                "\n"
+                "second response\n"
+            )
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": tmpdir,
+                "project_name": "proj",
+                "prompt": "first request",
+                "provider": "codex",
+                "provider_session_id": "uuid-3",
+                "status": "completed",
+                "exit_code": 0,
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "ended_at": "2026-01-01T00:02:00+00:00",
+                "pid": None,
+                "token_warning": None,
+                "messages": [
+                    {"role": "user", "content": "first request", "timestamp": "2026-01-01T00:00:01+00:00"},
+                    {"role": "user", "content": "second request", "timestamp": "2026-01-01T00:01:00+00:00"},
+                ],
+            }
+            app._write_session_meta(meta)
+            html = app.render_session_detail_page(session_id)
+            self.assertIn("first request", html)
+            self.assertIn("second request", html)
+            self.assertIn("first response", html)
+            self.assertIn("second response", html)
+
+    def test_render_session_detail_page_shows_empty_transcript_when_no_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = DashboardApp(Path(tmpdir) / "repo")
+            session_id = "sess-empty"
+            output_path = app._session_output_path(session_id)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("")
+            meta: dict[str, object] = {
+                "id": session_id,
+                "project_path": tmpdir,
+                "project_name": "proj",
+                "prompt": "",
+                "provider": "codex",
+                "provider_session_id": "uuid-empty",
+                "status": "completed",
+                "exit_code": 0,
+                "started_at": "2026-01-01T00:00:01+00:00",
+                "ended_at": "2026-01-01T00:02:00+00:00",
+                "pid": None,
+                "token_warning": None,
+                "messages": [],
+            }
+            app._write_session_meta(meta)
+
+            html = app.render_session_detail_page(session_id)
+            self.assertIn("No transcript yet. Session activity will appear here.", html)
 
 
 if __name__ == "__main__":
