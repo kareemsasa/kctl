@@ -157,6 +157,8 @@ class UIDashboardTests(unittest.TestCase):
             output_path = Path(tmpdir) / "output.log"
             output_path.write_text("ok\nrate limit reached\n")
             self.assertEqual(_detect_token_warning(output_path), "rate limit reached")
+            output_path.write_text('self.assertIn("hit your limit", html)\n')
+            self.assertIsNone(_detect_token_warning(output_path))
             missing_path = Path(tmpdir) / "missing.log"
             self.assertIsNone(_detect_token_warning(missing_path))
 

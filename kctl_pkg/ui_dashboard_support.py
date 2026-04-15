@@ -85,6 +85,27 @@ _TOKEN_WARNING_PATTERNS = (
     "turn limit",
 )
 
+_TOKEN_WARNING_FALSE_POSITIVE_PATTERNS = (
+    "self.assert",
+    "assertionerror",
+    "traceback",
+    "fail:",
+    "expected ",
+    " not found in ",
+)
+
+
+def _normalize_token_warning_text(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    lower = text.lower()
+    if not any(pattern in lower for pattern in _TOKEN_WARNING_PATTERNS):
+        return None
+    if any(pattern in lower for pattern in _TOKEN_WARNING_FALSE_POSITIVE_PATTERNS):
+        return None
+    return text
+
 
 def _detect_token_warning(output_path: Path) -> str | None:
     try:
@@ -94,10 +115,18 @@ def _detect_token_warning(output_path: Path) -> str | None:
     lower = text.lower()
     for pattern in _TOKEN_WARNING_PATTERNS:
         if pattern in lower:
+            saw_matching_line = False
             for line in reversed(text.splitlines()):
                 if pattern in line.lower():
-                    return line.strip()
-            return pattern
+                    saw_matching_line = True
+                    normalized = _normalize_token_warning_text(line)
+                    if normalized is not None:
+                        return normalized
+            if saw_matching_line:
+                return None
+            normalized = _normalize_token_warning_text(pattern)
+            if normalized is not None:
+                return normalized
     return None
 
 
@@ -1293,18 +1322,127 @@ a.project-name:hover {
   border: 1px solid rgba(239,68,68,0.3);
   color: #ef4444;
 }
-.session-message {
-  margin-bottom: 12px;
+.session-chat-shell {
+  padding: 0;
+  overflow: hidden;
 }
-.session-message:last-child {
-  margin-bottom: 0;
-}
-.session-message-header {
+.session-chat-header {
   display: flex;
-  align-items: center;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 16px 0;
+}
+.session-chat-window {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: min(68vh, 760px);
+  overflow-y: auto;
+  padding: 12px 16px 96px;
+  background:
+    linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+}
+.session-chat-row {
+  display: flex;
+  width: 100%;
+}
+.session-chat-row-user {
+  justify-content: flex-end;
+}
+.session-chat-row-agent {
+  justify-content: flex-start;
+}
+.session-chat-bubble {
+  max-width: min(85%, 720px);
+  border-radius: 18px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  overflow-wrap: anywhere;
+}
+.session-chat-bubble-user {
+  background: #1d4ed8;
+  color: #eff6ff;
+  border-bottom-right-radius: 6px;
+}
+.session-chat-bubble-agent {
+  background: white;
+  color: #0f172a;
+  border: 1px solid #dbe4f0;
+  border-bottom-left-radius: 6px;
+}
+.session-chat-meta {
+  display: flex;
   gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78em;
+  opacity: 0.78;
   margin-bottom: 6px;
-  font-size: 0.9em;
+}
+.session-chat-content {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.session-chat-placeholder {
+  color: #64748b;
+  font-style: italic;
+}
+.session-chat-empty {
+  text-align: center;
+  color: #64748b;
+  padding: 20px 12px;
+}
+.session-chat-composer {
+  position: sticky;
+  bottom: 0;
+  padding: 12px 16px 16px;
+  background: linear-gradient(180deg, rgba(238,242,255,0) 0%, #eef2ff 22%, #eef2ff 100%);
+  border-top: 1px solid #dbe4f0;
+}
+.session-chat-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin: 0;
+}
+.session-chat-form-disabled {
+  opacity: 0.88;
+}
+.session-chat-input {
+  min-height: 52px;
+  max-height: 180px;
+  resize: vertical;
+  border-radius: 16px;
+  border: 1px solid #bfdbfe;
+  background: white;
+  padding: 12px 14px;
+}
+.session-chat-send {
+  min-width: 96px;
+  align-self: stretch;
+}
+@media (max-width: 640px) {
+  .session-chat-header {
+    padding: 14px 14px 0;
+  }
+  .session-chat-window {
+    max-height: calc(100vh - 280px);
+    padding: 10px 14px 104px;
+  }
+  .session-chat-bubble {
+    max-width: 92%;
+  }
+  .session-chat-composer {
+    padding: 10px 14px max(14px, env(safe-area-inset-bottom));
+  }
+  .session-chat-form {
+    grid-template-columns: 1fr;
+  }
+  .session-chat-send {
+    min-width: 0;
+  }
 }
 """
 
@@ -1353,7 +1491,16 @@ function extractCopyValue(node) {
   if (!value) {
     const targetSelector = node.getAttribute('data-copy-target') || '';
     const targetNode = targetSelector ? document.querySelector(targetSelector) : null;
-    value = targetNode ? (targetNode.textContent || '') : '';
+    if (targetNode) {
+      if (
+        targetNode instanceof HTMLTextAreaElement
+        || targetNode instanceof HTMLInputElement
+      ) {
+        value = targetNode.value || '';
+      } else {
+        value = targetNode.textContent || '';
+      }
+    }
     const copyLastLines = parseInt(node.getAttribute('data-copy-last-lines') || '', 10);
     if (copyLastLines > 0) {
       const lines = value.split(/\r?\n/);
