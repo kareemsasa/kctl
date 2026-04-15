@@ -7,7 +7,15 @@ from urllib.parse import urlencode
 
 from .git import check_remote_connectivity, get_full_diff, get_project_git_summary
 from .types import PlanError
-from .ui_dashboard_support import _escape, _link, _page_link, _run_detail_link, check_repo_path, list_plans_in_directory
+from .ui_dashboard_support import (
+    _escape,
+    _link,
+    _normalize_token_warning_text,
+    _page_link,
+    _run_detail_link,
+    check_repo_path,
+    list_plans_in_directory,
+)
 
 
 def handle_api_get(
@@ -92,7 +100,7 @@ def handle_api_get(
             output = app.read_session_output(session_id)
             status = str(meta.get("status") or "unknown") if meta else "unknown"
             messages = list(meta.get("messages") or []) if meta else []
-            token_warning = str(meta.get("token_warning") or "") if meta else ""
+            token_warning = (_normalize_token_warning_text(meta.get("token_warning")) or "") if meta else ""
         else:
             output = ""
             status = "unknown"

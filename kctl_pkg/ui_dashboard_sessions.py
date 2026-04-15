@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -13,6 +14,7 @@ from .types import PlanError
 from .ui_dashboard_support import (
     _detect_token_warning,
     _escape,
+    _normalize_token_warning_text,
     _page_link,
     _render_collapsible_section,
     _status_class,
@@ -24,6 +26,93 @@ def _tail_lines_text(text: str | None, line_count: int = 50) -> str:
     if not text:
         return ""
     return "\n".join(text.splitlines()[-line_count:])
+
+
+_FOLLOW_UP_SPLIT_RE = re.compile(r"\n?─{20,}\n\[follow-up #\d+\]\n─{20,}\n\n")
+
+
+def _split_session_output_turns(output: str) -> list[str]:
+    if not output:
+        return []
+    parts = _FOLLOW_UP_SPLIT_RE.split(output)
+    return [part.strip("\n") for part in parts]
+
+
+def _render_transcript_html(
+    messages: object,
+    output: str,
+    *,
+    status: str,
+    provider_label: str,
+    prompt: str,
+) -> str:
+    items: list[str] = []
+    assistant_turns = _split_session_output_turns(output)
+    message_list = messages if isinstance(messages, list) else []
+
+    if not message_list and prompt:
+        message_list = [{"role": "user", "content": prompt}]
+
+    for index, raw_msg in enumerate(message_list):
+        if isinstance(raw_msg, dict):
+            role = str(raw_msg.get("role") or "user")
+            content = str(raw_msg.get("content") or "")
+            ts = _format_session_ts(raw_msg.get("timestamp"))
+        else:
+            role = "user"
+            content = str(raw_msg)
+            ts = ""
+        side_class = "session-chat-row-user" if role == "user" else "session-chat-row-agent"
+        bubble_class = "session-chat-bubble-user" if role == "user" else "session-chat-bubble-agent"
+        label = "You" if role == "user" else provider_label
+        meta_html = (
+            "<div class='session-chat-meta'>"
+            f"<span>{_escape(label)}</span>"
+            f"{f'<span>{_escape(ts)}</span>' if ts else ''}"
+            "</div>"
+        )
+        items.append(
+            f"<div class='session-chat-row {side_class}'>"
+            f"<article class='session-chat-bubble {bubble_class}'>"
+            f"{meta_html}"
+            f"<div class='session-chat-content'>{_escape(content)}</div>"
+            "</article>"
+            "</div>"
+        )
+
+        assistant_text = assistant_turns[index] if index < len(assistant_turns) else ""
+        if assistant_text or index == len(message_list) - 1:
+            assistant_meta = (
+                "<div class='session-chat-meta'>"
+                f"<span>{_escape(provider_label)}</span>"
+                f"{'<span>Responding…</span>' if status == 'running' and not assistant_text else ''}"
+                "</div>"
+            )
+            assistant_content = (
+                _escape(assistant_text)
+                if assistant_text
+                else (
+                    "<div class='session-chat-placeholder'>"
+                    f"{_escape(provider_label)} is responding…"
+                    "</div>"
+                )
+            )
+            items.append(
+                "<div class='session-chat-row session-chat-row-agent'>"
+                "<article class='session-chat-bubble session-chat-bubble-agent'>"
+                f"{assistant_meta}"
+                f"<div class='session-chat-content'>{assistant_content}</div>"
+                "</article>"
+                "</div>"
+            )
+
+    if not items:
+        items.append(
+            "<div class='session-chat-empty'>"
+            "No transcript yet. Session activity will appear here."
+            "</div>"
+        )
+    return "".join(items)
 
 
 def _session_detail_link(session_id: str) -> str:
@@ -369,7 +458,7 @@ def render_session_detail_page(app: object, session_id: str) -> str:
     started = str(meta.get("started_at") or "")
     ended = meta.get("ended_at")
     exit_code = meta.get("exit_code")
-    token_warning = meta.get("token_warning")
+    token_warning = _normalize_token_warning_text(meta.get("token_warning"))
     output = read_session_output(app.repo_path, session_id)
 
     started_display = _format_session_ts(started)
@@ -413,57 +502,60 @@ def render_session_detail_page(app: object, session_id: str) -> str:
             "</form>"
         )
 
-    conversation_inner = ""
-    if isinstance(messages, list) and messages:
-        for i, msg in enumerate(messages):
-            content = str(msg.get("content") or "") if isinstance(msg, dict) else str(msg)
-            ts = ""
-            if isinstance(msg, dict) and msg.get("timestamp"):
-                ts_raw = str(msg["timestamp"])
-                ts = ts_raw.replace("T", " ").split(".")[0] + " UTC" if "T" in ts_raw else ts_raw
-            num = i + 1
-            conversation_inner += (
-                "<div class='session-message'>"
-                "<div class='session-message-header'>"
-                f"<strong>Prompt #{num}</strong>"
-                f"{f'<span class=\"session-meta\">{_escape(ts)}</span>' if ts else ''}"
-                "</div>"
-                f"<div class='session-prompt-full'>{_escape(content)}</div>"
-                "</div>"
-            )
-    else:
-        conversation_inner = f"<div class='session-prompt-full'>{_escape(prompt)}</div>"
-    conversation_html = f"<div id='conversation_list'>{conversation_inner}</div>"
+    provider_label = provider_name.capitalize() if provider_name else "Agent"
+    transcript_html = _render_transcript_html(
+        messages,
+        output,
+        status=status,
+        provider_label=provider_label,
+        prompt=prompt,
+    )
 
     can_reply = status in {"completed", "failed"}
-    reply_html = ""
-    provider_label = provider_name.capitalize() if provider_name else "Agent"
-    if can_reply:
-        reply_html = (
-            "<section class='panel' id='reply_section'>"
-            "<h2>Reply</h2>"
-            "<form method='post' action='/actions/session-reply'>"
-            f"<input type='hidden' name='session_id' value='{_escape(session_id)}'>"
-            "<textarea name='reply' rows='4' placeholder='Send a follow-up message...' required style='min-height:80px' id='reply_input'></textarea>"
-            f"<button type='submit' class='btn-primary'>Send Reply via {_escape(provider_label)}</button>"
-            "</form>"
-            "</section>"
+    composer_html = (
+        "<form method='post' action='/actions/session-reply' class='session-chat-form'>"
+        f"<input type='hidden' name='session_id' value='{_escape(session_id)}'>"
+        "<textarea name='reply' rows='2' placeholder='Send a follow-up message...' required "
+        "id='reply_input' class='session-chat-input'></textarea>"
+        f"<button type='submit' class='btn-primary session-chat-send'>Send</button>"
+        "</form>"
+        if can_reply
+        else (
+            "<div class='session-chat-form session-chat-form-disabled'>"
+            "<textarea rows='2' placeholder='Wait for the current reply to finish...' "
+            "id='reply_input' class='session-chat-input' disabled></textarea>"
+            f"<button type='button' class='btn-primary session-chat-send' disabled>{_escape(provider_label)} is responding</button>"
+            "</div>"
         )
+    )
+    chat_html = (
+        "<section class='panel session-chat-shell'>"
+        "<div class='session-chat-header'>"
+        "<div>"
+        "<h2 style='margin:0'>Chat</h2>"
+        "<div class='help'>Newest messages stay at the bottom. Live updates appear here while the session runs.</div>"
+        "</div>"
+        f"{stop_html}"
+        "</div>"
+        f"<div class='session-chat-window' id='conversation_list'>{transcript_html}</div>"
+        f"<div class='session-chat-composer' id='reply_section'>{composer_html}</div>"
+        "</section>"
+    )
 
     tail_output = _tail_lines_text(output)
     output_html = (
         "<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
-        "<h2>Output</h2>"
-        "<button type='button' class='mini-button' data-copy-target='#session_output' data-copy-last-lines='50' onclick='return window.kctlCopyButtonClick(this)'>Copy last 50 lines</button>"
+        "<h2>Raw Output</h2>"
+        "<button type='button' class='mini-button' data-copy-target='#session_output_tail' data-copy-last-lines='50' onclick='return window.kctlCopyButtonClick(this)'>Copy last 50 lines</button>"
         "</div>"
         "<div class='help'>Mobile fallback: tap the tail box below to select text with the browser copy UI.</div>"
         f"<textarea id='session_output_tail' class='code-block' readonly onclick='this.focus();this.select();' style='min-height:120px'>{_escape(tail_output)}</textarea>"
         f"<pre class='session-output' id='session_output'>{_escape(output) if output else '(waiting for output...)'}</pre>"
     )
-    conversation_section = _render_collapsible_section(
-        "Conversation",
-        conversation_html,
-        open_by_default=status != "running",
+    output_section = _render_collapsible_section(
+        "Raw Output",
+        output_html,
+        open_by_default=status == "running",
     )
 
     body = (
@@ -472,16 +564,12 @@ def render_session_detail_page(app: object, session_id: str) -> str:
         "<section class='panel'>"
         "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:12px'>"
         f"<h2 style='margin:0'>Session: {_escape(project_name)}</h2>"
-        f"{stop_html}"
         "</div>"
         f"{info_html}"
         f"{token_warning_html}"
         "</section>"
-        "<section class='panel'>"
-        f"{output_html}"
-        "</section>"
-        f"{conversation_section}"
-        f"{reply_html}"
+        f"{chat_html}"
+        f"{output_section}"
         "</div></main>"
     )
 
@@ -494,31 +582,66 @@ def render_session_detail_page(app: object, session_id: str) -> str:
         f"  const sessionStatus = {status_json};\n"
         f"  const providerLabel = {provider_label_json};\n"
         "  const outputNode = document.getElementById('session_output');\n"
-        "  if (!sessionId || !outputNode || sessionStatus !== 'running') return;\n"
-        "  let knownMsgCount = document.querySelectorAll('.session-message').length;\n"
+        "  const transcriptNode = document.getElementById('conversation_list');\n"
+        "  const composerNode = document.getElementById('reply_section');\n"
+        "  function scrollToBottom(node) {\n"
+        "    if (!node) return;\n"
+        "    node.scrollTop = node.scrollHeight;\n"
+        "  }\n"
+        "  scrollToBottom(transcriptNode);\n"
+        "  scrollToBottom(outputNode);\n"
+        "  if (!sessionId || !outputNode || !transcriptNode || sessionStatus !== 'running') return;\n"
         "  function escapeHtml(s) {\n"
         "    const d = document.createElement('div'); d.textContent = s; return d.innerHTML;\n"
         "  }\n"
-        "  function renderMessages(msgs) {\n"
-        "    const conv = document.getElementById('conversation_list');\n"
-        "    if (!conv || !Array.isArray(msgs) || msgs.length <= knownMsgCount) return;\n"
-        "    knownMsgCount = msgs.length;\n"
+        "  function formatTimestamp(value) {\n"
+        "    if (!value) return '';\n"
+        "    return value.includes('T') ? value.replace('T', ' ').split('.')[0] + ' UTC' : value;\n"
+        "  }\n"
+        "  function splitOutputTurns(text) {\n"
+        "    if (!text) return [];\n"
+        "    return text.split(/\\n?─{20,}\\n\\[follow-up #\\d+\\]\\n─{20,}\\n\\n/).map((part) => part.replace(/^\\n+|\\n+$/g, ''));\n"
+        "  }\n"
+        "  function shouldStickToBottom(node) {\n"
+        "    return (node.scrollHeight - node.scrollTop - node.clientHeight) < 80;\n"
+        "  }\n"
+        "  function renderTranscript(msgs, outputText, liveStatus) {\n"
+        "    if (!Array.isArray(msgs)) msgs = [];\n"
+        "    const assistantTurns = splitOutputTurns(outputText || '');\n"
+        "    const transcript = msgs.length ? msgs : [];\n"
         "    let html = '';\n"
-        "    msgs.forEach((m, i) => {\n"
+        "    transcript.forEach((m, i) => {\n"
+        "      const role = (typeof m === 'object' && m.role) ? String(m.role) : 'user';\n"
         "      const content = (typeof m === 'object' && m.content) ? m.content : String(m);\n"
-        "      let ts = '';\n"
-        "      if (typeof m === 'object' && m.timestamp) {\n"
-        "        ts = m.timestamp.replace('T', ' ').split('.')[0] + ' UTC';\n"
-        "      }\n"
-        "      html += '<div class=\"session-message\">'\n"
-        "        + '<div class=\"session-message-header\">'\n"
-        "        + '<strong>Prompt #' + (i + 1) + '</strong>'\n"
-        "        + (ts ? '<span class=\"session-meta\">' + escapeHtml(ts) + '</span>' : '')\n"
-        "        + '</div>'\n"
-        "        + '<div class=\"session-prompt-full\">' + escapeHtml(content) + '</div>'\n"
+        "      const ts = (typeof m === 'object' && m.timestamp) ? formatTimestamp(String(m.timestamp)) : '';\n"
+        "      const rowClass = role === 'user' ? 'session-chat-row-user' : 'session-chat-row-agent';\n"
+        "      const bubbleClass = role === 'user' ? 'session-chat-bubble-user' : 'session-chat-bubble-agent';\n"
+        "      const label = role === 'user' ? 'You' : providerLabel;\n"
+        "      html += '<div class=\"session-chat-row ' + rowClass + '\">'\n"
+        "        + '<article class=\"session-chat-bubble ' + bubbleClass + '\">'\n"
+        "        + '<div class=\"session-chat-meta\"><span>' + escapeHtml(label) + '</span>'\n"
+        "        + (ts ? '<span>' + escapeHtml(ts) + '</span>' : '') + '</div>'\n"
+        "        + '<div class=\"session-chat-content\">' + escapeHtml(content) + '</div>'\n"
+        "        + '</article>'\n"
         "        + '</div>';\n"
+        "      const assistantText = i < assistantTurns.length ? assistantTurns[i] : '';\n"
+        "      if (assistantText || i === transcript.length - 1) {\n"
+        "        html += '<div class=\"session-chat-row session-chat-row-agent\">'\n"
+        "          + '<article class=\"session-chat-bubble session-chat-bubble-agent\">'\n"
+        "          + '<div class=\"session-chat-meta\"><span>' + escapeHtml(providerLabel) + '</span>'\n"
+        "          + ((!assistantText && liveStatus === 'running') ? '<span>Responding…</span>' : '')\n"
+        "          + '</div>'\n"
+        "          + '<div class=\"session-chat-content\">'\n"
+        "          + (assistantText ? escapeHtml(assistantText) : '<div class=\"session-chat-placeholder\">' + escapeHtml(providerLabel) + ' is responding…</div>')\n"
+        "          + '</div></article></div>';\n"
+        "      }\n"
         "    });\n"
-        "    conv.innerHTML = html;\n"
+        "    if (!html) {\n"
+        "      html = '<div class=\"session-chat-empty\">No transcript yet. Session activity will appear here.</div>';\n"
+        "    }\n"
+        "    const stick = shouldStickToBottom(transcriptNode);\n"
+        "    transcriptNode.innerHTML = html;\n"
+        "    if (stick) transcriptNode.scrollTop = transcriptNode.scrollHeight;\n"
         "    const turnBadge = document.getElementById('turn_badge');\n"
         "    if (turnBadge) {\n"
         "      const n = msgs.length;\n"
@@ -537,7 +660,7 @@ def render_session_detail_page(app: object, session_id: str) -> str:
         "      tailNode.value = lines.slice(-50).join('\\n');\n"
         "    }\n"
         "    outputNode.scrollTop = outputNode.scrollHeight;\n"
-        "    if (data.messages) renderMessages(data.messages);\n"
+        "    renderTranscript(data.messages, data.output || '', data.status || 'unknown');\n"
         "    if (data.status !== 'running') {\n"
         "      clearInterval(window._sessionPoll);\n"
         "      const badge = document.getElementById('status_badge');\n"
@@ -556,24 +679,14 @@ def render_session_detail_page(app: object, session_id: str) -> str:
         "          panel.appendChild(warn);\n"
         "        }\n"
         "      }\n"
-        "      const replySection = document.getElementById('reply_section');\n"
-        "      if (!replySection) {\n"
-        "        const col = document.querySelector('.column');\n"
-        "        if (col) {\n"
-        "          const section = document.createElement('section');\n"
-        "          section.id = 'reply_section';\n"
-        "          section.className = 'panel';\n"
-        "          section.innerHTML = '<h2>Reply</h2>'\n"
-        "           + '<form method=\"post\" action=\"/actions/session-reply\">'\n"
-        "           + '<input type=\"hidden\" name=\"session_id\" value=\"' + sessionId + '\">'\n"
-        "           + '<textarea name=\"reply\" rows=\"4\" placeholder=\"Send a follow-up message...\" required '\n"
-        "           + 'style=\"min-height:80px\" id=\"reply_input\"></textarea>'\n"
-        "           + '<button type=\"submit\" class=\"btn-primary\">Send Reply via ' + escapeHtml(providerLabel) + '</button>'\n"
-        "           + '</form>';\n"
-        "          col.appendChild(section);\n"
-        "          const input = document.getElementById('reply_input');\n"
-        "          if (input) input.focus();\n"
-        "        }\n"
+        "      if (composerNode) {\n"
+        "        composerNode.innerHTML = '<form method=\"post\" action=\"/actions/session-reply\" class=\"session-chat-form\">'\n"
+        "         + '<input type=\"hidden\" name=\"session_id\" value=\"' + sessionId + '\">'\n"
+        "         + '<textarea name=\"reply\" rows=\"2\" placeholder=\"Send a follow-up message...\" required id=\"reply_input\" class=\"session-chat-input\"></textarea>'\n"
+        "         + '<button type=\"submit\" class=\"btn-primary session-chat-send\">Send</button>'\n"
+        "         + '</form>';\n"
+        "        const input = document.getElementById('reply_input');\n"
+        "        if (input) input.focus();\n"
         "      }\n"
         "    }\n"
         "  };\n"
