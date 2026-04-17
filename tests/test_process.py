@@ -125,6 +125,29 @@ class ProcessTests(unittest.TestCase):
             self.assertEqual(len(started), 1)
             self.assertEqual(started, finished)
 
+    def test_run_streaming_command_uses_closed_stdin_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cwd = Path(tmpdir)
+
+            result = run_streaming_command(
+                [
+                    "python3",
+                    "-c",
+                    textwrap.dedent(
+                        """
+                        import sys
+                        data = sys.stdin.read()
+                        print("stdin-empty" if data == "" else "stdin-present")
+                        """
+                    ),
+                ],
+                cwd=cwd,
+            )
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertIn("stdin-empty\n", result.stdout)
+            self.assertFalse(result.stopped)
+
 
 if __name__ == "__main__":
     unittest.main()

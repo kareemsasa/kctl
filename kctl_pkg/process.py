@@ -34,7 +34,7 @@ def run_command(
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
-        stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -84,6 +84,7 @@ def run_streaming_command(
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
