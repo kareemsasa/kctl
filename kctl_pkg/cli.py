@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .evaluation_aggregate import aggregate_evaluations
 from .multi import print_run_status, run_many_plans
 from .output import BufferedOutputSink, ConsoleOutputSink, NullOutputSink
 from .plan import init_plan, resolve_plan_path
@@ -310,6 +311,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable ANSI color output.",
     )
+
+    aggregate_parser = subparsers.add_parser(
+        "aggregate-evaluations",
+        help="Aggregate repo evaluation artifacts from a manifest into JSON, Markdown, and CSV summaries.",
+    )
+    aggregate_parser.add_argument(
+        "--manifest",
+        required=True,
+        help="YAML manifest listing evaluation artifact paths.",
+    )
+    aggregate_parser.add_argument(
+        "--out",
+        help="Output directory for summary.json, summary.md, and table.csv.",
+    )
+    aggregate_parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI color output.",
+    )
     return parser
 
 
@@ -404,6 +424,28 @@ def main(argv: list[str] | None = None) -> int:
                 objective=args.objective,
                 force=args.force,
             )
+        except PlanError as exc:
+            print(style_status_text(f"Error: {exc}", "error", stream=sys.stderr, bold=True), file=sys.stderr)
+            return 2
+
+    if args.command == "aggregate-evaluations":
+        try:
+            result = aggregate_evaluations(
+                manifest_path=Path(args.manifest).expanduser().resolve(),
+                output_dir=Path(args.out).expanduser().resolve() if args.out else None,
+            )
+            print(
+                style_status_text(
+                    f"Aggregated {len(result['summary']['repos'])} evaluation artifacts into {result['output_dir']}",
+                    "success",
+                    bold=True,
+                ),
+                flush=True,
+            )
+            print(f"summary.json: {result['outputs']['summary_json']}", flush=True)
+            print(f"summary.md: {result['outputs']['summary_md']}", flush=True)
+            print(f"table.csv: {result['outputs']['table_csv']}", flush=True)
+            return 0
         except PlanError as exc:
             print(style_status_text(f"Error: {exc}", "error", stream=sys.stderr, bold=True), file=sys.stderr)
             return 2

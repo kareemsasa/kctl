@@ -137,6 +137,92 @@ class RunnerHelperTests(unittest.TestCase):
         }
         artifact = parse_structured_artifact("inspect_v1", f"done\n```json\n{json.dumps(inspect_payload)}\n```\n")
         self.assertEqual(artifact["project_type"], "app")
+        evaluation_payload = {
+            "repository": {"name": "repo", "path": "/tmp/repo"},
+            "rubric_id": "repo-rubric-v1",
+            "rubric_version": "repo_eval_v1",
+            "evaluated_at": "2026-04-17T22:00:00+00:00",
+            "repo_name": "repo",
+            "repo_path": "/tmp/repo",
+            "commit_sha": "abc123",
+            "max_score": 5,
+            "confidence": "medium",
+            "profile": "backend_service",
+            "normalization_basis": "sum(weight * score / max_score)",
+            "summary": "stable enough",
+            "categories": [
+                {
+                    "id": "build_test_health",
+                    "name": "Build and test health",
+                    "weight": 25,
+                    "score": 4,
+                    "max_score": 5,
+                    "summary": "tests exist",
+                    "evidence": ["bash scripts/test passes"],
+                    "risks": ["coverage depth is unclear"],
+                },
+                {
+                    "id": "documentation_quality",
+                    "name": "Documentation quality",
+                    "weight": 15,
+                    "score": 3,
+                    "max_score": 5,
+                    "summary": "core docs present",
+                    "evidence": ["README.md covers setup"],
+                    "risks": [],
+                },
+                {
+                    "id": "security_secret_hygiene",
+                    "name": "Security and secret hygiene",
+                    "weight": 15,
+                    "score": 3,
+                    "max_score": 5,
+                    "summary": "no obvious committed secrets",
+                    "evidence": [".gitignore exists"],
+                    "risks": ["secret scanning not confirmed"],
+                },
+                {
+                    "id": "operational_readiness",
+                    "name": "Operational readiness",
+                    "weight": 15,
+                    "score": 3,
+                    "max_score": 5,
+                    "summary": "basic ops scripts present",
+                    "evidence": ["scripts/test is available"],
+                    "risks": [],
+                },
+                {
+                    "id": "architecture_maintainability",
+                    "name": "Architecture and maintainability",
+                    "weight": 20,
+                    "score": 4,
+                    "max_score": 5,
+                    "summary": "clear module boundaries",
+                    "evidence": ["kctl_pkg/plan.py is focused"],
+                    "risks": ["refactor is still in progress"],
+                },
+                {
+                    "id": "release_readiness",
+                    "name": "Release readiness",
+                    "weight": 10,
+                    "score": 2,
+                    "max_score": 5,
+                    "summary": "release process is partially documented",
+                    "evidence": ["packaging metadata exists"],
+                    "risks": ["release checklist is not explicit"],
+                },
+            ],
+            "overall_findings": ["test health is the strongest signal"],
+            "blocking_issues": [],
+            "recommended_next_actions": ["tighten release checklist"],
+        }
+        evaluation_artifact = parse_structured_artifact(
+            "evaluation_v1",
+            f"done\n```json\n{json.dumps(evaluation_payload)}\n```\n",
+        )
+        self.assertEqual(evaluation_artifact["repository"]["name"], "repo")
+        self.assertEqual(evaluation_artifact["rubric_id"], "repo-rubric-v1")
+        self.assertEqual(evaluation_artifact["categories"][0]["weight"], 25)
         self.assertEqual(extract_last_fenced_json_block("x\n```json\n{\"a\":1}\n```"), '{"a":1}')
         with self.assertRaisesRegex(PlanError, "Expected a final fenced JSON block"):
             extract_last_fenced_json_block("no json")

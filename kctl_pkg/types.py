@@ -93,6 +93,44 @@ class VerifyIssueArtifact:
 
 
 @dataclass
+class EvaluationRepositoryArtifact:
+    name: str
+    path: str
+
+
+@dataclass
+class EvaluationCategoryArtifact:
+    id: str
+    name: str
+    weight: int
+    score: int
+    max_score: int
+    summary: str
+    evidence: list[str]
+    risks: list[str]
+
+
+@dataclass
+class EvaluationArtifact:
+    repository: EvaluationRepositoryArtifact
+    rubric_id: str
+    rubric_version: str
+    evaluated_at: str
+    repo_name: str
+    repo_path: str
+    commit_sha: str | None
+    max_score: int
+    confidence: str | None
+    profile: str | None
+    normalization_basis: str
+    summary: str
+    categories: list[EvaluationCategoryArtifact]
+    overall_findings: list[str]
+    blocking_issues: list[str]
+    recommended_next_actions: list[str]
+
+
+@dataclass
 class VerifyArtifact:
     status: str
     commands_run: list[VerifyCommandArtifact]
@@ -117,6 +155,18 @@ def _require_string_list(value: Any, label: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise PlanError(f"{label} must be a list of strings.")
     return [item.strip() for item in value]
+
+
+def _require_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PlanError(f"{label} must be an integer.")
+    return value
+
+
+def _optional_string(value: Any, label: str) -> str | None:
+    if value is None:
+        return None
+    return _require_string(value, label)
 
 
 def _parse_path_purpose_list(value: Any, label: str) -> list[PathPurposeEntry]:
@@ -293,5 +343,96 @@ def parse_verify_artifact(value: Any) -> VerifyArtifact:
     )
 
 
-def artifact_to_dict(value: InspectArtifact | PlanArtifact | VerifyArtifact) -> dict[str, Any]:
+def parse_evaluation_artifact(value: Any) -> EvaluationArtifact:
+    data = _require_mapping(value, "evaluation artifact")
+    repository_data = _require_mapping(data.get("repository"), "evaluation.repository")
+    repository = EvaluationRepositoryArtifact(
+        name=_require_string(repository_data.get("name"), "evaluation.repository.name"),
+        path=_require_string(repository_data.get("path"), "evaluation.repository.path"),
+    )
+    rubric_id = _require_string(data.get("rubric_id"), "evaluation.rubric_id")
+    max_score = _require_int(data.get("max_score"), "evaluation.max_score")
+    if max_score <= 0:
+        raise PlanError("evaluation.max_score must be greater than zero.")
+    repo_name = _require_string(data.get("repo_name"), "evaluation.repo_name")
+    repo_path = _require_string(data.get("repo_path"), "evaluation.repo_path")
+    categories_value = data.get("categories")
+    if not isinstance(categories_value, list) or not categories_value:
+        raise PlanError("evaluation.categories must be a non-empty list.")
+    categories: list[EvaluationCategoryArtifact] = []
+    category_ids: set[str] = set()
+    total_weight = 0
+    for index, item in enumerate(categories_value, start=1):
+        entry = _require_mapping(item, f"evaluation.categories[{index}]")
+        category_id = _require_string(entry.get("id"), f"evaluation.categories[{index}].id")
+        if category_id in category_ids:
+            raise PlanError(f"evaluation.categories[{index}].id must be unique.")
+        category_ids.add(category_id)
+        weight = _require_int(entry.get("weight"), f"evaluation.categories[{index}].weight")
+        score = _require_int(entry.get("score"), f"evaluation.categories[{index}].score")
+        category_max_score = _require_int(
+            entry.get("max_score"), f"evaluation.categories[{index}].max_score"
+        )
+        if weight <= 0:
+            raise PlanError(f"evaluation.categories[{index}].weight must be greater than zero.")
+        if category_max_score <= 0:
+            raise PlanError(f"evaluation.categories[{index}].max_score must be greater than zero.")
+        if category_max_score != max_score:
+            raise PlanError(
+                f"evaluation.categories[{index}].max_score must match evaluation.max_score."
+            )
+        if score < 0 or score > category_max_score:
+            raise PlanError(
+                f"evaluation.categories[{index}].score must be between zero and max_score."
+            )
+        total_weight += weight
+        categories.append(
+            EvaluationCategoryArtifact(
+                id=category_id,
+                name=_require_string(entry.get("name"), f"evaluation.categories[{index}].name"),
+                weight=weight,
+                score=score,
+                max_score=category_max_score,
+                summary=_require_string(entry.get("summary"), f"evaluation.categories[{index}].summary"),
+                evidence=_require_string_list(
+                    entry.get("evidence"), f"evaluation.categories[{index}].evidence"
+                ),
+                risks=_require_string_list(
+                    entry.get("risks"), f"evaluation.categories[{index}].risks"
+                ),
+            )
+        )
+    if total_weight != 100:
+        raise PlanError("evaluation.categories weights must sum to 100.")
+    return EvaluationArtifact(
+        repository=repository,
+        rubric_id=rubric_id,
+        rubric_version=_require_string(data.get("rubric_version"), "evaluation.rubric_version"),
+        evaluated_at=_require_string(data.get("evaluated_at"), "evaluation.evaluated_at"),
+        repo_name=repo_name,
+        repo_path=repo_path,
+        commit_sha=_optional_string(data.get("commit_sha"), "evaluation.commit_sha"),
+        max_score=max_score,
+        confidence=_optional_string(data.get("confidence"), "evaluation.confidence"),
+        profile=_optional_string(data.get("profile"), "evaluation.profile"),
+        normalization_basis=_require_string(
+            data.get("normalization_basis"), "evaluation.normalization_basis"
+        ),
+        summary=_require_string(data.get("summary"), "evaluation.summary"),
+        categories=categories,
+        overall_findings=_require_string_list(
+            data.get("overall_findings"), "evaluation.overall_findings"
+        ),
+        blocking_issues=_require_string_list(
+            data.get("blocking_issues"), "evaluation.blocking_issues"
+        ),
+        recommended_next_actions=_require_string_list(
+            data.get("recommended_next_actions"), "evaluation.recommended_next_actions"
+        ),
+    )
+
+
+def artifact_to_dict(
+    value: InspectArtifact | PlanArtifact | EvaluationArtifact | VerifyArtifact,
+) -> dict[str, Any]:
     return asdict(value)

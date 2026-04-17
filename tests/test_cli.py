@@ -117,6 +117,42 @@ class CLITests(unittest.TestCase):
             self.assertEqual(init_plan_mock.call_args.kwargs["template_name"], "tooling_change")
             self.assertEqual(init_plan_mock.call_args.kwargs["output_path"], output_path.resolve())
 
+    def test_cli_aggregate_evaluations_delegates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "evaluations.yaml"
+            out_dir = Path(tmpdir) / "out"
+            manifest_path.write_text("evaluations:\n  - path: sample.json\n")
+
+            with patch(
+                "kctl_pkg.cli.aggregate_evaluations",
+                return_value={
+                    "output_dir": out_dir,
+                    "summary": {"repos": [{"repo": "repo-a"}]},
+                    "outputs": {
+                        "summary_json": out_dir / "summary.json",
+                        "summary_md": out_dir / "summary.md",
+                        "table_csv": out_dir / "table.csv",
+                    },
+                },
+            ) as aggregate_mock:
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    exit_code = main(
+                        [
+                            "aggregate-evaluations",
+                            "--manifest",
+                            str(manifest_path),
+                            "--out",
+                            str(out_dir),
+                        ]
+                    )
+
+            self.assertEqual(exit_code, 0)
+            aggregate_mock.assert_called_once()
+            self.assertEqual(aggregate_mock.call_args.kwargs["manifest_path"], manifest_path.resolve())
+            self.assertEqual(aggregate_mock.call_args.kwargs["output_dir"], out_dir.resolve())
+            self.assertIn("Aggregated 1 evaluation artifacts", buffer.getvalue())
+
     def test_cli_plans_status_delegates_to_status_printer(self) -> None:
         with patch("kctl_pkg.cli.print_run_status", return_value=0) as print_status_mock:
             exit_code = main(["plans", "status", "run-123"])
@@ -262,6 +298,16 @@ class CLITests(unittest.TestCase):
                     2,
                 )
             self.assertIn("Error: bad init", stderr.getvalue())
+
+            stderr = io.StringIO()
+            with patch("sys.stderr", stderr), patch(
+                "kctl_pkg.cli.aggregate_evaluations", side_effect=PlanError("bad aggregate")
+            ):
+                self.assertEqual(
+                    main(["aggregate-evaluations", "--manifest", str(Path(tmpdir) / "evaluations.yaml")]),
+                    2,
+                )
+            self.assertIn("Error: bad aggregate", stderr.getvalue())
 
 
 if __name__ == "__main__":

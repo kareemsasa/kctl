@@ -10,7 +10,7 @@ from .terminal import style_text
 from .types import PlanError
 
 STEP_TYPES = {"analyze", "change", "verify", "review"}
-STRUCTURED_OUTPUT_SCHEMAS = {"inspect_v1", "plan_v1"}
+STRUCTURED_OUTPUT_SCHEMAS = {"evaluation_v1", "inspect_v1", "plan_v1"}
 REVIEW_POLICIES = {"advisory", "blocking", "manual"}
 STEP_MODES = {"default", "read-only"}
 VERIFY_MODES = {"legacy", "full"}
@@ -482,23 +482,38 @@ def build_artifact_instruction(schema_name: str | None) -> str | None:
             '"manual_checks":["string"]},"risks":["string"],"out_of_scope":["string"]}.\n'
             "- Base the plan on the provided inspect artifact rather than hidden session context."
         )
+    if schema_name == "evaluation_v1":
+        return (
+            "Structured artifact requirement:\n"
+            "- End your response with a fenced ```json block only for the evaluation artifact.\n"
+            '- Use this exact shape: {"repository":{"name":"string","path":"string"},'
+            '"rubric_id":"string","rubric_version":"string","evaluated_at":"string","repo_name":"string",'
+            '"repo_path":"string","commit_sha":"string|null","max_score":0,"confidence":"string|null",'
+            '"profile":"string|null","normalization_basis":"string","summary":"string",'
+            '"categories":[{"id":"string","name":"string","weight":0,"score":0,"max_score":0,'
+            '"summary":"string","evidence":["string"],"risks":["string"]}],"overall_findings":["string"],'
+            '"blocking_issues":["string"],"recommended_next_actions":["string"]}.\n'
+            "- Keep repository.name/path aligned with repo_name/repo_path, keep category ids stable, "
+            "use integer weights that sum to 100, and use integer scores in the range 0..max_score."
+        )
     return None
 
 
 def build_artifact_context(step_id: str, prior_artifacts: dict[str, dict[str, Any]]) -> str | None:
-    if step_id == "plan" and "inspect" in prior_artifacts:
-        return "Structured inspect artifact:\n```json\n" + json.dumps(
-            prior_artifacts["inspect"], indent=2, sort_keys=True
-        ) + "\n```"
-    if step_id not in {"inspect", "plan", "verify"} and "plan" in prior_artifacts:
-        return "Structured plan artifact:\n```json\n" + json.dumps(
-            prior_artifacts["plan"], indent=2, sort_keys=True
-        ) + "\n```"
-    if step_id == "verify" and "plan" in prior_artifacts:
-        return "Structured plan artifact:\n```json\n" + json.dumps(
-            prior_artifacts["plan"], indent=2, sort_keys=True
-        ) + "\n```"
-    return None
+    sections: list[str] = []
+    if step_id != "inspect" and "inspect" in prior_artifacts:
+        sections.append(
+            "Structured inspect artifact:\n```json\n"
+            + json.dumps(prior_artifacts["inspect"], indent=2, sort_keys=True)
+            + "\n```"
+        )
+    if step_id not in {"inspect", "plan"} and "plan" in prior_artifacts:
+        sections.append(
+            "Structured plan artifact:\n```json\n"
+            + json.dumps(prior_artifacts["plan"], indent=2, sort_keys=True)
+            + "\n```"
+        )
+    return "\n\n".join(sections) or None
 
 
 def build_verify_instruction() -> str:

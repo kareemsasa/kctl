@@ -123,6 +123,7 @@ class PlanTests(unittest.TestCase):
             ({"steps": [{"id": "inspect", "prompt": "x", "mode": "bad"}]}, "field 'mode'"),
             ({"steps": [{"id": "inspect", "prompt": "x", "output": "bad"}]}, "field 'output'"),
             ({"steps": [{"id": "inspect", "prompt": "x", "output": {"schema": ""}}]}, "output.schema"),
+            ({"steps": [{"id": "evaluate", "prompt": "x", "output": {"schema": "review_v1"}}]}, "output.schema"),
             ({"steps": [{"id": "review", "type": "review", "prompt": "x", "review": "bad"}]}, "field 'review'"),
             ({"steps": [{"id": "review", "type": "review", "prompt": "x", "review": {"policy": "bad"}}]}, "review.policy"),
             ({"steps": [{"id": "verify", "type": "verify", "commands": [], "verify_mode": "bad"}]}, "verify_mode"),
@@ -161,6 +162,10 @@ class PlanTests(unittest.TestCase):
         self.assertIsNone(infer_output_schema({"id": "implement"}))
         self.assertEqual(resolve_step_output({"id": "inspect"})["source"], "inferred")
         self.assertEqual(resolve_step_output({"id": "implement", "output": {"schema": "plan_v1"}})["source"], "explicit")
+        self.assertEqual(
+            resolve_step_output({"id": "evaluate", "output": {"schema": "evaluation_v1"}})["effective_schema"],
+            "evaluation_v1",
+        )
 
         self.assertEqual(infer_review_policy({"id": "review"}), "manual")
         self.assertIsNone(infer_review_policy({"id": "implement"}))
@@ -266,10 +271,12 @@ class PlanTests(unittest.TestCase):
     def test_artifact_and_prompt_helpers(self) -> None:
         self.assertIn("inspect artifact", build_artifact_instruction("inspect_v1") or "")
         self.assertIn("plan artifact", build_artifact_instruction("plan_v1") or "")
+        self.assertIn("evaluation artifact", build_artifact_instruction("evaluation_v1") or "")
         self.assertIsNone(build_artifact_instruction("other"))
 
         prior = {"inspect": {"summary": "ok"}, "plan": {"objective": "obj"}}
         self.assertIn("Structured inspect artifact", build_artifact_context("plan", prior) or "")
+        self.assertIn("Structured inspect artifact", build_artifact_context("evaluate", prior) or "")
         self.assertIn("Structured plan artifact", build_artifact_context("implement", prior) or "")
         self.assertIn("Structured plan artifact", build_artifact_context("verify", prior) or "")
         self.assertIsNone(build_artifact_context("inspect", {}))

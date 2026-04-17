@@ -44,6 +44,7 @@ from .types import (
     VerifyIssueArtifact,
     VerifyTestArtifact,
     artifact_to_dict,
+    parse_evaluation_artifact,
     parse_inspect_artifact,
     parse_plan_artifact,
 )
@@ -399,6 +400,8 @@ def parse_structured_artifact(schema_name: str, output_text: str) -> dict[str, A
         return artifact_to_dict(parse_inspect_artifact(data))
     if schema_name == "plan_v1":
         return artifact_to_dict(parse_plan_artifact(data))
+    if schema_name == "evaluation_v1":
+        return artifact_to_dict(parse_evaluation_artifact(data))
     raise PlanError(f"No structured artifact parser is defined for schema '{schema_name}'.")
 
 
