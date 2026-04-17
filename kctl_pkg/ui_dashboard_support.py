@@ -220,6 +220,46 @@ def _render_action_button(
     )
 
 
+def _render_copy_button(
+    label: str,
+    *,
+    target_selector: str | None = None,
+    copy_value: str | None = None,
+    copy_last_lines: int | None = None,
+    class_name: str = "mini-button",
+) -> str:
+    attrs = [f"type='button'", f"class='{_escape(class_name)}'"]
+    if target_selector is not None:
+        attrs.append(f"data-copy-target='{_escape(target_selector)}'")
+    if copy_value is not None:
+        attrs.append(f"data-copy='{_escape(copy_value)}'")
+    if copy_last_lines is not None:
+        attrs.append(f"data-copy-last-lines='{_escape(copy_last_lines)}'")
+    attrs.append("onclick='return window.kctlCopyButtonClick(this)'")
+    attrs.append("ontouchstart='return window.kctlCopyButtonClick(this)'")
+    attrs.append("ontouchend='return window.kctlCopyButtonClick(this)'")
+    attrs.append("onmousedown='return window.kctlCopyButtonClick(this)'")
+    attrs.append("onpointerdown='return window.kctlCopyButtonClick(this)'")
+    attrs.append("onpointerup='return window.kctlCopyButtonClick(this)'")
+    return f"<button {' '.join(attrs)}>{_escape(label)}</button>"
+
+
+def _render_select_text_link(
+    label: str,
+    *,
+    target_id: str,
+    class_name: str = "mini-button",
+) -> str:
+    return (
+        f"<a href='#{_escape(target_id)}' class='{_escape(class_name)}' "
+        "style='display:inline-block;text-decoration:none' "
+        f"onclick=\"var el=document.getElementById('{_escape(target_id)}');"
+        "if(el){el.focus();el.select();if(el.setSelectionRange){el.setSelectionRange(0, el.value.length);}} return true;\">"
+        f"{_escape(label)}"
+        "</a>"
+    )
+
+
 def list_plans_in_directory(path_value: str) -> tuple[str, str, list[str]]:
     trimmed = path_value.strip()
     if not trimmed:
@@ -1476,10 +1516,17 @@ async function copyTextValue(value) {
   textarea.value = value;
   textarea.setAttribute('readonly', 'readonly');
   textarea.style.position = 'fixed';
-  textarea.style.top = '-9999px';
+  textarea.style.top = '0';
+  textarea.style.left = '0';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  textarea.style.zIndex = '-1';
   document.body.appendChild(textarea);
   textarea.focus();
   textarea.select();
+  if (typeof textarea.setSelectionRange === 'function') {
+    textarea.setSelectionRange(0, textarea.value.length);
+  }
   const ok = document.execCommand('copy');
   document.body.removeChild(textarea);
   if (!ok) {
@@ -1509,12 +1556,30 @@ function extractCopyValue(node) {
   }
   return value;
 }
+function focusCopyTarget(node) {
+  if (!node) return null;
+  const targetSelector = node.getAttribute('data-copy-target') || '';
+  const targetNode = targetSelector ? document.querySelector(targetSelector) : null;
+  if (!targetNode) return null;
+  if (
+    targetNode instanceof HTMLTextAreaElement
+    || targetNode instanceof HTMLInputElement
+  ) {
+    targetNode.focus();
+    targetNode.select();
+    if (typeof targetNode.setSelectionRange === 'function') {
+      targetNode.setSelectionRange(0, targetNode.value.length);
+    }
+  }
+  return targetNode;
+}
 async function triggerCopyForNode(node) {
   if (!node) return false;
   let handling = node.dataset.copyHandling === '1';
   if (handling) return false;
   node.dataset.copyHandling = '1';
   node.setAttribute('data-label', node.getAttribute('data-label') || node.textContent || '');
+  focusCopyTarget(node);
   const value = extractCopyValue(node);
   if (!value) {
     node.dataset.copyHandling = '0';
@@ -1528,15 +1593,24 @@ async function triggerCopyForNode(node) {
     }, 1200);
     return true;
   } catch (_error) {
-    node.textContent = 'Copy failed';
-    return false;
+    node.textContent = 'Selected';
+    window.setTimeout(() => {
+      node.textContent = node.getAttribute('data-label') || '';
+    }, 1200);
+    return true;
   } finally {
     window.setTimeout(() => {
       node.dataset.copyHandling = '0';
     }, 50);
   }
 }
-window.kctlCopyButtonClick = function(node) {
+window.kctlCopyButtonClick = function(node, event) {
+  if (event && typeof event.preventDefault === 'function') {
+    event.preventDefault();
+  }
+  if (event && typeof event.stopPropagation === 'function') {
+    event.stopPropagation();
+  }
   triggerCopyForNode(node);
   return false;
 };
@@ -1586,11 +1660,17 @@ function wireCopyButtons(root) {
     node.setAttribute('data-label', node.textContent || '');
     const handleCopy = async (event) => {
       event.preventDefault();
+      if (typeof event.stopPropagation === 'function') {
+        event.stopPropagation();
+      }
       await triggerCopyForNode(node);
     };
     node.addEventListener('click', handleCopy);
+    node.addEventListener('touchstart', handleCopy, { passive: false });
     node.addEventListener('touchend', handleCopy, { passive: false });
+    node.addEventListener('mousedown', handleCopy);
     if (window.PointerEvent) {
+      node.addEventListener('pointerdown', handleCopy);
       node.addEventListener('pointerup', handleCopy);
     }
   });

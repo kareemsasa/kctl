@@ -17,6 +17,7 @@ from .ui_dashboard_support import (
     _normalize_token_warning_text,
     _page_link,
     _render_collapsible_section,
+    _render_select_text_link,
     _status_class,
     available_providers,
 )
@@ -546,9 +547,12 @@ def render_session_detail_page(app: object, session_id: str) -> str:
     output_html = (
         "<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
         "<h2>Raw Output</h2>"
-        "<button type='button' class='mini-button' data-copy-target='#session_output_tail' data-copy-last-lines='50' onclick='return window.kctlCopyButtonClick(this)'>Copy last 50 lines</button>"
-        "</div>"
-        "<div class='help'>Mobile fallback: tap the tail box below to select text with the browser copy UI.</div>"
+        + _render_select_text_link(
+            "Select tail text",
+            target_id="session_output_tail",
+        )
+        + "</div>"
+        "<div class='help'>Mobile: tap Select tail text, then use the browser copy action. You can also tap the tail box below directly.</div>"
         f"<textarea id='session_output_tail' class='code-block' readonly onclick='this.focus();this.select();' style='min-height:120px'>{_escape(tail_output)}</textarea>"
         f"<pre class='session-output' id='session_output'>{_escape(output) if output else '(waiting for output...)'}</pre>"
     )

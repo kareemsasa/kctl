@@ -456,6 +456,8 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("run-0", html)
             self.assertIn("run-4", html)
             self.assertNotIn("run-5", html)
+            self.assertIn("<h2>Active Runs</h2>", html)
+            self.assertIn("No active runs right now.", html)
 
     def test_dashboard_recent_runs_uses_live_stopping_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -524,6 +526,46 @@ class UIDashboardTests(unittest.TestCase):
                 html = app.render_page()
 
             self.assertIn("stopped", html)
+
+    def test_dashboard_recent_runs_prioritizes_active_run_even_if_not_in_newest_five(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+            fake_runs = [
+                SimpleNamespace(
+                    id="run-active",
+                    status="running",
+                    started_at="2026-04-14T00:00:00+00:00",
+                    concurrency=1,
+                )
+            ] + [
+                SimpleNamespace(
+                    id=f"run-{index}",
+                    status="passed",
+                    started_at=f"2026-04-14T00:00:1{index}+00:00",
+                    concurrency=1,
+                )
+                for index in range(6)
+            ]
+            with patch("kctl_pkg.ui_dashboard_runs.list_runs", return_value=fake_runs), patch(
+                "kctl_pkg.ui_dashboard_runs.get_repository_overview",
+                return_value=SimpleNamespace(
+                    run_count=7,
+                    active_run_count=1,
+                    failed_run_count=0,
+                    running_plan_count=1,
+                    blocked_plan_count=0,
+                    stale_workspace_count=0,
+                ),
+            ), patch("kctl_pkg.ui_dashboard_runs.list_attention_items", return_value=[]), patch(
+                "kctl_pkg.ui_dashboard_runs.available_providers", return_value=[]
+            ):
+                html = app.render_page()
+
+            self.assertIn("run-active", html)
+            self.assertIn("running", html)
+            self.assertNotIn("run-4", html)
 
     def test_resolve_action_redirect_keeps_project_detail_message_when_present(self) -> None:
         action_result = SimpleNamespace(
@@ -1750,6 +1792,50 @@ class UIDashboardTests(unittest.TestCase):
             self.assertEqual(plan_cards[0].status, "stopped")
             self.assertEqual(live_steps[0].status, "stopped")
 
+    def test_dead_active_pid_run_surfaces_as_stopped(self) -> None:
+        from kctl_pkg.ui_dashboard_state import (
+            build_live_steps_from_run_data,
+            build_plan_cards_from_live_data,
+            build_run_detail_from_live_data,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            app = DashboardApp(repo_path)
+            run_data = {
+                "run_id": "run-123",
+                "plans_dir": str((repo_path / ".kctl" / "plans").resolve()),
+                "repo": str(repo_path.resolve()),
+                "artifact_root_path": str((repo_path / ".kctl" / "runs").resolve()),
+                "status": "running",
+                "active_pids": [999999],
+                "started_at": "2026-04-14T20:15:22+00:00",
+                "ended_at": None,
+                "concurrency": 1,
+                "plans": [
+                    {
+                        "plan_id": "001-plan",
+                        "plan_path": str((repo_path / ".kctl" / "plans" / "001-plan.yaml").resolve()),
+                        "status": "running",
+                        "current_step": "verify",
+                        "step_statuses": {"verify": "running"},
+                        "verify_result": "not-run",
+                        "worktree_path": None,
+                        "branch_name": None,
+                        "log_path": None,
+                    }
+                ],
+            }
+
+            run_detail = build_run_detail_from_live_data(app, run_data)
+            plan_cards = build_plan_cards_from_live_data(app, run_data)
+            live_steps = build_live_steps_from_run_data(app, run_data, "run-123:001-plan")
+
+            self.assertEqual(run_detail.status, "stopped")
+            self.assertEqual(plan_cards[0].status, "stopped")
+            self.assertEqual(live_steps[0].status, "stopped")
+
     def test_stopped_plan_uses_operator_facing_labels(self) -> None:
         from kctl_pkg.ui_dashboard_state import build_plan_cards_from_live_data
         from kctl_pkg.ui_dashboard_support import _failure_reason_label, _status_badge
@@ -2057,16 +2143,119 @@ class UIDashboardTests(unittest.TestCase):
             self.assertIn("live_output_tail", html)
             self.assertIn("<strong>1</strong> active", html)
             self.assertIn("<strong>1</strong> running", html)
-            self.assertIn("Copy last 50 lines", html)
-            self.assertIn("data-copy-target='#live_output_stream'", html)
-            self.assertIn("data-copy-last-lines='50'", html)
-            self.assertIn("onclick='return window.kctlCopyButtonClick(this)'", html)
-            self.assertIn("tap the tail box below", html)
+            self.assertIn("Select tail text", html)
+            self.assertIn("href='#live_output_tail'", html)
+            self.assertIn("browser copy action", html)
             self.assertIn("Step Timeline", html)
             self.assertIn("<td>inspect</td>", html)
             self.assertIn(">running</span>", html)
             self.assertIn("[001-review] starting plan", html)
             self.assertIn("/api/run-output", html)
+
+    def test_dashboard_renders_unindexed_single_run_detail_from_live_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            index_repository_state(repo_path)
+
+            run_id = "20260417T231623330015Z"
+            run_root = repo_path / ".kctl-runs" / run_id
+            run_root.mkdir(parents=True, exist_ok=True)
+            plan_path = repo_path / "plans" / "sample.yaml"
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            plan_path.write_text(
+                f"repo: {repo_path}\nobjective: inspect\nsteps:\n  - id: inspect\n    prompt: look\n"
+            )
+            (run_root / "stream.log").write_text("running inspect\n")
+            (run_root / "run.json").write_text(
+                json.dumps(
+                    {
+                        "started_at": "2026-04-17T23:16:23+00:00",
+                        "ended_at": None,
+                        "plan_path": str(plan_path.resolve()),
+                        "repo": str(repo_path.resolve()),
+                        "objective": "inspect",
+                        "defaults": {},
+                        "review_enabled": False,
+                        "repo_dirty_at_start": False,
+                        "branch_before": "main",
+                        "branch_after": "main",
+                        "commit_created": False,
+                        "commit_sha": None,
+                        "status": "running",
+                        "artifact_storage_mode": "in_repo",
+                        "artifact_root_path": str((repo_path / ".kctl-runs").resolve()),
+                        "run_output_dir": str(run_root.resolve()),
+                        "steps": [
+                            {
+                                "id": "inspect",
+                                "started_at": "2026-04-17T23:16:23+00:00",
+                                "ended_at": None,
+                                "status": "running",
+                                "changed_files_count": 0,
+                                "changed_files": [],
+                                "verify": None,
+                                "structured_artifacts": {},
+                                "raw_artifact_path": None,
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            app = DashboardApp(repo_path)
+            html = app.render_run_page(run_id=run_id)
+
+            self.assertIn(run_id, html)
+            self.assertIn(">running</span>", html)
+            self.assertIn("Plan Executions", html)
+            self.assertIn("sample", html)
+
+    def test_dashboard_homepage_shows_unindexed_live_run_in_recent_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            index_repository_state(repo_path)
+
+            run_id = "20260412T045948708353Z"
+            run_root = repo_path / ".kctl" / "runs" / run_id
+            run_root.mkdir(parents=True, exist_ok=True)
+            (run_root / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "plans_dir": str((repo_path / ".kctl" / "plans").resolve()),
+                        "repo": str(repo_path.resolve()),
+                        "artifact_storage_mode": "in_repo",
+                        "artifact_root_path": str((repo_path / ".kctl" / "runs").resolve()),
+                        "status": "running",
+                        "started_at": "2026-04-12T04:59:48.708897+00:00",
+                        "concurrency": 1,
+                        "plans": [
+                            {
+                                "plan_id": "001-review",
+                                "filename": "001-review.yaml",
+                                "status": "running",
+                                "current_step": "inspect",
+                                "step_statuses": {"inspect": "running"},
+                            }
+                        ],
+                    }
+                )
+                + "\n"
+            )
+
+            app = DashboardApp(repo_path)
+            html = app.render_page()
+
+            self.assertIn("<strong>1</strong> runs", html)
+            self.assertIn("<strong>1</strong> active", html)
+            self.assertIn("<strong>1</strong> running", html)
+            self.assertIn("<h2>Active Runs</h2>", html)
+            self.assertIn(run_id, html)
+            self.assertIn("status-badge status-running", html)
+            self.assertNotIn("No runs yet.", html)
 
     def test_dashboard_renders_saved_run_preflight_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3307,8 +3496,8 @@ class AgentSessionTests(unittest.TestCase):
             self.assertIn("session-chat-row-user", html)
             self.assertIn("session-chat-row-agent", html)
             self.assertIn("reply", html.lower())
-            self.assertIn("Copy last 50 lines", html)
-            self.assertIn("data-copy-target='#session_output_tail'", html)
+            self.assertIn("Select tail text", html)
+            self.assertIn("href='#session_output_tail'", html)
             self.assertIn("Raw Output", html)
             self.assertIn("Send a follow-up message", html)
             self.assertIn("scrollToBottom(transcriptNode)", html)

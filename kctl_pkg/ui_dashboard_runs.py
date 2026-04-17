@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
-from types import SimpleNamespace
 
 from .types import PlanError
+from .ui_dashboard_state import adapt_overview_for_live_runs, merge_runs_with_live_data
 from .ui_dashboard_support import (
     _escape,
     _failure_reason_label,
@@ -14,6 +13,7 @@ from .ui_dashboard_support import (
     _page_link,
     _preflight_run_snapshot,
     _render_collapsible_section,
+    _render_select_text_link,
     _render_attention_card,
     _render_preflight_item_html,
     _run_detail_link,
@@ -30,28 +30,28 @@ def _tail_lines_text(text: str | None, line_count: int = 50) -> str:
     return "\n".join(text.splitlines()[-line_count:])
 
 
-def _adapt_recent_runs_with_live_status(app: object, runs: list[object]) -> list[object]:
-    adapted_runs: list[object] = []
-    for run in runs:
-        live_run_data = app.load_live_run_data(run.id)
-        if live_run_data is not None and str(live_run_data.get("status") or "") == "running" and bool(
-            live_run_data.get("stop_requested")
-        ):
-            active_pids = live_run_data.get("active_pids")
-            effective_status = (
-                "stopped"
-                if not (isinstance(active_pids, list) and any(str(value).strip() for value in active_pids))
-                else "stopping"
-            )
-            if hasattr(run, "__dataclass_fields__"):
-                adapted_runs.append(replace(run, status=effective_status))
-            else:
-                run_data = dict(vars(run))
-                run_data["status"] = effective_status
-                adapted_runs.append(SimpleNamespace(**run_data))
-            continue
-        adapted_runs.append(run)
-    return adapted_runs
+def _select_recent_runs(runs: list[object], limit: int = 5) -> list[object]:
+    active_runs = [run for run in runs if str(getattr(run, "status", "")) in {"running", "stopping"}]
+    active_ids = {str(getattr(run, "id", "")) for run in active_runs}
+    other_runs = [run for run in runs if str(getattr(run, "id", "")) not in active_ids]
+    ordered = [*active_runs, *other_runs]
+    return ordered[:limit]
+
+
+def _render_run_items_html(runs: list[object], empty_message: str) -> str:
+    return "".join(
+        (
+            f"<a class='list-item {_status_class(run.status)}' href='{_escape(_run_detail_link(run.id))}'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
+            f"<strong>{_escape(run.id)}</strong>"
+            f"{_status_badge(run.status)}"
+            f"</div>"
+            f"<div class='kv-row'><span class='kv-label'>Started</span> {_escape(_fmt_ts(run.started_at))}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Concurrency</span> {_escape(run.concurrency)}</div>"
+            "</a>"
+        )
+        for run in runs
+    ) or f"<div class='empty'>{empty_message}</div>"
 
 
 def _render_live_output_section_html(output: str | None, output_path: str | None) -> str:
@@ -62,9 +62,12 @@ def _render_live_output_section_html(output: str | None, output_path: str | None
         "<section class='panel'>"
         "<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
         "<h2>Live Output</h2>"
-        "<button type='button' class='mini-button' data-copy-target='#live_output_stream' data-copy-last-lines='50' onclick='return window.kctlCopyButtonClick(this)'>Copy last 50 lines</button>"
-        "</div>"
-        "<div class='help'>Mobile fallback: tap the tail box below to select text with the browser copy UI.</div>"
+        + _render_select_text_link(
+            "Select tail text",
+            target_id="live_output_tail",
+        )
+        + "</div>"
+        "<div class='help'>Mobile: tap Select tail text, then use the browser copy action. You can also tap the tail box below directly.</div>"
         f"<textarea id='live_output_tail' class='code-block' readonly onclick='this.focus();this.select();' style='min-height:120px'>{_escape(tail_output)}</textarea>"
         f"<pre id='live_output_stream' class='code-block live-output'>{_escape(output or '')}</pre>"
         "</section>"
@@ -165,7 +168,13 @@ def render_dashboard_page(
 
     overview = get_repository_overview(app.repo_path, db_path=app.db_path)
     attention_items = list_attention_items(app.repo_path, db_path=app.db_path)
-    runs = _adapt_recent_runs_with_live_status(app, list_runs(app.repo_path, db_path=app.db_path)[:5])
+    runs, live_unindexed_runs = merge_runs_with_live_data(
+        app,
+        list_runs(app.repo_path, db_path=app.db_path),
+    )
+    overview = adapt_overview_for_live_runs(overview, runs, live_unindexed_runs)
+    active_runs = [run for run in runs if str(getattr(run, "status", "")) in {"running", "stopping"}]
+    runs = _select_recent_runs(runs, limit=5)
     providers = available_providers()
 
     overview_html = (
@@ -183,19 +192,14 @@ def render_dashboard_page(
         _render_attention_card(item, providers=providers) for item in attention_items
     ) or "<div class='empty'>Nothing needs attention right now.</div>"
 
-    run_items_html = "".join(
-        (
-            f"<a class='list-item {_status_class(run.status)}' href='{_escape(_run_detail_link(run.id))}'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
-            f"<strong>{_escape(run.id)}</strong>"
-            f"{_status_badge(run.status)}"
-            f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Started</span> {_escape(_fmt_ts(run.started_at))}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Concurrency</span> {_escape(run.concurrency)}</div>"
-            "</a>"
-        )
-        for run in runs
-    ) or "<div class='empty'>No runs yet. <a href='/actions'>Go to Actions</a> to launch your first plan.</div>"
+    active_run_items_html = _render_run_items_html(
+        active_runs,
+        "No active runs right now.",
+    )
+    run_items_html = _render_run_items_html(
+        runs,
+        "No runs yet. <a href='/actions'>Go to Actions</a> to launch your first plan.",
+    )
 
     notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
     attention_section_html = _render_collapsible_section(
@@ -208,6 +212,7 @@ def render_dashboard_page(
         f"<div class='column'>"
         f"{notice_html}"
         f"{attention_section_html}"
+        f"<section class='panel'><h2>Active Runs</h2>{active_run_items_html}</section>"
         f"<section class='panel'><h2>Recent Runs</h2>{run_items_html}</section>"
         f"</div>"
         f"</main>"

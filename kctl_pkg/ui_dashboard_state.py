@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
+from .artifacts import discover_multi_run_logs, discover_single_run_logs
 from .multi import resolve_multi_run_log, stop_request_path
 from .plan import load_plan_templates
 from .paths import project_root
@@ -13,6 +17,7 @@ from .ui_read import (
     PlanExecutionCard,
     RepositoryOverview,
     RunDetail,
+    RunListItem,
     StepTimelineItem,
     WorkspaceDetail,
     get_plan_execution,
@@ -31,11 +36,24 @@ from .ui_read import (
 def _effective_live_run_status(run_data: dict[str, object]) -> str:
     status = str(run_data.get("status") or "unknown")
     active_pids = run_data.get("active_pids")
-    has_active_pids = isinstance(active_pids, list) and any(str(value).strip() for value in active_pids)
+    pid_values = []
+    if isinstance(active_pids, list):
+        pid_values = [str(value).strip() for value in active_pids if str(value).strip()]
+    has_active_pids = bool(pid_values)
     if status == "running" and bool(run_data.get("stop_requested")) and not has_active_pids:
         return "stopped"
     if status == "running" and bool(run_data.get("stop_requested")):
         return "stopping"
+    has_live_pids = False
+    for value in pid_values:
+        try:
+            os.kill(int(value), 0)
+        except (OSError, ProcessLookupError, PermissionError, TypeError, ValueError):
+            continue
+        has_live_pids = True
+        break
+    if status == "running" and has_active_pids and not has_live_pids:
+        return "stopped"
     return status
 
 
@@ -59,19 +77,95 @@ def _effective_live_step_status(step_status: object, run_data: dict[str, object]
     return status
 
 
+def _replace_run_status(run: object, status: str) -> object:
+    if getattr(run, "status", None) == status:
+        return run
+    if hasattr(run, "__dataclass_fields__"):
+        return replace(run, status=status)
+    run_data = dict(vars(run))
+    run_data["status"] = status
+    return SimpleNamespace(**run_data)
+
+
 def load_live_run_data(app: object, run_id: str) -> dict[str, object] | None:
+    single_run_id = run_id.removeprefix("single:")
     try:
         run_log = resolve_multi_run_log(app.repo_path, run_id)
     except PlanError:
-        return None
-    try:
-        run_data = json.loads(run_log.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    run_root = run_log.parent
-    if stop_request_path(run_root).exists():
-        run_data["stop_requested"] = True
-    return run_data
+        run_log = None
+    if run_log is not None:
+        try:
+            run_data = json.loads(run_log.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        run_root = run_log.parent
+        if stop_request_path(run_root).exists():
+            run_data["stop_requested"] = True
+        run_data["run_id"] = str(run_data.get("run_id") or run_id)
+        run_data["run_scope"] = "multi_run"
+        return run_data
+
+    for single_run_log in discover_single_run_logs(app.repo_path):
+        if single_run_log.parent.name != single_run_id:
+            continue
+        try:
+            run_data = json.loads(single_run_log.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        run_data["run_id"] = single_run_id
+        run_data["run_scope"] = "single_run"
+        return run_data
+    return None
+
+
+def merge_runs_with_live_data(
+    app: object,
+    runs: list[RunListItem],
+    *,
+    limit: int | None = None,
+) -> tuple[list[RunListItem | object], list[dict[str, object]]]:
+    indexed_runs: list[RunListItem | object] = []
+    live_run_items: list[RunListItem] = []
+    live_unindexed_runs: list[dict[str, object]] = []
+    known_run_ids = {run.id for run in runs}
+
+    for run in runs:
+        live_run_data = app.load_live_run_data(run.id)
+        if live_run_data is not None:
+            indexed_runs.append(_replace_run_status(run, _effective_live_run_status(live_run_data)))
+        else:
+            indexed_runs.append(run)
+
+    for run_log in discover_multi_run_logs(app.repo_path):
+        try:
+            run_data = json.loads(run_log.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        run_id = str(run_data.get("run_id") or "")
+        if not run_id or run_id in known_run_ids:
+            continue
+        if stop_request_path(run_log.parent).exists():
+            run_data["stop_requested"] = True
+        live_run_items.append(
+            RunListItem(
+                id=run_id,
+                repository_id=str(app.repo_path),
+                status=_effective_live_run_status(run_data),
+                launch_source="plans_run_many",
+                concurrency=int(run_data.get("concurrency") or 1),
+                started_at=str(run_data.get("started_at") or ""),
+                ended_at=run_data.get("ended_at"),
+                run_root_path=str(run_log.parent.resolve()),
+                plan_execution_count=len(run_data.get("plans") or []),
+            )
+        )
+        live_unindexed_runs.append(run_data)
+
+    live_run_items.sort(key=lambda run: run.started_at, reverse=True)
+    merged_runs: list[RunListItem | object] = [*live_run_items, *indexed_runs]
+    if limit is not None:
+        merged_runs = merged_runs[:limit]
+    return merged_runs, live_unindexed_runs
 
 
 def load_saved_run_data(run_root_path: str | None) -> dict[str, object] | None:
@@ -107,6 +201,24 @@ def read_live_output(run_data: dict[str, object] | None) -> tuple[str | None, st
 
 
 def build_run_detail_from_live_data(app: object, run_data: dict[str, object]) -> RunDetail:
+    if str(run_data.get("run_scope") or "") == "single_run":
+        effective_status = _effective_live_run_status(run_data)
+        return RunDetail(
+            id=str(run_data.get("run_id") or ""),
+            repository_id=str(app.repo_path),
+            status=effective_status,
+            launch_source="single_run",
+            plans_dir=str(Path(str(run_data.get("plan_path") or "")).parent),
+            concurrency=1,
+            started_at=str(run_data.get("started_at") or ""),
+            ended_at=run_data.get("ended_at"),
+            run_root_path=str(run_data.get("run_output_dir") or ""),
+            plan_execution_count=1,
+            passed_count=1 if effective_status in {"passed", "success"} else 0,
+            failed_count=1 if effective_status in {"failed", "failure"} else 0,
+            running_count=1 if effective_status in {"running", "stopping"} else 0,
+            blocked_count=1 if effective_status == "blocked" else 0,
+        )
     plan_states = list(run_data.get("plans") or [])
     effective_status = _effective_live_run_status(run_data)
     return RunDetail(
@@ -129,6 +241,36 @@ def build_run_detail_from_live_data(app: object, run_data: dict[str, object]) ->
 
 def build_plan_cards_from_live_data(app: object, run_data: dict[str, object]) -> list[PlanExecutionCard]:
     run_id = str(run_data.get("run_id") or "")
+    if str(run_data.get("run_scope") or "") == "single_run":
+        plan_path = str(run_data.get("plan_path") or "")
+        plan_slug = Path(plan_path).stem if plan_path else "plan"
+        return [
+            PlanExecutionCard(
+                id=f"{run_id}:{plan_slug}",
+                run_id=run_id,
+                repository_id=str(app.repo_path),
+                plan_definition_id=f"{app.repo_path}:{Path(plan_path).resolve()}" if plan_path else f"{app.repo_path}:{plan_slug}",
+                plan_slug=plan_slug,
+                plan_title=None,
+                plan_file_path=plan_path,
+                objective=str(run_data.get("objective") or ""),
+                phase_name=None,
+                group_name=None,
+                status=str(run_data.get("status") or "unknown"),
+                current_step_key=str((run_data.get("steps") or [{}])[-1].get("id") or "") or None,
+                verify_status="not_run",
+                started_at=str(run_data.get("started_at") or ""),
+                ended_at=run_data.get("ended_at"),
+                worktree_path=None,
+                branch_name=run_data.get("branch_after"),
+                log_path=str(run_data.get("log_path") or Path(str(run_data.get("run_output_dir") or "")) / "run.json"),
+                changed_files_count=sum(int(step.get("changed_files_count") or 0) for step in (run_data.get("steps") or [])),
+                failure_reason=next(
+                    (str(step.get("failure_reason")) for step in reversed(run_data.get("steps") or []) if step.get("failure_reason")),
+                    None,
+                ),
+            )
+        ]
     plan_cards: list[PlanExecutionCard] = []
     for plan_state in run_data.get("plans") or []:
         plan_path = str(plan_state.get("plan_path") or "")
@@ -166,6 +308,40 @@ def build_live_steps_from_run_data(
     run_data: dict[str, object],
     plan_execution_id: str,
 ) -> list[StepTimelineItem]:
+    if str(run_data.get("run_scope") or "") == "single_run":
+        run_id, _, _plan_id = plan_execution_id.partition(":")
+        if run_id != str(run_data.get("run_id") or ""):
+            return []
+        items: list[StepTimelineItem] = []
+        for index, step_result in enumerate(run_data.get("steps") or [], start=1):
+            items.append(
+                StepTimelineItem(
+                    id=f"{plan_execution_id}:{index:02d}",
+                    plan_execution_id=plan_execution_id,
+                    step_key=str(step_result.get("id") or f"step-{index}"),
+                    step_name=str(step_result.get("id") or f"step-{index}").replace("-", " ").title(),
+                    kind="verify" if step_result.get("verify") is not None else "change",
+                    sequence_index=index,
+                    status=str(step_result.get("status") or "unknown"),
+                    verify_status="passed"
+                    if (step_result.get("verify") or {}).get("exit_code") == 0
+                    else "failed"
+                    if step_result.get("verify") is not None
+                    else "not-run",
+                    started_at=str(step_result.get("started_at") or run_data.get("started_at") or ""),
+                    ended_at=step_result.get("ended_at"),
+                    duration_ms=None,
+                    output_path=step_result.get("raw_artifact_path"),
+                    artifact_path=sorted((step_result.get("structured_artifacts") or {}).values())[0]
+                    if (step_result.get("structured_artifacts") or {})
+                    else None,
+                    verify_exit_code=(step_result.get("verify") or {}).get("exit_code"),
+                    changed_files_count=int(step_result.get("changed_files_count") or 0),
+                    changed_files=list(step_result.get("changed_files") or []),
+                    metadata={"source": "live_single_run_data"},
+                )
+            )
+        return items
     run_id, _, plan_id = plan_execution_id.partition(":")
     if not run_id or not plan_id or run_id != str(run_data.get("run_id") or ""):
         return []
@@ -223,6 +399,53 @@ def adapt_overview_for_live_run(
     )
 
 
+def adapt_overview_for_live_runs(
+    overview: RepositoryOverview,
+    runs: list[RunListItem | object],
+    live_unindexed_runs: list[dict[str, object]],
+) -> RepositoryOverview:
+    computed_run_count = len(runs)
+    computed_active_run_count = sum(
+        1 for run in runs if str(getattr(run, "status", "")) in {"running", "stopping"}
+    )
+    computed_failed_run_count = sum(1 for run in runs if str(getattr(run, "status", "")) == "failed")
+    base_run_count = int(getattr(overview, "run_count", 0) or 0)
+    base_blocked_plan_count = int(getattr(overview, "blocked_plan_count", 0) or 0)
+    base_failed_plan_count = int(getattr(overview, "failed_plan_count", 0) or 0)
+    base_running_plan_count = int(getattr(overview, "running_plan_count", 0) or 0)
+    base_stale_workspace_count = int(getattr(overview, "stale_workspace_count", 0) or 0)
+    base_recent_failure_count = int(getattr(overview, "recent_failure_count", 0) or 0)
+    adapted = RepositoryOverview(
+        run_count=max(base_run_count, computed_run_count),
+        active_run_count=computed_active_run_count,
+        failed_run_count=computed_failed_run_count,
+        blocked_plan_count=max(
+            base_blocked_plan_count,
+            base_blocked_plan_count
+            + sum(
+                1
+                for run_data in live_unindexed_runs
+                for plan in (run_data.get("plans") or [])
+                if _effective_live_plan_status(plan, run_data) in {"blocked", "stopping"}
+            ),
+        ),
+        failed_plan_count=base_failed_plan_count,
+        running_plan_count=max(
+            base_running_plan_count,
+            base_running_plan_count
+            + sum(
+                1
+                for run_data in live_unindexed_runs
+                for plan in (run_data.get("plans") or [])
+                if _effective_live_plan_status(plan, run_data) == "running"
+            ),
+        ),
+        stale_workspace_count=base_stale_workspace_count,
+        recent_failure_count=base_recent_failure_count,
+    )
+    return adapted
+
+
 def load_dashboard_state(
     app: object,
     *,
@@ -237,7 +460,8 @@ def load_dashboard_state(
     overview = get_repository_overview(app.repo_path, db_path=app.db_path)
     attention_items = list_attention_items(app.repo_path, db_path=app.db_path)
     workspaces = list_workspaces(app.repo_path, db_path=app.db_path)
-    runs = list_runs(app.repo_path, db_path=app.db_path)
+    runs, live_unindexed_runs = merge_runs_with_live_data(app, list_runs(app.repo_path, db_path=app.db_path))
+    overview = adapt_overview_for_live_runs(overview, runs, live_unindexed_runs)
     templates = load_plan_templates(project_root())
     plan_templates = [
         (template_name, template.get("description") if isinstance(template, dict) else None)
