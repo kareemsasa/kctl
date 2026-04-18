@@ -60,11 +60,40 @@ class UIServiceTests(unittest.TestCase):
                     announce_url=None,
                     db_path=None,
                     python_executable="/usr/bin/python3",
+                    include_sensitive_env=True,
                 )
 
             self.assertIn('Environment="OPENAI_API_KEY=openai-test-key"', unit_text)
             self.assertIn('Environment="ANTHROPIC_API_KEY=anthropic-test-key"', unit_text)
             self.assertIn('Environment="KCTL_ARTIFACT_STORAGE=external"', unit_text)
+            self.assertIn('Environment="KCTL_HOME=/tmp/kctl-home"', unit_text)
+
+    def test_render_dashboard_service_does_not_forward_provider_env_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "openai-test-key",
+                    "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
+                    "KCTL_HOME": "/tmp/kctl-home",
+                },
+                clear=False,
+            ):
+                unit_text = render_dashboard_service(
+                    repo_path=repo_path,
+                    host="127.0.0.1",
+                    port=8421,
+                    tailscale=False,
+                    announce_url=None,
+                    db_path=None,
+                    python_executable="/usr/bin/python3",
+                )
+
+            self.assertNotIn('Environment="OPENAI_API_KEY=', unit_text)
+            self.assertNotIn('Environment="SSH_AUTH_SOCK=', unit_text)
             self.assertIn('Environment="KCTL_HOME=/tmp/kctl-home"', unit_text)
 
     def test_cli_ui_service_print_outputs_unit(self) -> None:

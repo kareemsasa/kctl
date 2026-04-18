@@ -10,7 +10,7 @@ from .paths import project_root
 from .types import PlanError
 
 
-_FORWARDED_SERVICE_ENV_VARS = (
+_SENSITIVE_SERVICE_ENV_VARS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_BASE_URL",
     "OPENAI_API_KEY",
@@ -25,7 +25,7 @@ def _systemd_environment_line(name: str, value: str) -> str:
     return f'Environment="{name}={escaped_value}"'
 
 
-def _service_environment_lines() -> list[str]:
+def _service_environment_lines(*, include_sensitive_env: bool = False) -> list[str]:
     path_value = os.environ.get("PATH", "")
     npm_global_bin = Path("~/.npm-global/bin").expanduser().resolve()
     if npm_global_bin.is_dir():
@@ -36,7 +36,9 @@ def _service_environment_lines() -> list[str]:
 
     env_lines = [_systemd_environment_line("PATH", path_value)]
 
-    forwarded_names = set(_FORWARDED_SERVICE_ENV_VARS)
+    forwarded_names: set[str] = set()
+    if include_sensitive_env:
+        forwarded_names.update(_SENSITIVE_SERVICE_ENV_VARS)
     forwarded_names.update(name for name in os.environ if name.startswith("KCTL_"))
     for name in sorted(forwarded_names):
         value = os.environ.get(name, "")
@@ -63,6 +65,7 @@ def render_dashboard_service(
     announce_url: str | None,
     db_path: Path | None,
     python_executable: str | None = None,
+    include_sensitive_env: bool = False,
 ) -> str:
     python_cmd = python_executable or sys.executable
     entrypoint = (project_root() / "kctl.py").resolve()
@@ -85,7 +88,7 @@ def render_dashboard_service(
         command.extend(["--announce-url", announce_url])
     quoted_command = shlex.join(command)
     working_directory = project_root().resolve()
-    env_lines = _service_environment_lines()
+    env_lines = _service_environment_lines(include_sensitive_env=include_sensitive_env)
     return "\n".join(
         [
             "[Unit]",
@@ -96,6 +99,8 @@ def render_dashboard_service(
             "[Service]",
             "Type=simple",
             f"WorkingDirectory={working_directory}",
+            "# PATH and KCTL_* are copied from the installing shell.",
+            "# Provider credentials and SSH_AUTH_SOCK are only copied when explicitly requested.",
             *env_lines,
             f"ExecStart={quoted_command}",
             "Restart=on-failure",

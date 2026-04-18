@@ -238,6 +238,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="python_executable",
         help="Python executable to run inside the service.",
     )
+    ui_service_print_parser.add_argument(
+        "--forward-sensitive-env",
+        action="store_true",
+        help="Also copy provider credentials and SSH_AUTH_SOCK into the systemd user service.",
+    )
 
     ui_service_install_parser = ui_service_subparsers.add_parser("install", help="Install and optionally start the dashboard service.")
     ui_service_install_parser.add_argument("repo", help="Repository root to inspect.")
@@ -276,6 +281,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--python",
         dest="python_executable",
         help="Python executable to run inside the service.",
+    )
+    ui_service_install_parser.add_argument(
+        "--forward-sensitive-env",
+        action="store_true",
+        help="Also copy provider credentials and SSH_AUTH_SOCK into the systemd user service.",
     )
     ui_service_install_parser.add_argument(
         "--no-enable",
@@ -509,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
                     announce_url=args.announce_url,
                     db_path=db_path,
                     python_executable=args.python_executable,
+                    include_sensitive_env=args.forward_sensitive_env,
                 )
                 if args.ui_service_command == "print":
                     print(service_text, end="", flush=True)

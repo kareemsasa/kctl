@@ -1,0 +1,12 @@
+title = "kctl gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and documentation do not contain real credentials."
+paths = [
+  '''^CHANGELOG\.md$''',
+  '''^README\.md$''',
+  '''^tests/''',
+]

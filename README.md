@@ -48,6 +48,8 @@ bash scripts/coverage
 .venv/bin/python -m coverage report
 ```
 
+The same validation path is wired into GitHub Actions in [`.github/workflows/ci.yml`](/home/kareem/code/personal/tooling/kctl/.github/workflows/ci.yml) for `push` and `pull_request`.
+
 ## Usage
 
 Run a plan:
@@ -102,9 +104,16 @@ python3 kctl.py ui dashboard /path/to/repo --tailscale
 python3 kctl.py ui dashboard /path/to/repo --tailscale --announce-url http://kctl-node.tailnet.ts.net:8421
 python3 kctl.py ui service print /path/to/repo --announce-url http://kctl-node.tailnet.ts.net:8421
 python3 kctl.py ui service install /path/to/repo --announce-url http://kctl-node.tailnet.ts.net:8421
+python3 kctl.py ui service install /path/to/repo --announce-url http://kctl-node.tailnet.ts.net:8421 --forward-sensitive-env
 ```
 
-The generated systemd user service preserves `PATH`, any present `KCTL_*` variables, and common provider credentials such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` so dashboard-launched runs use the same runtime configuration as the shell that installed the service.
+The generated systemd user service always preserves `PATH` and any present `KCTL_*` variables so dashboard-launched runs inherit repo-local `kctl` configuration from the shell that installed the service.
+
+Provider credentials and agent sockets are intentionally more bounded:
+
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, and `SSH_AUTH_SOCK` are only copied into the unit when you pass `--forward-sensitive-env`.
+- `kctl ui service print ... --forward-sensitive-env` is the safest way to inspect exactly what would be persisted before installing it.
+- systemd user units store `Environment=` values in plain text under `~/.config/systemd/user/`. Only use `--forward-sensitive-env` on a trusted single-user machine where that persistence model is acceptable.
 
 `kctl` can be run from any shell directory. Plan lookup checks the provided path first, then falls back to `KCTL_PLAN_ROOT` if the direct path does not exist.
 
@@ -383,6 +392,30 @@ For phone access over Tailscale, use `kctl ui dashboard <repo> --tailscale`. Tha
 The dashboard also includes an Actions panel. From there you can refresh the index immediately, choose a target repo, create a plan file from a built-in template under `<target-repo>/.kctl/plans/`, or start `plans run-many` against that same default plans directory with an optional override. Run-many launches in a background thread and reindexes the repository when it completes so new runs show up in the UI.
 
 For a long-running background service on Linux, use `kctl ui service install <repo> --announce-url http://...`. That writes a user-level systemd unit under `~/.config/systemd/user/`, reloads the user daemon, enables the service, and restarts it. Manage it with `systemctl --user status kctl-dashboard.service` and `systemctl --user restart kctl-dashboard.service`.
+
+If you need dashboard-launched runs to inherit provider credentials or `SSH_AUTH_SOCK`, install the unit with `--forward-sensitive-env`. Without that flag, the service remains usable for local browsing and repo operations that only depend on `PATH` and `KCTL_*`.
+
+## Release Process
+
+`CHANGELOG.md` follows Keep a Changelog style with an `Unreleased` section for pending repo-visible changes.
+
+Release checklist:
+
+1. Run `bash scripts/test`, `bash scripts/coverage`, and `.venv/bin/python -m coverage report`.
+2. Review `CHANGELOG.md` and move the relevant `Unreleased` entries into a versioned section dated for the release.
+3. Bump `version` in `pyproject.toml` if the release changes the published package version.
+4. Review `SECURITY.md` and open issues for any unresolved credential-handling or scanning findings before publishing.
+5. Tag and publish only after the repo is clean and GitHub Actions for the release commit are green.
+
+## Security
+
+See [SECURITY.md](/home/kareem/code/personal/tooling/kctl/SECURITY.md) for reporting guidance, supported versions, and the current security boundaries around local execution and service installation.
+
+Repo-local security automation lives under [`.github/workflows/security.yml`](/home/kareem/code/personal/tooling/kctl/.github/workflows/security.yml), [`.github/dependabot.yml`](/home/kareem/code/personal/tooling/kctl/.github/dependabot.yml), and [`.gitleaks.toml`](/home/kareem/code/personal/tooling/kctl/.gitleaks.toml).
+
+## License
+
+This repository is licensed under Apache-2.0. See [LICENSE](/home/kareem/code/personal/tooling/kctl/LICENSE).
 
 ## Run Logs
 
