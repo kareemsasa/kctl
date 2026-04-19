@@ -243,6 +243,45 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(PlanError):
             build_plan_from_template({"bad": {"shape": {"steps": [{"id": "implement", "prompt": "x"}], "defaults": []}}}, "bad", "/tmp/repo", "obj")
 
+    def test_init_repo_issue_finder_template_keeps_issue_report_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            templates_path = tmp / "kctl-plan-templates.yaml"
+            templates_path.write_text(
+                "templates:\n"
+                "  repo_issue_finder:\n"
+                "    shape:\n"
+                "      steps:\n"
+                "        - id: inspect\n"
+                "          prompt: Inspect\n"
+                "        - id: plan\n"
+                "          prompt: Plan\n"
+                "        - id: verify\n"
+                "          type: verify\n"
+                "        - id: summarize\n"
+                "          type: analyze\n"
+                "          output:\n"
+                "            schema: issue_report_v1\n"
+                "          prompt: Summarize\n"
+            )
+            output_path = tmp / "plans" / "004-repo-issue-finder.yaml"
+
+            with patch("kctl_pkg.plan.project_root", return_value=tmp):
+                result = init_plan(
+                    "repo_issue_finder",
+                    output_path,
+                    "/tmp/repo",
+                    "Find issues",
+                    force=False,
+                )
+
+            self.assertEqual(result, 0)
+            generated_plan = load_plan(output_path)
+            self.assertEqual(
+                generated_plan["steps"][-1]["output"]["schema"],
+                "issue_report_v1",
+            )
+
     def test_init_plan_writes_file_and_honors_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

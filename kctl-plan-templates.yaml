@@ -154,3 +154,137 @@ templates:
           prompt: |
             Review the final diff for scope creep, unnecessary edits, and commit readiness.
             Remove incidental changes before finishing.
+
+  repo_issue_finder:
+    description: >
+      Read-only repo assessment that inspects the codebase, runs safe validation,
+      and produces a ranked list of the highest-signal issues to fix next.
+    shape:
+      objective: >
+        Find the most important concrete issues in this repository using direct
+        repo evidence and safe local validation, then rank the best next fixes.
+      defaults:
+        stop_on_failure: false
+      steps:
+        - id: inspect
+          type: analyze
+          mode: read-only
+          prompt: |
+            Inspect the repository as a pragmatic issue finder. Do not modify files.
+            Read-only inspection commands are allowed in this step.
+            Do not run validation commands, networked commands, or anything that writes files.
+
+            Scope discipline:
+            - Keep this step short and artifact-driven.
+            - Do not read large files end to end unless they are clearly central.
+            - Do not dump schema bodies, README prose, or long file contents into the artifact.
+            - Prefer `rg`, file listings, and short targeted reads over broad file scans.
+            - Read at most:
+              - 1 root README or equivalent entry doc
+              - 1 main CI workflow
+              - up to 8 additional targeted files that look most relevant
+            - If the repo is large, stop once you can name the main execution surfaces,
+              likely hotspots, and safe validation commands with reasonable confidence.
+
+            Identify:
+            - the primary languages, frameworks, and execution surfaces
+            - the most relevant directories and files for code, tests, docs, security,
+              operations, and release flow
+            - the safest repo-local validation commands the repo appears to support
+            - the highest-risk subsystems or workflows
+            - any missing evidence that will limit confidence later
+
+            Favor concrete repository evidence over generic advice. Summarize the repo,
+            the likely hotspots, and the best next checks to run.
+            Keep the final inspect artifact concise: a short repo map, 5 to 10 hotspot
+            candidates, and the few safest validation commands worth running next.
+
+        - id: plan
+          type: analyze
+          mode: read-only
+          prompt: |
+            Using the inspect artifact, prepare a safe repo-local issue-finding plan.
+            Read-only inspection commands are allowed in this step.
+            Do not run validation commands, networked commands, or anything that writes files.
+
+            Requirements:
+            - Put only non-destructive repo-local commands into verification.commands.
+            - Prefer existing scripts, make targets, package-manager validation
+              commands, and repo-documented entrypoints.
+            - Repo-local commands may include documented local-container execution
+              paths such as `docker compose exec`, `docker compose run --rm`, or
+              equivalent commands when the repository explicitly uses them as the
+              canonical safe validation path.
+            - If the repository docs or CI indicate that some tests require local
+              services, prefer the documented service-backed validation path over a
+              weaker host-only fallback.
+            - Do not put production-only deploy/start/build commands into
+              verification.commands when they require real deploy-time env files,
+              secrets, DNS/TLS, or other intentionally absent production
+              prerequisites. Treat those as verification.manual_checks instead unless
+              the repo provides a safe documented local fixture for that path.
+            - Do not invent commands the repo does not support.
+            - When using package-manager scripts such as `npm test` or `pnpm test`,
+              use the script exactly as declared unless the repository explicitly
+              documents supported extra arguments.
+            - Treat validation failures as evidence, not as a reason to abort the
+              overall issue-finding plan.
+            - Use plan.steps to describe the evidence-gathering work and
+              verification.manual_checks for items that cannot be automated safely.
+            - Keep verification.commands focused; prefer roughly 4 to 8 commands total.
+            - Cover the highest-risk surfaces first instead of trying to touch every subsystem.
+
+            Optimize for finding the top few real issues quickly, not for exhaustive
+            coverage of every subsystem.
+
+        - id: verify
+          type: verify
+
+        - id: summarize
+          type: analyze
+          mode: read-only
+          output:
+            schema: issue_report_v1
+          prompt: |
+            Using the inspect artifact, plan artifact, verify artifact, and direct
+            repository evidence, produce a ranked issue-finder report. Do not modify
+            files.
+
+            Important constraints:
+            - This is a synthesis step, not a new investigation step.
+            - The inspect, plan, and verify artifacts are already provided as step context.
+              Treat them as authoritative inputs and do not try to locate them on disk.
+            - Do not rerun commands during summarize.
+            - Do not re-check environment state during summarize.
+            - Prefer fresh verify evidence over broad additional repo exploration.
+            - Do not exhaustively reread the repository once the current run already
+              has enough evidence to rank the main issues.
+            - Limit yourself to the artifacts plus, at most, 3 short targeted file reads
+              only when a file reference is needed to support a top issue.
+            - Do not read or quote large docs, schema files, or long route files during summarize.
+            - If verify found a concrete failing command or integrity check, rank that evidence first
+              and do not dilute it with a broad repo tour.
+            - When verify is mostly green, focus only on the few highest-risk residual gaps that
+              remain directly supported by inspect/plan evidence.
+            - If verify surfaced concrete failures or integrity problems, those should
+              dominate the report.
+            - If most automated checks passed, focus on the few remaining concrete
+              risks, gaps, contradictions, or manual-check items that still matter.
+            - Do not repeat sections or duplicate issue entries.
+            - If an earlier inspect assumption is disproven by later evidence, prefer
+              the later evidence and explicitly drop the stale concern.
+
+            Output format:
+            - Start with `# Top Issues`.
+            - List 1 to 10 issues only; do not pad.
+            - Use this exact issue shape for each item:
+              `## <rank>. <short title>`
+              `Severity: <critical|high|medium|low>`
+              `Why it matters: <one short paragraph>`
+              `Evidence: <one short paragraph with file paths, commands, or observed failures>`
+              `Next action: <one short paragraph naming the smallest practical fix or check>`
+            - After the issues, add `# Watch Items` with 0 to 3 bullets for lower-confidence concerns.
+            - End with `# Best Next Tasks` and exactly 3 numbered tasks.
+            - The `# Best Next Tasks` items must be distinct and numbered `1.`, `2.`, `3.`.
+            - Keep the full response concise and high signal. Avoid long code excerpts
+              or exhaustive file inventories.
