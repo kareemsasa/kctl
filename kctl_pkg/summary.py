@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,23 @@ def verify_outcome_label(step_result: dict[str, Any]) -> str:
     if verify is None:
         return "not run"
     return "passed" if verify.get("exit_code") == 0 else "failed"
+
+
+def _load_verify_artifact(step_result: dict[str, Any]) -> dict[str, Any] | None:
+    structured_artifacts = step_result.get("structured_artifacts")
+    if not isinstance(structured_artifacts, dict):
+        return None
+    verify_path = structured_artifacts.get("verify")
+    if not isinstance(verify_path, str) or not verify_path.strip():
+        return None
+    path = Path(verify_path)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def render_single_run_summary(run_data: dict[str, Any]) -> str:
@@ -26,6 +44,35 @@ def render_single_run_summary(run_data: dict[str, Any]) -> str:
             f"- {step_result.get('id') or 'unknown'}: {step_result.get('status') or 'unknown'} "
             f"(verification: {verify_outcome_label(step_result)})"
         )
+        verify_artifact = _load_verify_artifact(step_result)
+        if verify_artifact is None:
+            continue
+        commands_run = verify_artifact.get("commands_run")
+        if isinstance(commands_run, list) and commands_run:
+            lines.append("")
+            lines.append("  Verification commands:")
+            for command_entry in commands_run:
+                if not isinstance(command_entry, dict):
+                    continue
+                command = command_entry.get("command") or "unknown"
+                result = command_entry.get("result") or (
+                    "pass" if command_entry.get("exit_code") == 0 else "fail"
+                )
+                summary = command_entry.get("summary") or ""
+                lines.append(f"  - [{result}] `{command}`")
+                if isinstance(summary, str) and summary.strip():
+                    lines.append(f"    {summary}")
+        issues = verify_artifact.get("issues")
+        if isinstance(issues, list) and issues:
+            lines.append("")
+            lines.append("  Verification issues:")
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    continue
+                severity = issue.get("severity") or "info"
+                summary = issue.get("summary") or ""
+                if isinstance(summary, str) and summary.strip():
+                    lines.append(f"  - [{severity}] {summary}")
     return "\n".join(lines) + "\n"
 
 

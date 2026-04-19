@@ -18,6 +18,16 @@ PROVIDERS = {"codex", "claude"}
 PERMISSION_MODES = {"auto", "bypassPermissions", "plan"}
 
 
+def _validate_env_mapping(value: Any, label: str) -> None:
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str)
+        and key.strip()
+        and isinstance(item, str)
+        for key, item in value.items()
+    ):
+        raise PlanError(f"{label} must be a mapping of non-empty string keys to string values.")
+
+
 def _yaml_module() -> Any:
     try:
         import yaml
@@ -122,6 +132,9 @@ def validate_plan(plan: dict[str, Any]) -> None:
             isinstance(item, str) and item.strip() for item in defaults_required_env
         ):
             raise PlanError("defaults.required_env must be a list of non-empty strings if provided.")
+    defaults_verify_env = defaults.get("verify_env")
+    if defaults_verify_env is not None:
+        _validate_env_mapping(defaults_verify_env, "defaults.verify_env")
 
     required_env = plan.get("required_env")
     if required_env is not None:
@@ -154,6 +167,9 @@ def validate_plan(plan: dict[str, Any]) -> None:
         step_verify_shell = step.get("verify_shell")
         if step_verify_shell is not None and not isinstance(step_verify_shell, str):
             raise PlanError(f"Step '{step_id}' field 'verify_shell' must be a string if provided.")
+        step_verify_env = step.get("verify_env")
+        if step_verify_env is not None:
+            _validate_env_mapping(step_verify_env, f"Step '{step_id}' field 'verify_env'")
         declared_step_type = step.get("type")
         if declared_step_type is not None and declared_step_type not in STEP_TYPES:
             raise PlanError(

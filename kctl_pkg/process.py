@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -27,10 +28,14 @@ def run_command(
     command: list[str],
     cwd: Path,
     stdin_text: str | None = None,
+    env: dict[str, str] | None = None,
     stop_requested: Callable[[], bool] | None = None,
     process_started: Callable[[int], None] | None = None,
     process_finished: Callable[[int], None] | None = None,
 ) -> CommandResult:
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -38,6 +43,7 @@ def run_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=process_env,
     )
     stopped = False
     if process_started is not None:
@@ -75,12 +81,16 @@ def run_streaming_command(
     hidden_lines: set[str] | None = None,
     output_sink: OutputSink | None = None,
     display_filter: Callable[[str], bool] | None = None,
+    env: dict[str, str] | None = None,
     stop_requested: Callable[[], bool] | None = None,
     process_started: Callable[[int], None] | None = None,
     process_finished: Callable[[int], None] | None = None,
 ) -> CommandResult:
     output_sink = output_sink or ConsoleOutputSink()
     _display_filter = display_filter if display_filter is not None else should_display_codex_line
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -89,6 +99,7 @@ def run_streaming_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=1,
+        env=process_env,
     )
     stopped = False
     if process_started is not None:

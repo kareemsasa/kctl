@@ -583,6 +583,72 @@ class MultiPlanTests(unittest.TestCase):
             self.assertEqual(run_state["status"], "blocked")
             self.assertEqual(run_state["preflight"]["issues"][0]["code"], "missing_env")
 
+    def test_execute_plan_run_passes_verify_env_to_verify_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_path = Path(tmpdir) / "repo"
+            init_git_repo(repo_path)
+            plan_path = Path(tmpdir) / "verify-env.yaml"
+            plan_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    repo: {repo_path}
+                    objective: verify env
+                    defaults:
+                      verify_env:
+                        DATABASE_URL: postgres://grid:grid@127.0.0.1:5433/grid
+                    steps:
+                      - id: verify
+                        type: verify
+                        commands:
+                          - printf "$DATABASE_URL"
+                    """
+                ).strip()
+                + "\n"
+            )
+
+            seen_envs: list[dict[str, str] | None] = []
+
+            def fake_run_shell_command(shell_parts, command_text, cwd, env=None, **kwargs):
+                seen_envs.append(env)
+                if command_text in {"command -v node", "node -v", "command -v npm", "npm -v"}:
+                    return CommandResult(
+                        [*shell_parts, command_text],
+                        str(cwd),
+                        0,
+                        "ok\n",
+                        "",
+                    )
+                return CommandResult(
+                    [*shell_parts, command_text],
+                    str(cwd),
+                    0,
+                    (env or {}).get("DATABASE_URL", "") + "\n",
+                    "",
+                )
+
+            with patch("kctl_pkg.runner.run_shell_command", side_effect=fake_run_shell_command):
+                run_data = execute_plan_run(
+                    plan_path=plan_path,
+                    verbose=False,
+                    approve_each_step=False,
+                    branch=None,
+                    commit=False,
+                    commit_message=None,
+                    allow_dirty_start=False,
+                    review_enabled=False,
+                    interactive=False,
+                )
+
+            self.assertEqual(run_data["status"], "success")
+            verify_step = run_data["steps"][0]
+            self.assertEqual(verify_step["verify"]["exit_code"], 0)
+            self.assertTrue(any(env and env.get("DATABASE_URL") for env in seen_envs))
+            verify_artifact = json.loads(
+                Path(verify_step["structured_artifacts"]["verify"]).read_text()
+            )
+            self.assertEqual(verify_artifact["commands_run"][0]["result"], "pass")
+            self.assertIn("DATABASE_URL", verify_step["verify_environment"]["injected_env_keys"])
+
     def test_normalize_plan_records_explicit_and_inferred_step_types(self) -> None:
         plan = {
             "repo": "/tmp/repo",

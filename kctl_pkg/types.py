@@ -76,6 +76,7 @@ class PlanArtifact:
 @dataclass
 class VerifyCommandArtifact:
     command: str
+    result: str
     exit_code: int
     summary: str
 
@@ -300,11 +301,17 @@ def parse_verify_artifact(value: Any) -> VerifyArtifact:
         exit_code = entry.get("exit_code")
         if not isinstance(exit_code, int):
             raise PlanError(f"verify.commands_run[{index}].exit_code must be an integer.")
+        result = _require_string(entry.get("result"), f"verify.commands_run[{index}].result")
+        if result not in {"pass", "fail", "skipped"}:
+            raise PlanError(
+                f"verify.commands_run[{index}].result must be pass, fail, or skipped."
+            )
         commands_run.append(
             VerifyCommandArtifact(
                 command=_require_string(
                     entry.get("command"), f"verify.commands_run[{index}].command"
                 ),
+                result=result,
                 exit_code=exit_code,
                 summary=_require_string(
                     entry.get("summary"), f"verify.commands_run[{index}].summary"

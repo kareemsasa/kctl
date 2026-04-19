@@ -230,6 +230,7 @@ def run_shell_command(
     shell_parts: list[str],
     command_text: str,
     cwd: Path,
+    env: dict[str, str] | None = None,
     stop_requested: Callable[[], bool] | None = None,
     process_started: Callable[[int], None] | None = None,
     process_finished: Callable[[int], None] | None = None,
@@ -237,39 +238,55 @@ def run_shell_command(
     return run_command(
         [*shell_parts, command_text],
         cwd=cwd,
+        env=env,
         stop_requested=stop_requested,
         process_started=process_started,
         process_finished=process_finished,
     )
 
 
-def probe_command(shell_parts: list[str], cwd: Path, command_text: str) -> str | None:
-    result = run_shell_command(shell_parts, command_text, cwd)
+def probe_command(
+    shell_parts: list[str],
+    cwd: Path,
+    command_text: str,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    result = run_shell_command(shell_parts, command_text, cwd, env=env)
     if result.exit_code != 0:
         return None
     output = result.stdout.strip()
     return output or None
 
 
-def collect_verify_environment(shell_parts: list[str], repo_path: Path) -> dict[str, Any]:
+def collect_verify_environment(
+    shell_parts: list[str],
+    repo_path: Path,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    injected_env_keys = sorted(env.keys()) if env else []
     return {
         "cwd": str(repo_path),
         "shell": " ".join(shell_parts),
-        "which_node": probe_command(shell_parts, repo_path, "command -v node"),
-        "node_version": probe_command(shell_parts, repo_path, "node -v"),
-        "which_npm": probe_command(shell_parts, repo_path, "command -v npm"),
-        "npm_version": probe_command(shell_parts, repo_path, "npm -v"),
+        "which_node": probe_command(shell_parts, repo_path, "command -v node", env=env),
+        "node_version": probe_command(shell_parts, repo_path, "node -v", env=env),
+        "which_npm": probe_command(shell_parts, repo_path, "command -v npm", env=env),
+        "npm_version": probe_command(shell_parts, repo_path, "npm -v", env=env),
+        "injected_env_keys": injected_env_keys,
     }
 
 
 def summarize_verify_environment(verify_environment: dict[str, Any]) -> str:
-    return (
+    text = (
         f"shell={verify_environment['shell']}; "
         f"node={verify_environment.get('which_node') or 'not-found'}; "
         f"node_version={verify_environment.get('node_version') or 'unknown'}; "
         f"npm={verify_environment.get('which_npm') or 'not-found'}; "
         f"npm_version={verify_environment.get('npm_version') or 'unknown'}"
     )
+    injected_env_keys = verify_environment.get("injected_env_keys") or []
+    if injected_env_keys:
+        text += f"; injected_env={','.join(injected_env_keys)}"
+    return text
 
 
 def run_verify_commands(
@@ -277,6 +294,7 @@ def run_verify_commands(
     shell_parts: list[str],
     commands: list[str],
     output_sink: OutputSink,
+    env: dict[str, str] | None = None,
     stop_requested: Callable[[], bool] | None = None,
     process_started: Callable[[int], None] | None = None,
     process_finished: Callable[[int], None] | None = None,
@@ -287,6 +305,7 @@ def run_verify_commands(
             shell_parts,
             command,
             repo_path,
+            env=env,
             stop_requested=stop_requested,
             process_started=process_started,
             process_finished=process_finished,
@@ -678,6 +697,24 @@ def summarize_command_output(result: CommandResult) -> str:
     return "; ".join(chunks)
 
 
+def resolve_verify_env(step: dict[str, Any], defaults: dict[str, Any]) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    defaults_env = defaults.get("verify_env")
+    if isinstance(defaults_env, dict):
+        merged.update({str(key): str(value) for key, value in defaults_env.items()})
+    step_env = step.get("verify_env")
+    if isinstance(step_env, dict):
+        merged.update({str(key): str(value) for key, value in step_env.items()})
+    return merged
+
+
+def classify_verify_failure(result: CommandResult) -> str:
+    combined_text = f"{result.stdout}\n{result.stderr}".lower()
+    if "missing required environment variables:" in combined_text:
+        return "missing_env"
+    return "command_failed"
+
+
 def apply_provider_override(
     defaults: dict[str, Any],
     provider_override: str | None,
@@ -723,6 +760,7 @@ def build_verify_artifact(
             commands_run.append(
                 VerifyCommandArtifact(
                     command=verify_result.command[-1],
+                    result="pass" if verify_result.exit_code == 0 else "fail",
                     exit_code=verify_result.exit_code,
                     summary=summarize_command_output(verify_result),
                 )
@@ -749,6 +787,28 @@ def build_verify_artifact(
                     summary="At least one configured verification command failed.",
                 )
             )
+            first_failure = next(
+                (result for result in verify_results if result.exit_code != 0),
+                None,
+            )
+            if first_failure is not None:
+                failure_kind = classify_verify_failure(first_failure)
+                if failure_kind == "missing_env":
+                    issues.append(
+                        VerifyIssueArtifact(
+                            severity="error",
+                            summary="Verification failed because required environment variables were missing.",
+                        )
+                    )
+                issues.append(
+                    VerifyIssueArtifact(
+                        severity="error",
+                        summary=(
+                            "Failed command: "
+                            f"{first_failure.command[-1]} ({summarize_command_output(first_failure)})"
+                        ),
+                    )
+                )
             status = "fail"
             recommended_next_action = "repair"
     else:
@@ -1210,6 +1270,7 @@ def execute_step(
     verify_result: CommandResult | None = None
     verify_results: list[CommandResult] = []
     verify_environment: dict[str, Any] | None = None
+    verify_env: dict[str, str] = {}
     reviews: list[dict[str, Any]] = []
     status = "success"
     failure_reason: str | None = None
@@ -1246,14 +1307,21 @@ def execute_step(
 
     if verify_commands:
         shell_parts = parse_verify_shell(verify_shell_value)
-        verify_environment = collect_verify_environment(shell_parts, repo_path)
+        verify_env = resolve_verify_env(step, defaults)
+        verify_environment = collect_verify_environment(shell_parts, repo_path, env=verify_env)
         output_sink.write_line(
             style_text(
                 "  verify env: " + summarize_verify_environment(verify_environment),
                 dim=True,
             )
         )
-        verify_results = run_verify_commands(repo_path, shell_parts, verify_commands, output_sink)
+        verify_results = run_verify_commands(
+            repo_path,
+            shell_parts,
+            verify_commands,
+            output_sink,
+            env=verify_env or None,
+        )
         verify_result = combine_verify_results(verify_results, shell_parts)
         if any(result.stopped for result in verify_results):
             status = "stopped"

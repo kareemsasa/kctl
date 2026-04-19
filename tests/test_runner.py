@@ -36,6 +36,7 @@ from kctl_pkg.runner import (
     prompt_to_continue,
     prompt_to_continue_after_review,
     resolve_verify_commands,
+    resolve_verify_env,
     run_verify_commands,
     save_run_log,
     select_steps_to_run,
@@ -84,8 +85,13 @@ class RunnerHelperTests(unittest.TestCase):
             parse_verify_shell("   ")
 
         with patch("kctl_pkg.runner.probe_command", side_effect=["/usr/bin/node", "v1", "/usr/bin/npm", "10"]):
-            env = collect_verify_environment(["sh", "-lc"], Path("/tmp/repo"))
+            env = collect_verify_environment(
+                ["sh", "-lc"],
+                Path("/tmp/repo"),
+                env={"DATABASE_URL": "postgres://example"},
+            )
         self.assertIn("shell=sh -lc", summarize_verify_environment(env))
+        self.assertEqual(env["injected_env_keys"], ["DATABASE_URL"])
 
     def test_run_verify_commands_and_combine_results(self) -> None:
         results = [
@@ -94,7 +100,13 @@ class RunnerHelperTests(unittest.TestCase):
         ]
         sink = BufferedOutputSink()
         with patch("kctl_pkg.runner.run_shell_command", side_effect=results):
-            verify_results = run_verify_commands(Path("/tmp"), ["sh", "-lc"], ["printf ok", "printf bad"], sink)
+            verify_results = run_verify_commands(
+                Path("/tmp"),
+                ["sh", "-lc"],
+                ["printf ok", "printf bad"],
+                sink,
+                env={"DATABASE_URL": "postgres://example"},
+            )
 
         self.assertEqual(len(verify_results), 2)
         combined = combine_verify_results(verify_results, ["sh", "-lc"])
@@ -296,10 +308,27 @@ class RunnerHelperTests(unittest.TestCase):
         artifact = build_verify_artifact(
             verify_results,
             {"verification": {"manual_checks": ["click button"]}},
-            {"shell": "sh -lc"},
+            {"shell": "sh -lc", "injected_env_keys": ["DATABASE_URL"]},
         )
         self.assertEqual(artifact["status"], "pass")
         self.assertEqual(artifact["tests"][-1]["name"], "click button")
+        self.assertEqual(artifact["commands_run"][0]["result"], "pass")
+
+        failing_artifact = build_verify_artifact(
+            [
+                CommandResult(
+                    ["sh", "-lc", "npm run test:db"],
+                    "/tmp",
+                    1,
+                    "",
+                    "Missing required environment variables: DATABASE_URL\n",
+                )
+            ],
+            {"verification": {"manual_checks": []}},
+            {"shell": "sh -lc"},
+        )
+        self.assertEqual(failing_artifact["status"], "fail")
+        self.assertIn("missing", failing_artifact["issues"][1]["summary"].lower())
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
@@ -370,6 +399,13 @@ class RunnerHelperTests(unittest.TestCase):
             ["npm test"],
         )
         self.assertEqual(resolve_verify_commands({"id": "step", "verify": "pytest"}, {}, {}, "change"), ["pytest"])
+        self.assertEqual(
+            resolve_verify_env(
+                {"id": "verify", "verify_env": {"DATABASE_URL": "postgres://step"}},
+                {"verify_env": {"FOO": "bar"}},
+            ),
+            {"FOO": "bar", "DATABASE_URL": "postgres://step"},
+        )
 
     def test_execute_agent_step_and_save_run_log(self) -> None:
         step = {
@@ -457,11 +493,46 @@ class RunnerHelperTests(unittest.TestCase):
                 "started_at": "2026-01-01T00:00:00+00:00",
                 "ended_at": "2026-01-01T00:00:01+00:00",
                 "objective": "obj",
-                "steps": [],
+                "steps": [
+                    {
+                        "id": "verify",
+                        "status": "failure",
+                        "verify": {"exit_code": 1},
+                        "structured_artifacts": {
+                            "verify": str(run_dir / "step-03-verify.json"),
+                        },
+                    }
+                ],
             }
+            (run_dir / "step-03-verify.json").write_text(
+                json.dumps(
+                    {
+                        "status": "fail",
+                        "commands_run": [
+                            {
+                                "command": "cd web && npm run test:db",
+                                "result": "fail",
+                                "exit_code": 1,
+                                "summary": "exit_code=1; stderr=Missing required environment variables: DATABASE_URL",
+                            }
+                        ],
+                        "tests": [],
+                        "issues": [
+                            {
+                                "severity": "error",
+                                "summary": "Verification failed because required environment variables were missing.",
+                            }
+                        ],
+                        "recommended_next_action": "repair",
+                    }
+                )
+                + "\n"
+            )
             log_path = save_run_log(run_data, run_dir)
             self.assertTrue(log_path.exists())
-            self.assertTrue((run_dir / "summary.md").exists())
+            summary_text = (run_dir / "summary.md").read_text()
+            self.assertIn("cd web && npm run test:db", summary_text)
+            self.assertIn("Missing required environment variables: DATABASE_URL", summary_text)
             self.assertEqual(build_step_file_prefix(3), "step-03")
 
     def test_step_summary_and_selection_helpers(self) -> None:
