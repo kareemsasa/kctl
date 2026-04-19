@@ -542,13 +542,14 @@ def _display_status_label(status: str | None, failure_reason: str | None = None)
 def _render_attention_card(item: AttentionItem, providers: list[tuple[str, str]] | None = None) -> str:
     link_href = _link({}, run_id=item.run_id, plan_execution_id=item.plan_execution_id)
     action_label = _operator_action_label(item.operator_action)
+    current_step_label = item.current_step_key or "—"
     parts = [
         f"<div class='card {_status_class(item.status)}'>",
         f"<a href='{_escape(link_href)}'>",
         f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>",
         f"<strong>{_escape(action_label)}</strong> <span style='color:#374151'>{_escape(item.plan_slug)}</span>",
         "</div>",
-        f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(item.current_step_key or '\u2014')}</div>",
+        f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(current_step_label)}</div>",
         f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(item.verify_status)}</div>",
     ]
     if item.failure_reason:
