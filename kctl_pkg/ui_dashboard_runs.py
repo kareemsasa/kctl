@@ -155,6 +155,276 @@ def _display_value(value: object, fallback: str = "—") -> object:
     return value if value not in {None, ""} else fallback
 
 
+def _render_overview_bar(overview: object) -> str:
+    return (
+        "<div class='overview-bar'>"
+        f"<span><strong>{_escape(overview.run_count)}</strong> runs</span>"
+        f"<span><strong>{_escape(overview.active_run_count)}</strong> active</span>"
+        f"<span class='{_status_class('failure') if overview.failed_run_count else ''}'><strong>{_escape(overview.failed_run_count)}</strong> failed</span>"
+        f"<span><strong>{_escape(overview.running_plan_count)}</strong> running</span>"
+        f"<span><strong>{_escape(overview.blocked_plan_count)}</strong> blocked</span>"
+        f"<span><strong>{_escape(overview.stale_workspace_count)}</strong> stale</span>"
+        "</div>"
+    )
+
+
+def _render_plan_cards_html(plans: list[object]) -> str:
+    return "".join(
+        (
+            f"<a class='card {_status_class(plan.status)}' href='{_escape(_run_detail_link(plan.run_id, plan_execution_id=plan.id))}'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
+            f"<strong>{_escape(plan.plan_slug)}</strong>"
+            f"{_status_badge(plan.status, failure_reason=plan.failure_reason)}"
+            f"</div>"
+            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(plan.current_step_key))}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(plan.verify_status)}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(plan.changed_files_count)} files</div>"
+            "</a>"
+        )
+        for plan in plans
+    ) or "<div class='empty'>No plan executions.</div>"
+
+
+def _render_workspace_items_html(workspaces: list[object]) -> str:
+    return "".join(
+        (
+            f"<a class='card {_status_class(workspace.status)}' href='{_escape(_run_detail_link(workspace.run_id, plan_execution_id=workspace.plan_execution_id))}'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
+            f"<strong>{_escape(workspace.plan_slug)}</strong>"
+            f"{_lifecycle_badge(workspace.lifecycle)}"
+            f"</div>"
+            f"<div class='kv-row'><span class='kv-label'>Status</span> {_escape(workspace.status)}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(workspace.verify_status)}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Path</span> <code style='font-size:0.85em'>{_escape(workspace.path)}</code></div>"
+            "</a>"
+        )
+        for workspace in workspaces
+    ) or "<div class='empty'>No workspaces indexed.</div>"
+
+
+def _render_plan_file_items_html(app: object, base_params: dict[str, str]) -> str:
+    return "".join(
+        (
+            f"<a class='list-item status-neutral' href='{_escape(_link(base_params, selected_plan_file=plan_path))}'>"
+            f"<strong>{_escape(plan_name)}</strong>"
+            f"<div class='help'>{_escape(plan_path)}</div>"
+            "</a>"
+        )
+        for plan_name, plan_path in (
+            (path.name, str(path.resolve()))
+            for pattern in ("*.yaml", "*.yml")
+            for path in sorted(app.default_plans_dir.glob(pattern))
+            if path.is_file()
+        )
+    ) or "<div class='empty'>No plan files found.</div>"
+
+
+def _render_dashboard_selected_run_html(selected_run: object | None, selected_run_preflight: dict[str, object] | None) -> str:
+    if selected_run is None:
+        return "<section class='panel'><h2>Run Detail</h2><div class='empty'>No run selected.</div></section>"
+    run_preflight_html = _render_run_preflight_html(selected_run_preflight)
+    return (
+        "<section class='panel'>"
+        "<h2>Run Detail</h2>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px'>"
+        f"<strong style='font-family:monospace;font-size:0.9em'>{_escape(selected_run.id)}</strong>"
+        f"{_status_badge(selected_run.status)}"
+        f"</div>"
+        f"<div class='kv-row'><span class='kv-label'>Source</span> {_escape(selected_run.launch_source)}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Started</span> {_escape(_fmt_ts(selected_run.started_at))}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Ended</span> {_escape(_fmt_ts(selected_run.ended_at))}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Plans</span> {_escape(selected_run.plan_execution_count)} total</div>"
+        f"{_render_run_stop_controls(selected_run.id, selected_run.status)}"
+        f"{run_preflight_html}"
+        "</section>"
+    )
+
+
+def _render_workspace_detail_html(workspace: object | None) -> str:
+    if workspace is None:
+        return "<div class='empty'>No workspace recorded.</div>"
+    return (
+        f"<div class='kv-row'><span class='kv-label'>Status</span> {_escape(workspace.status)}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(workspace.branch_name))}</code></div>"
+        f"<div class='kv-row'><span class='kv-label'>Created</span> {_escape(_fmt_ts(workspace.created_at))}</div>"
+        + (f"<div class='kv-row'><span class='kv-label'>Released</span> {_escape(_fmt_ts(workspace.released_at))}</div>" if workspace.released_at else "")
+        + f"<div class='kv-row'><span class='kv-label'>Path</span> <code style='font-size:0.85em'>{_escape(workspace.path)}</code></div>"
+    )
+
+
+def _render_timeline_rows(steps: list[object]) -> str:
+    return "".join(
+        (
+            "<tr>"
+            f"<td>{_escape(step.sequence_index)}</td>"
+            f"<td>{_escape(step.step_key)}</td>"
+            f"<td>{_escape(step.kind)}</td>"
+            f"<td>{_status_badge(step.status)}</td>"
+            f"<td>{_escape(step.verify_status)}</td>"
+            f"<td>{_escape(step.changed_files_count)}</td>"
+            f"<td>{_escape(step.duration_ms)}</td>"
+            "</tr>"
+        )
+        for step in steps
+    ) or "<tr><td colspan='7' class='empty'>No steps recorded.</td></tr>"
+
+
+def _render_dashboard_selected_plan_html(selected_plan: object | None) -> str:
+    if selected_plan is None:
+        return "<section class='panel'><h2>Plan Execution Detail</h2><div class='empty'>No plan selected.</div></section>"
+    return (
+        "<section class='panel'>"
+        "<h2>Plan Execution Detail</h2>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px'>"
+        f"<strong>{_escape(selected_plan.plan_slug)}</strong>"
+        f"{_status_badge(selected_plan.status, failure_reason=selected_plan.failure_reason)}"
+        f"</div>"
+        f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(selected_plan.current_step_key))}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(selected_plan.verify_status)}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(selected_plan.changed_files_count)} files</div>"
+        + (f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(selected_plan.branch_name))}</code></div>" if selected_plan.branch_name else "")
+        + (f"<div class='kv-row'><span class='kv-label'>Log</span> <code style='font-size:0.85em'>{_escape(selected_plan.log_path)}</code></div>" if selected_plan.log_path else "")
+        + (f"<div class='kv-row'><span class='kv-label'>Failure</span> {_escape(_failure_reason_label(selected_plan.failure_reason))}</div>" if selected_plan.failure_reason else "")
+        + _render_plan_rerun_controls(selected_plan)
+        + "</section>"
+    )
+
+
+def _render_selected_plan_file_html(selected_plan_file_name: str | None, selected_plan_file_path: str | None, selected_plan_file_contents: str | None) -> str:
+    if selected_plan_file_name is None or selected_plan_file_contents is None:
+        return "<div class='empty'>No plan file selected.</div>"
+    return (
+        f"<div><strong>{_escape(selected_plan_file_name)}</strong></div>"
+        f"<div>path={_escape(selected_plan_file_path)}</div>"
+        f"<pre class='code-block'>{_escape(selected_plan_file_contents)}</pre>"
+    )
+
+
+def _render_dashboard_live_output_script(run_id: str, run_status: str) -> str:
+    return (
+        "window.addEventListener('DOMContentLoaded', () => {\n"
+        "  wireCopyButtons(document);\n"
+        f"  const runId = {json.dumps(run_id)};\n"
+        f"  const runStatus = {json.dumps(run_status)};\n"
+        "  const outputNode = document.getElementById('live_output_stream');\n"
+        "  const tailNode = document.getElementById('live_output_tail');\n"
+        "  if (runId && outputNode) {\n"
+        "    const renderTail = (text) => {\n"
+        "      if (!tailNode) return;\n"
+        "      const lines = (text || '').split(/\\r?\\n/);\n"
+        "      tailNode.value = lines.slice(-50).join('\\n');\n"
+        "    };\n"
+        "    renderTail(outputNode.textContent || '');\n"
+        "    const refreshOutput = async () => {\n"
+        "      const params = new URLSearchParams({ run_id: runId });\n"
+        "      const response = await fetch(`/api/run-output?${params.toString()}`);\n"
+        "      if (!response.ok) return;\n"
+        "      const data = await response.json();\n"
+        "      outputNode.textContent = data.output || '';\n"
+        "      renderTail(data.output || '');\n"
+        "    };\n"
+        "    refreshOutput();\n"
+        "    if (runStatus === 'running' || runStatus === 'stopping') {\n"
+        "      window.setInterval(refreshOutput, 2000);\n"
+        "    }\n"
+        "  }\n"
+        "});\n"
+    )
+
+
+def _render_run_header_html(selected_run: object, selected_run_preflight: dict[str, object] | None, plan_execution_id: str | None = None) -> str:
+    run_preflight_html = _render_run_preflight_html(selected_run_preflight)
+    return (
+        "<section class='panel'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px'>"
+        f"<strong style='font-family:monospace;font-size:0.9em'>{_escape(selected_run.id)}</strong>"
+        f"{_status_badge(selected_run.status)}"
+        f"</div>"
+        f"<div class='kv-row'><span class='kv-label'>Source</span> {_escape(selected_run.launch_source)}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Started</span> {_escape(_fmt_ts(selected_run.started_at))}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Ended</span> {_escape(_fmt_ts(selected_run.ended_at))}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Plans</span>"
+        f" {_escape(selected_run.plan_execution_count)} total"
+        f" &mdash; {_escape(selected_run.passed_count)} passed,"
+        f" {_escape(selected_run.failed_count)} failed,"
+        f" {_escape(selected_run.running_count)} running,"
+        f" {_escape(selected_run.blocked_count)} blocked</div>"
+        f"{_render_run_stop_controls(selected_run.id, selected_run.status, plan_execution_id=plan_execution_id)}"
+        f"{run_preflight_html}"
+        "</section>"
+    )
+
+
+def _render_run_selected_plan_html(selected_plan: object | None, workspace: object | None, steps: list[object]) -> str:
+    if selected_plan is None:
+        return ""
+    workspace_html = ""
+    if workspace is not None:
+        workspace_html = (
+            "<div style='margin-top:8px;padding-top:8px;border-top:1px solid #eee'>"
+            f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(workspace.branch_name))}</code></div>"
+            f"<div class='kv-row'><span class='kv-label'>Created</span> {_escape(_fmt_ts(workspace.created_at))}</div>"
+            + (f"<div class='kv-row'><span class='kv-label'>Released</span> {_escape(_fmt_ts(workspace.released_at))}</div>" if workspace.released_at else "")
+            + f"<div class='kv-row'><span class='kv-label'>Path</span> <code style='font-size:0.85em'>{_escape(workspace.path)}</code></div>"
+            "</div>"
+        )
+    timeline_rows = _render_timeline_rows(steps)
+    return (
+        "<section class='panel'>"
+        "<h2>Plan Execution Detail</h2>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px'>"
+        f"<strong>{_escape(selected_plan.plan_slug)}</strong>"
+        f"{_status_badge(selected_plan.status, failure_reason=selected_plan.failure_reason)}"
+        f"</div>"
+        f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(selected_plan.current_step_key))}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(selected_plan.verify_status)}</div>"
+        f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(selected_plan.changed_files_count)} files</div>"
+        + (f"<div class='kv-row'><span class='kv-label'>Log</span> <code style='font-size:0.85em'>{_escape(selected_plan.log_path)}</code></div>" if selected_plan.log_path else "")
+        + (f"<div class='kv-row'><span class='kv-label'>Failure</span> {_escape(_failure_reason_label(selected_plan.failure_reason))}</div>" if selected_plan.failure_reason else "")
+        + _render_plan_rerun_controls(selected_plan)
+        + workspace_html
+        + "<h3 style='margin:16px 0 8px'>Step Timeline</h3>"
+        + "<div class='table-scroll'><table>"
+        + "<thead><tr><th>#</th><th>Step</th><th>Type</th><th>Status</th><th>Verify</th><th>Files</th><th>ms</th></tr></thead>"
+        + f"<tbody>{timeline_rows}</tbody>"
+        + "</table></div>"
+        + "</section>"
+    )
+
+
+def _render_run_live_output_script(run_id: str, run_status: str) -> str:
+    return (
+        "window.addEventListener('DOMContentLoaded', () => {\n"
+        "  wireCopyButtons(document);\n"
+        f"  const runId = {json.dumps(run_id)};\n"
+        f"  const runStatus = {json.dumps(run_status)};\n"
+        "  const outputNode = document.getElementById('live_output_stream');\n"
+        "  const tailNode = document.getElementById('live_output_tail');\n"
+        "  if (runId && outputNode && (runStatus === 'running' || runStatus === 'stopping')) {\n"
+        "    const renderTail = (text) => {\n"
+        "      if (!tailNode) return;\n"
+        "      const lines = (text || '').split(/\\r?\\n/);\n"
+        "      tailNode.value = lines.slice(-50).join('\\n');\n"
+        "    };\n"
+        "    renderTail(outputNode.textContent || '');\n"
+        "    const refresh = async () => {\n"
+        "      const params = new URLSearchParams({ run_id: runId });\n"
+        "      const resp = await fetch(`/api/run-output?${params.toString()}`);\n"
+        "      if (!resp.ok) return;\n"
+        "      const data = await resp.json();\n"
+        "      outputNode.textContent = data.output || '';\n"
+        "      renderTail(data.output || '');\n"
+        "    };\n"
+        "    refresh();\n"
+        "    window.setInterval(refresh, 2000);\n"
+        "  } else if (tailNode && outputNode) {\n"
+        "    const lines = (outputNode.textContent || '').split(/\\r?\\n/);\n"
+        "    tailNode.value = lines.slice(-50).join('\\n');\n"
+        "  }\n"
+        "});\n"
+    )
+
+
 def render_run_stop_confirm_page(
     app: object,
     run_id: str,
@@ -207,17 +477,7 @@ def render_dashboard_page(
     active_runs = [run for run in runs if str(getattr(run, "status", "")) in {"running", "stopping"}]
     runs = _select_recent_runs(runs, limit=5)
     providers = available_providers()
-
-    overview_html = (
-        "<div class='overview-bar'>"
-        f"<span><strong>{_escape(overview.run_count)}</strong> runs</span>"
-        f"<span><strong>{_escape(overview.active_run_count)}</strong> active</span>"
-        f"<span class='{_status_class('failure') if overview.failed_run_count else ''}'><strong>{_escape(overview.failed_run_count)}</strong> failed</span>"
-        f"<span><strong>{_escape(overview.running_plan_count)}</strong> running</span>"
-        f"<span><strong>{_escape(overview.blocked_plan_count)}</strong> blocked</span>"
-        f"<span><strong>{_escape(overview.stale_workspace_count)}</strong> stale</span>"
-        "</div>"
-    )
+    overview_html = _render_overview_bar(overview)
 
     attention_items_html = "".join(
         _render_attention_card(item, providers=providers) for item in attention_items
@@ -271,49 +531,14 @@ def render_dashboard_detail_page(
     if state.selected_plan is not None:
         base_params["plan_execution_id"] = state.selected_plan.id
 
-    overview_html = (
-        "<div class='overview-bar'>"
-        f"<span><strong>{_escape(state.overview.run_count)}</strong> runs</span>"
-        f"<span><strong>{_escape(state.overview.active_run_count)}</strong> active</span>"
-        f"<span class='{_status_class('failure') if state.overview.failed_run_count else ''}'><strong>{_escape(state.overview.failed_run_count)}</strong> failed</span>"
-        f"<span><strong>{_escape(state.overview.running_plan_count)}</strong> running</span>"
-        f"<span><strong>{_escape(state.overview.blocked_plan_count)}</strong> blocked</span>"
-        f"<span><strong>{_escape(state.overview.stale_workspace_count)}</strong> stale</span>"
-        "</div>"
-    )
+    overview_html = _render_overview_bar(state.overview)
     notice_html = f"<div class='notice'>{_escape(state.action_message)}</div>" if state.action_message else ""
     attention_items_html = "".join(
         _render_attention_card(item, providers=state.available_providers)
         for item in state.attention_items
     ) or "<div class='empty'>Nothing needs attention right now.</div>"
-    workspace_items_html = "".join(
-        (
-            f"<a class='card {_status_class(workspace.status)}' href='{_escape(_run_detail_link(workspace.run_id, plan_execution_id=workspace.plan_execution_id))}'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
-            f"<strong>{_escape(workspace.plan_slug)}</strong>"
-            f"{_lifecycle_badge(workspace.lifecycle)}"
-            f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Status</span> {_escape(workspace.status)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(workspace.verify_status)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Path</span> <code style='font-size:0.85em'>{_escape(workspace.path)}</code></div>"
-            "</a>"
-        )
-        for workspace in state.workspaces
-    ) or "<div class='empty'>No workspaces indexed.</div>"
-    plan_file_items_html = "".join(
-        (
-            f"<a class='list-item status-neutral' href='{_escape(_link(base_params, selected_plan_file=plan_path))}'>"
-            f"<strong>{_escape(plan_name)}</strong>"
-            f"<div class='help'>{_escape(plan_path)}</div>"
-            "</a>"
-        )
-        for plan_name, plan_path in (
-            (path.name, str(path.resolve()))
-            for pattern in ("*.yaml", "*.yml")
-            for path in sorted(app.default_plans_dir.glob(pattern))
-            if path.is_file()
-        )
-    ) or "<div class='empty'>No plan files found.</div>"
+    workspace_items_html = _render_workspace_items_html(state.workspaces)
+    plan_file_items_html = _render_plan_file_items_html(app, base_params)
     run_items_html = "".join(
         (
             f"<a class='list-item {_status_class(run.status)}' href='{_escape(_run_detail_link(run.id))}'>"
@@ -327,92 +552,16 @@ def render_dashboard_detail_page(
         )
         for run in state.runs
     ) or "<div class='empty'>No runs yet. <a href='/actions'>Go to Actions</a> to launch your first plan.</div>"
-
-    selected_run_html = "<section class='panel'><h2>Run Detail</h2><div class='empty'>No run selected.</div></section>"
-    if state.selected_run is not None:
-        run_preflight_html = _render_run_preflight_html(state.selected_run_preflight)
-        selected_run_html = (
-            "<section class='panel'>"
-            "<h2>Run Detail</h2>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px'>"
-            f"<strong style='font-family:monospace;font-size:0.9em'>{_escape(state.selected_run.id)}</strong>"
-            f"{_status_badge(state.selected_run.status)}"
-            f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Source</span> {_escape(state.selected_run.launch_source)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Started</span> {_escape(_fmt_ts(state.selected_run.started_at))}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Ended</span> {_escape(_fmt_ts(state.selected_run.ended_at))}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Plans</span> {_escape(state.selected_run.plan_execution_count)} total</div>"
-            f"{_render_run_stop_controls(state.selected_run.id, state.selected_run.status)}"
-            f"{run_preflight_html}"
-            "</section>"
-        )
-
-    plan_items_html = "".join(
-        (
-            f"<a class='card {_status_class(plan.status)}' href='{_escape(_run_detail_link(plan.run_id, plan_execution_id=plan.id))}'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
-            f"<strong>{_escape(plan.plan_slug)}</strong>"
-            f"{_status_badge(plan.status, failure_reason=plan.failure_reason)}"
-            f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(plan.current_step_key))}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(plan.verify_status)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(plan.changed_files_count)} files</div>"
-            "</a>"
-        )
-        for plan in state.plan_cards
-    ) or "<div class='empty'>No plan executions.</div>"
-
-    workspace_detail_html = "<div class='empty'>No workspace recorded.</div>"
-    if state.workspace is not None:
-        workspace_detail_html = (
-            f"<div class='kv-row'><span class='kv-label'>Status</span> {_escape(state.workspace.status)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(state.workspace.branch_name))}</code></div>"
-            f"<div class='kv-row'><span class='kv-label'>Created</span> {_escape(_fmt_ts(state.workspace.created_at))}</div>"
-            + (f"<div class='kv-row'><span class='kv-label'>Released</span> {_escape(_fmt_ts(state.workspace.released_at))}</div>" if state.workspace.released_at else "")
-            + f"<div class='kv-row'><span class='kv-label'>Path</span> <code style='font-size:0.85em'>{_escape(state.workspace.path)}</code></div>"
-        )
-
-    timeline_rows = "".join(
-        (
-            "<tr>"
-            f"<td>{_escape(step.sequence_index)}</td>"
-            f"<td>{_escape(step.step_key)}</td>"
-            f"<td>{_escape(step.kind)}</td>"
-            f"<td>{_status_badge(step.status)}</td>"
-            f"<td>{_escape(step.verify_status)}</td>"
-            f"<td>{_escape(step.changed_files_count)}</td>"
-            f"<td>{_escape(step.duration_ms)}</td>"
-            "</tr>"
-        )
-        for step in state.steps
-    ) or "<tr><td colspan='7' class='empty'>No steps recorded.</td></tr>"
-
-    selected_plan_html = "<section class='panel'><h2>Plan Execution Detail</h2><div class='empty'>No plan selected.</div></section>"
-    if state.selected_plan is not None:
-        selected_plan_html = (
-            "<section class='panel'>"
-            "<h2>Plan Execution Detail</h2>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px'>"
-            f"<strong>{_escape(state.selected_plan.plan_slug)}</strong>"
-            f"{_status_badge(state.selected_plan.status, failure_reason=state.selected_plan.failure_reason)}"
-            f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(state.selected_plan.current_step_key))}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(state.selected_plan.verify_status)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(state.selected_plan.changed_files_count)} files</div>"
-            + (f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(state.selected_plan.branch_name))}</code></div>" if state.selected_plan.branch_name else "")
-            + (f"<div class='kv-row'><span class='kv-label'>Log</span> <code style='font-size:0.85em'>{_escape(state.selected_plan.log_path)}</code></div>" if state.selected_plan.log_path else "")
-            + (f"<div class='kv-row'><span class='kv-label'>Failure</span> {_escape(_failure_reason_label(state.selected_plan.failure_reason))}</div>" if state.selected_plan.failure_reason else "")
-            + _render_plan_rerun_controls(state.selected_plan)
-            + "</section>"
-        )
-
-    selected_plan_file_html = "<div class='empty'>No plan file selected.</div>"
-    if state.selected_plan_file_name is not None and state.selected_plan_file_contents is not None:
-        selected_plan_file_html = (
-            f"<div><strong>{_escape(state.selected_plan_file_name)}</strong></div>"
-            f"<div>path={_escape(state.selected_plan_file_path)}</div>"
-            f"<pre class='code-block'>{_escape(state.selected_plan_file_contents)}</pre>"
-        )
+    selected_run_html = _render_dashboard_selected_run_html(state.selected_run, state.selected_run_preflight)
+    plan_items_html = _render_plan_cards_html(state.plan_cards)
+    workspace_detail_html = _render_workspace_detail_html(state.workspace)
+    timeline_rows = _render_timeline_rows(state.steps)
+    selected_plan_html = _render_dashboard_selected_plan_html(state.selected_plan)
+    selected_plan_file_html = _render_selected_plan_file_html(
+        state.selected_plan_file_name,
+        state.selected_plan_file_path,
+        state.selected_plan_file_contents,
+    )
 
     attention_section_html = _render_collapsible_section(
         "Attention",
@@ -443,34 +592,9 @@ def render_dashboard_detail_page(
 
     dashboard_script = ""
     if state.selected_run is not None:
-        dashboard_script = (
-            "window.addEventListener('DOMContentLoaded', () => {\n"
-            "  wireCopyButtons(document);\n"
-            f"  const runId = {json.dumps(state.selected_run.id)};\n"
-            f"  const runStatus = {json.dumps(state.live_output_status or state.selected_run.status)};\n"
-            "  const outputNode = document.getElementById('live_output_stream');\n"
-            "  const tailNode = document.getElementById('live_output_tail');\n"
-            "  if (runId && outputNode) {\n"
-            "    const renderTail = (text) => {\n"
-            "      if (!tailNode) return;\n"
-            "      const lines = (text || '').split(/\\r?\\n/);\n"
-            "      tailNode.value = lines.slice(-50).join('\\n');\n"
-            "    };\n"
-            "    renderTail(outputNode.textContent || '');\n"
-            "    const refreshOutput = async () => {\n"
-            "      const params = new URLSearchParams({ run_id: runId });\n"
-            "      const response = await fetch(`/api/run-output?${params.toString()}`);\n"
-            "      if (!response.ok) return;\n"
-            "      const data = await response.json();\n"
-            "      outputNode.textContent = data.output || '';\n"
-            "      renderTail(data.output || '');\n"
-            "    };\n"
-            "    refreshOutput();\n"
-            "    if (runStatus === 'running' || runStatus === 'stopping') {\n"
-            "      window.setInterval(refreshOutput, 2000);\n"
-            "    }\n"
-            "  }\n"
-            "});\n"
+        dashboard_script = _render_dashboard_live_output_script(
+            state.selected_run.id,
+            state.live_output_status or state.selected_run.status,
         )
 
     return app._page_shell(active_nav="Dashboard", body=body, extra_script=dashboard_script)
@@ -519,92 +643,9 @@ def render_run_page(
                 steps = app._build_live_steps_from_run_data(live_run_data, plan_execution_id)
 
     live_output, live_output_path, live_output_status = app.read_live_output(live_run_data)
-
-    run_preflight_html = _render_run_preflight_html(selected_run_preflight)
-
-    run_header_html = (
-        "<section class='panel'>"
-        f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px'>"
-        f"<strong style='font-family:monospace;font-size:0.9em'>{_escape(selected_run.id)}</strong>"
-        f"{_status_badge(selected_run.status)}"
-        f"</div>"
-        f"<div class='kv-row'><span class='kv-label'>Source</span> {_escape(selected_run.launch_source)}</div>"
-        f"<div class='kv-row'><span class='kv-label'>Started</span> {_escape(_fmt_ts(selected_run.started_at))}</div>"
-        f"<div class='kv-row'><span class='kv-label'>Ended</span> {_escape(_fmt_ts(selected_run.ended_at))}</div>"
-        f"<div class='kv-row'><span class='kv-label'>Plans</span>"
-        f" {_escape(selected_run.plan_execution_count)} total"
-        f" &mdash; {_escape(selected_run.passed_count)} passed,"
-        f" {_escape(selected_run.failed_count)} failed,"
-        f" {_escape(selected_run.running_count)} running,"
-        f" {_escape(selected_run.blocked_count)} blocked</div>"
-        f"{_render_run_stop_controls(selected_run.id, selected_run.status, plan_execution_id=plan_execution_id)}"
-        f"{run_preflight_html}"
-        "</section>"
-    )
-
-    plan_items_html = "".join(
-        (
-            f"<a class='card {_status_class(plan.status)}' href='{_escape(_run_detail_link(run_id, plan_execution_id=plan.id))}'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'>"
-            f"<strong>{_escape(plan.plan_slug)}</strong>"
-            f"{_status_badge(plan.status, failure_reason=plan.failure_reason)}"
-            f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(plan.current_step_key))}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(plan.verify_status)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(plan.changed_files_count)} files</div>"
-            "</a>"
-        )
-        for plan in plan_cards
-    ) or "<div class='empty'>No plan executions.</div>"
-
-    selected_plan_html = ""
-    if selected_plan is not None:
-        workspace_html = ""
-        if workspace is not None:
-            workspace_html = (
-                "<div style='margin-top:8px;padding-top:8px;border-top:1px solid #eee'>"
-                f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(workspace.branch_name))}</code></div>"
-                f"<div class='kv-row'><span class='kv-label'>Created</span> {_escape(_fmt_ts(workspace.created_at))}</div>"
-                + (f"<div class='kv-row'><span class='kv-label'>Released</span> {_escape(_fmt_ts(workspace.released_at))}</div>" if workspace.released_at else "")
-                + f"<div class='kv-row'><span class='kv-label'>Path</span> <code style='font-size:0.85em'>{_escape(workspace.path)}</code></div>"
-                "</div>"
-            )
-        timeline_rows = "".join(
-            (
-                "<tr>"
-                f"<td>{_escape(step.sequence_index)}</td>"
-                f"<td>{_escape(step.step_key)}</td>"
-                f"<td>{_escape(step.kind)}</td>"
-                f"<td>{_status_badge(step.status)}</td>"
-                f"<td>{_escape(step.verify_status)}</td>"
-                f"<td>{_escape(step.changed_files_count)}</td>"
-                f"<td>{_escape(step.duration_ms)}</td>"
-                "</tr>"
-            )
-            for step in steps
-        ) or "<tr><td colspan='7' class='empty'>No steps recorded.</td></tr>"
-        selected_plan_html = (
-            "<section class='panel'>"
-            "<h2>Plan Execution Detail</h2>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px'>"
-            f"<strong>{_escape(selected_plan.plan_slug)}</strong>"
-            f"{_status_badge(selected_plan.status, failure_reason=selected_plan.failure_reason)}"
-            f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(selected_plan.current_step_key))}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(selected_plan.verify_status)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(selected_plan.changed_files_count)} files</div>"
-            + (f"<div class='kv-row'><span class='kv-label'>Log</span> <code style='font-size:0.85em'>{_escape(selected_plan.log_path)}</code></div>" if selected_plan.log_path else "")
-            + (f"<div class='kv-row'><span class='kv-label'>Failure</span> {_escape(_failure_reason_label(selected_plan.failure_reason))}</div>" if selected_plan.failure_reason else "")
-            + _render_plan_rerun_controls(selected_plan)
-            + workspace_html
-            + "<h3 style='margin:16px 0 8px'>Step Timeline</h3>"
-            + "<div class='table-scroll'><table>"
-            + "<thead><tr><th>#</th><th>Step</th><th>Type</th><th>Status</th><th>Verify</th><th>Files</th><th>ms</th></tr></thead>"
-            + f"<tbody>{timeline_rows}</tbody>"
-            + "</table></div>"
-            + "</section>"
-        )
-
+    run_header_html = _render_run_header_html(selected_run, selected_run_preflight, plan_execution_id=plan_execution_id)
+    plan_items_html = _render_plan_cards_html(plan_cards)
+    selected_plan_html = _render_run_selected_plan_html(selected_plan, workspace, steps)
     live_section_html = _render_live_output_section_html(live_output, live_output_path)
     notice_html = f"<div class='notice'>{_escape(action_message)}</div>" if action_message else ""
 
@@ -620,36 +661,8 @@ def render_run_page(
         "</div>"
         "</main>"
     )
-    run_id_json = json.dumps(run_id)
-    run_status_json = json.dumps(live_output_status or selected_run.status)
-    run_script = (
-        "window.addEventListener('DOMContentLoaded', () => {\n"
-        "  wireCopyButtons(document);\n"
-        f"  const runId = {run_id_json};\n"
-        f"  const runStatus = {run_status_json};\n"
-        "  const outputNode = document.getElementById('live_output_stream');\n"
-        "  const tailNode = document.getElementById('live_output_tail');\n"
-        "  if (runId && outputNode && (runStatus === 'running' || runStatus === 'stopping')) {\n"
-        "    const renderTail = (text) => {\n"
-        "      if (!tailNode) return;\n"
-        "      const lines = (text || '').split(/\\r?\\n/);\n"
-        "      tailNode.value = lines.slice(-50).join('\\n');\n"
-        "    };\n"
-        "    renderTail(outputNode.textContent || '');\n"
-        "    const refresh = async () => {\n"
-        "      const params = new URLSearchParams({ run_id: runId });\n"
-        "      const resp = await fetch(`/api/run-output?${params.toString()}`);\n"
-        "      if (!resp.ok) return;\n"
-        "      const data = await resp.json();\n"
-        "      outputNode.textContent = data.output || '';\n"
-        "      renderTail(data.output || '');\n"
-        "    };\n"
-        "    refresh();\n"
-        "    window.setInterval(refresh, 2000);\n"
-        "  } else if (tailNode && outputNode) {\n"
-        "    const lines = (outputNode.textContent || '').split(/\\r?\\n/);\n"
-        "    tailNode.value = lines.slice(-50).join('\\n');\n"
-        "  }\n"
-        "});\n"
+    run_script = _render_run_live_output_script(
+        run_id,
+        live_output_status or selected_run.status,
     )
     return app._page_shell(active_nav="Dashboard", body=body, extra_script=run_script)
