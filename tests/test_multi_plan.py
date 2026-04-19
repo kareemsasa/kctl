@@ -51,6 +51,17 @@ def init_git_repo(repo_path: Path) -> None:
 
 
 class MultiPlanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._which_patcher = patch("kctl_pkg.preflight.shutil.which", side_effect=self._fake_preflight_which)
+        self._which_patcher.start()
+        self.addCleanup(self._which_patcher.stop)
+
+    @staticmethod
+    def _fake_preflight_which(binary: str, path: str | None = None) -> str | None:
+        del path
+        return f"/usr/bin/{binary}"
+
     def test_provider_override_updates_defaults(self) -> None:
         plan = {"defaults": {"provider": "claude"}}
 
