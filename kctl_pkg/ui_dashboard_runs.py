@@ -124,6 +124,37 @@ def _render_run_stop_controls(run_id: str, status: str, plan_execution_id: str |
     )
 
 
+def _render_run_preflight_html(preflight: dict[str, object] | None) -> str:
+    if preflight is None:
+        return ""
+    preflight_items = preflight.get("items", {})
+    return _render_collapsible_section(
+        "Launch Snapshot",
+        (
+            f"<div class='repo-check' style='margin-top:8px' data-status='{_escape(preflight.get('status'))}'>{_escape(preflight.get('message'))}</div>"
+            f"<div class='help'>captured_at={_escape(preflight.get('captured_at'))}</div>"
+            f"<div class='preflight-grid' style='margin-top:8px'>"
+            + "".join(
+                _render_preflight_item_html(label, item)
+                for label, item in (
+                    ("Repo", preflight_items.get("repo") or {}),
+                    ("Plans Dir", preflight_items.get("plans_dir") or {}),
+                    ("Binaries", preflight_items.get("binaries") or {}),
+                    ("Writable Paths", preflight_items.get("writable_paths") or {}),
+                    ("Required Env", preflight_items.get("required_env") or {}),
+                )
+            )
+            + "</div>"
+        ),
+        heading_tag="h3",
+        style="margin-top:12px",
+    )
+
+
+def _display_value(value: object, fallback: str = "—") -> object:
+    return value if value not in {None, ""} else fallback
+
+
 def render_run_stop_confirm_page(
     app: object,
     run_id: str,
@@ -299,30 +330,7 @@ def render_dashboard_detail_page(
 
     selected_run_html = "<section class='panel'><h2>Run Detail</h2><div class='empty'>No run selected.</div></section>"
     if state.selected_run is not None:
-        run_preflight_html = ""
-        if state.selected_run_preflight is not None:
-            run_preflight_items = state.selected_run_preflight.get("items", {})
-            run_preflight_html = _render_collapsible_section(
-                "Launch Snapshot",
-                (
-                f"<div class='repo-check' style='margin-top:8px' data-status='{_escape(state.selected_run_preflight.get('status'))}'>{_escape(state.selected_run_preflight.get('message'))}</div>"
-                f"<div class='help'>captured_at={_escape(state.selected_run_preflight.get('captured_at'))}</div>"
-                f"<div class='preflight-grid' style='margin-top:8px'>"
-                + "".join(
-                    _render_preflight_item_html(label, item)
-                    for label, item in (
-                        ("Repo", run_preflight_items.get("repo") or {}),
-                        ("Plans Dir", run_preflight_items.get("plans_dir") or {}),
-                        ("Binaries", run_preflight_items.get("binaries") or {}),
-                        ("Writable Paths", run_preflight_items.get("writable_paths") or {}),
-                        ("Required Env", run_preflight_items.get("required_env") or {}),
-                    )
-                )
-                + "</div>"
-                ),
-                heading_tag="h3",
-                style="margin-top:12px",
-            )
+        run_preflight_html = _render_run_preflight_html(state.selected_run_preflight)
         selected_run_html = (
             "<section class='panel'>"
             "<h2>Run Detail</h2>"
@@ -346,7 +354,7 @@ def render_dashboard_detail_page(
             f"<strong>{_escape(plan.plan_slug)}</strong>"
             f"{_status_badge(plan.status, failure_reason=plan.failure_reason)}"
             f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(plan.current_step_key or '\u2014')}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(plan.current_step_key))}</div>"
             f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(plan.verify_status)}</div>"
             f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(plan.changed_files_count)} files</div>"
             "</a>"
@@ -358,7 +366,7 @@ def render_dashboard_detail_page(
     if state.workspace is not None:
         workspace_detail_html = (
             f"<div class='kv-row'><span class='kv-label'>Status</span> {_escape(state.workspace.status)}</div>"
-            f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(state.workspace.branch_name or '\u2014')}</code></div>"
+            f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(state.workspace.branch_name))}</code></div>"
             f"<div class='kv-row'><span class='kv-label'>Created</span> {_escape(_fmt_ts(state.workspace.created_at))}</div>"
             + (f"<div class='kv-row'><span class='kv-label'>Released</span> {_escape(_fmt_ts(state.workspace.released_at))}</div>" if state.workspace.released_at else "")
             + f"<div class='kv-row'><span class='kv-label'>Path</span> <code style='font-size:0.85em'>{_escape(state.workspace.path)}</code></div>"
@@ -388,10 +396,10 @@ def render_dashboard_detail_page(
             f"<strong>{_escape(state.selected_plan.plan_slug)}</strong>"
             f"{_status_badge(state.selected_plan.status, failure_reason=state.selected_plan.failure_reason)}"
             f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(state.selected_plan.current_step_key or '\u2014')}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(state.selected_plan.current_step_key))}</div>"
             f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(state.selected_plan.verify_status)}</div>"
             f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(state.selected_plan.changed_files_count)} files</div>"
-            + (f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(state.selected_plan.branch_name or '\u2014')}</code></div>" if state.selected_plan.branch_name else "")
+            + (f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(state.selected_plan.branch_name))}</code></div>" if state.selected_plan.branch_name else "")
             + (f"<div class='kv-row'><span class='kv-label'>Log</span> <code style='font-size:0.85em'>{_escape(state.selected_plan.log_path)}</code></div>" if state.selected_plan.log_path else "")
             + (f"<div class='kv-row'><span class='kv-label'>Failure</span> {_escape(_failure_reason_label(state.selected_plan.failure_reason))}</div>" if state.selected_plan.failure_reason else "")
             + _render_plan_rerun_controls(state.selected_plan)
@@ -512,30 +520,7 @@ def render_run_page(
 
     live_output, live_output_path, live_output_status = app.read_live_output(live_run_data)
 
-    run_preflight_html = ""
-    if selected_run_preflight is not None:
-        run_preflight_items = selected_run_preflight.get("items", {})
-        run_preflight_html = _render_collapsible_section(
-            "Launch Snapshot",
-            (
-            f"<div class='repo-check' style='margin-top:8px' data-status='{_escape(selected_run_preflight.get('status'))}'>{_escape(selected_run_preflight.get('message'))}</div>"
-            f"<div class='help'>captured_at={_escape(selected_run_preflight.get('captured_at'))}</div>"
-            f"<div class='preflight-grid' style='margin-top:8px'>"
-            + "".join(
-                _render_preflight_item_html(label, item)
-                for label, item in (
-                    ("Repo", run_preflight_items.get("repo") or {}),
-                    ("Plans Dir", run_preflight_items.get("plans_dir") or {}),
-                    ("Binaries", run_preflight_items.get("binaries") or {}),
-                    ("Writable Paths", run_preflight_items.get("writable_paths") or {}),
-                    ("Required Env", run_preflight_items.get("required_env") or {}),
-                )
-            )
-            + "</div>"
-            ),
-            heading_tag="h3",
-            style="margin-top:12px",
-        )
+    run_preflight_html = _render_run_preflight_html(selected_run_preflight)
 
     run_header_html = (
         "<section class='panel'>"
@@ -564,7 +549,7 @@ def render_run_page(
             f"<strong>{_escape(plan.plan_slug)}</strong>"
             f"{_status_badge(plan.status, failure_reason=plan.failure_reason)}"
             f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(plan.current_step_key or '\u2014')}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(plan.current_step_key))}</div>"
             f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(plan.verify_status)}</div>"
             f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(plan.changed_files_count)} files</div>"
             "</a>"
@@ -578,7 +563,7 @@ def render_run_page(
         if workspace is not None:
             workspace_html = (
                 "<div style='margin-top:8px;padding-top:8px;border-top:1px solid #eee'>"
-                f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(workspace.branch_name or '\u2014')}</code></div>"
+                f"<div class='kv-row'><span class='kv-label'>Branch</span> <code style='font-size:0.9em'>{_escape(_display_value(workspace.branch_name))}</code></div>"
                 f"<div class='kv-row'><span class='kv-label'>Created</span> {_escape(_fmt_ts(workspace.created_at))}</div>"
                 + (f"<div class='kv-row'><span class='kv-label'>Released</span> {_escape(_fmt_ts(workspace.released_at))}</div>" if workspace.released_at else "")
                 + f"<div class='kv-row'><span class='kv-label'>Path</span> <code style='font-size:0.85em'>{_escape(workspace.path)}</code></div>"
@@ -605,7 +590,7 @@ def render_run_page(
             f"<strong>{_escape(selected_plan.plan_slug)}</strong>"
             f"{_status_badge(selected_plan.status, failure_reason=selected_plan.failure_reason)}"
             f"</div>"
-            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(selected_plan.current_step_key or '\u2014')}</div>"
+            f"<div class='kv-row'><span class='kv-label'>Step</span> {_escape(_display_value(selected_plan.current_step_key))}</div>"
             f"<div class='kv-row'><span class='kv-label'>Verify</span> {_escape(selected_plan.verify_status)}</div>"
             f"<div class='kv-row'><span class='kv-label'>Changed</span> {_escape(selected_plan.changed_files_count)} files</div>"
             + (f"<div class='kv-row'><span class='kv-label'>Log</span> <code style='font-size:0.85em'>{_escape(selected_plan.log_path)}</code></div>" if selected_plan.log_path else "")
