@@ -10,7 +10,7 @@ from .terminal import style_text
 from .types import PlanError
 
 STEP_TYPES = {"analyze", "change", "verify", "review"}
-STRUCTURED_OUTPUT_SCHEMAS = {"evaluation_v1", "inspect_v1", "plan_v1"}
+STRUCTURED_OUTPUT_SCHEMAS = {"evaluation_v1", "inspect_v1", "issue_report_v1", "plan_v1"}
 REVIEW_POLICIES = {"advisory", "blocking", "manual"}
 STEP_MODES = {"default", "read-only"}
 VERIFY_MODES = {"legacy", "full"}
@@ -496,6 +496,16 @@ def build_artifact_instruction(schema_name: str | None) -> str | None:
             "- Keep repository.name/path aligned with repo_name/repo_path, keep category ids stable, "
             "use integer weights that sum to 100, and use integer scores in the range 0..max_score."
         )
+    if schema_name == "issue_report_v1":
+        return (
+            "Structured artifact requirement:\n"
+            "- End your response with a fenced ```json block only for the issue report artifact.\n"
+            '- Use this exact shape: {"summary":"string","top_issues":[{"rank":0,"title":"string",'
+            '"severity":"critical|high|medium|low","why_it_matters":"string","evidence":"string",'
+            '"next_action":"string"}],"watch_items":["string"],"best_next_tasks":["string","string","string"]}.\n'
+            "- Keep issue ranks unique, start ranks at 1, use contiguous integers, keep the report concise, "
+            "and do not duplicate issues."
+        )
     return None
 
 
@@ -511,6 +521,12 @@ def build_artifact_context(step_id: str, prior_artifacts: dict[str, dict[str, An
         sections.append(
             "Structured plan artifact:\n```json\n"
             + json.dumps(prior_artifacts["plan"], indent=2, sort_keys=True)
+            + "\n```"
+        )
+    if step_id not in {"inspect", "plan", "verify"} and "verify" in prior_artifacts:
+        sections.append(
+            "Structured verify artifact:\n```json\n"
+            + json.dumps(prior_artifacts["verify"], indent=2, sort_keys=True)
             + "\n```"
         )
     return "\n\n".join(sections) or None

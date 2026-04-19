@@ -131,6 +131,24 @@ class EvaluationArtifact:
 
 
 @dataclass
+class IssueReportIssueArtifact:
+    rank: int
+    title: str
+    severity: str
+    why_it_matters: str
+    evidence: str
+    next_action: str
+
+
+@dataclass
+class IssueReportArtifact:
+    summary: str
+    top_issues: list[IssueReportIssueArtifact]
+    watch_items: list[str]
+    best_next_tasks: list[str]
+
+
+@dataclass
 class VerifyArtifact:
     status: str
     commands_run: list[VerifyCommandArtifact]
@@ -432,7 +450,62 @@ def parse_evaluation_artifact(value: Any) -> EvaluationArtifact:
     )
 
 
+def parse_issue_report_artifact(value: Any) -> IssueReportArtifact:
+    data = _require_mapping(value, "issue report artifact")
+    issues_value = data.get("top_issues")
+    if not isinstance(issues_value, list):
+        raise PlanError("issue_report.top_issues must be a list.")
+    issues: list[IssueReportIssueArtifact] = []
+    seen_ranks: set[int] = set()
+    for index, item in enumerate(issues_value, start=1):
+        entry = _require_mapping(item, f"issue_report.top_issues[{index}]")
+        rank = _require_int(entry.get("rank"), f"issue_report.top_issues[{index}].rank")
+        if rank <= 0:
+            raise PlanError(f"issue_report.top_issues[{index}].rank must be greater than zero.")
+        if rank in seen_ranks:
+            raise PlanError(f"issue_report.top_issues[{index}].rank must be unique.")
+        seen_ranks.add(rank)
+        severity = _require_string(
+            entry.get("severity"), f"issue_report.top_issues[{index}].severity"
+        )
+        if severity not in {"critical", "high", "medium", "low"}:
+            raise PlanError(
+                f"issue_report.top_issues[{index}].severity must be one of: "
+                "critical, high, medium, low."
+            )
+        issues.append(
+            IssueReportIssueArtifact(
+                rank=rank,
+                title=_require_string(
+                    entry.get("title"), f"issue_report.top_issues[{index}].title"
+                ),
+                severity=severity,
+                why_it_matters=_require_string(
+                    entry.get("why_it_matters"),
+                    f"issue_report.top_issues[{index}].why_it_matters",
+                ),
+                evidence=_require_string(
+                    entry.get("evidence"), f"issue_report.top_issues[{index}].evidence"
+                ),
+                next_action=_require_string(
+                    entry.get("next_action"), f"issue_report.top_issues[{index}].next_action"
+                ),
+            )
+        )
+    best_next_tasks = _require_string_list(
+        data.get("best_next_tasks"), "issue_report.best_next_tasks"
+    )
+    if len(best_next_tasks) != 3:
+        raise PlanError("issue_report.best_next_tasks must contain exactly 3 items.")
+    return IssueReportArtifact(
+        summary=_require_string(data.get("summary"), "issue_report.summary"),
+        top_issues=issues,
+        watch_items=_require_string_list(data.get("watch_items"), "issue_report.watch_items"),
+        best_next_tasks=best_next_tasks,
+    )
+
+
 def artifact_to_dict(
-    value: InspectArtifact | PlanArtifact | EvaluationArtifact | VerifyArtifact,
+    value: InspectArtifact | PlanArtifact | EvaluationArtifact | IssueReportArtifact | VerifyArtifact,
 ) -> dict[str, Any]:
     return asdict(value)

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kctl_pkg.output import BufferedOutputSink, NullOutputSink
+from kctl_pkg.plan import build_artifact_context
 from kctl_pkg.runner import (
     apply_provider_override,
     build_step_file_prefix,
@@ -137,6 +138,8 @@ class RunnerHelperTests(unittest.TestCase):
         }
         artifact = parse_structured_artifact("inspect_v1", f"done\n```json\n{json.dumps(inspect_payload)}\n```\n")
         self.assertEqual(artifact["project_type"], "app")
+        raw_artifact = parse_structured_artifact("inspect_v1", json.dumps(inspect_payload))
+        self.assertEqual(raw_artifact["summary"], "sum")
         evaluation_payload = {
             "repository": {"name": "repo", "path": "/tmp/repo"},
             "rubric_id": "repo-rubric-v1",
@@ -223,6 +226,34 @@ class RunnerHelperTests(unittest.TestCase):
         self.assertEqual(evaluation_artifact["repository"]["name"], "repo")
         self.assertEqual(evaluation_artifact["rubric_id"], "repo-rubric-v1")
         self.assertEqual(evaluation_artifact["categories"][0]["weight"], 25)
+        issue_report_payload = {
+            "summary": "Most automated checks pass; DB-backed evidence is the main gap.",
+            "top_issues": [
+                {
+                    "rank": 1,
+                    "title": "DB-backed validation missing",
+                    "severity": "high",
+                    "why_it_matters": "Live SQL behavior is not being exercised.",
+                    "evidence": "verify did not run DB-backed checks successfully.",
+                    "next_action": "Add a disposable Postgres smoke path.",
+                }
+            ],
+            "watch_items": ["Coverage appears strong but may lean on mocked paths."],
+            "best_next_tasks": [
+                "Run DB-backed smoke validation.",
+                "Add one CI lane for live SQL behavior.",
+                "Review multi-tenant write-path assumptions.",
+            ],
+        }
+        issue_report_artifact = parse_structured_artifact(
+            "issue_report_v1",
+            f"done\n```json\n{json.dumps(issue_report_payload)}\n```\n",
+        )
+        self.assertEqual(issue_report_artifact["top_issues"][0]["rank"], 1)
+        self.assertEqual(
+            issue_report_artifact["best_next_tasks"][2],
+            "Review multi-tenant write-path assumptions.",
+        )
         self.assertEqual(extract_last_fenced_json_block("x\n```json\n{\"a\":1}\n```"), '{"a":1}')
         with self.assertRaisesRegex(PlanError, "Expected a final fenced JSON block"):
             extract_last_fenced_json_block("no json")
@@ -341,7 +372,12 @@ class RunnerHelperTests(unittest.TestCase):
         self.assertEqual(resolve_verify_commands({"id": "step", "verify": "pytest"}, {}, {}, "change"), ["pytest"])
 
     def test_execute_agent_step_and_save_run_log(self) -> None:
-        step = {"id": "inspect", "prompt": "Inspect", "_kctl_step_type": {"effective_type": "analyze"}}
+        step = {
+            "id": "inspect",
+            "prompt": "Inspect",
+            "_kctl_step_type": {"effective_type": "analyze"},
+            "_kctl_output": {"effective_schema": "inspect_v1"},
+        }
         with patch(
             "kctl_pkg.runner.run_streaming_command",
             return_value=CommandResult(["claude"], "/tmp", 0, "ok\n", ""),
@@ -360,6 +396,60 @@ class RunnerHelperTests(unittest.TestCase):
         self.assertIn("Current step id: inspect", prompt)
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(mock_run_streaming.call_args.args[0][:3], ["claude", "--permission-mode", "plan"])
+
+        artifact_context = build_artifact_context(
+            "summarize",
+            {
+                "inspect": {"summary": "inspect"},
+                "plan": {"objective": "plan"},
+                "verify": {"status": "fail", "commands_run": []},
+            },
+        )
+        self.assertIn("Structured verify artifact", artifact_context)
+
+        with patch(
+            "kctl_pkg.runner.run_streaming_command",
+            return_value=CommandResult(["codex"], "/tmp", 0, "ok\n", ""),
+        ) as mock_run_streaming:
+            prompt, result = execute_agent_step(
+                Path("/tmp"),
+                "Objective",
+                [],
+                step,
+                {},
+                False,
+                NullOutputSink(),
+                provider="codex",
+                permission_mode="auto",
+            )
+        self.assertIn("Current step id: inspect", prompt)
+        self.assertEqual(result.exit_code, 0)
+        codex_command = mock_run_streaming.call_args.args[0]
+        self.assertEqual(codex_command[:6], ["codex", "-a", "never", "exec", "-s", "read-only"])
+        self.assertIn("--output-schema", codex_command)
+        self.assertEqual(codex_command[-3], "--cd")
+        self.assertEqual(codex_command[-2], "/tmp")
+        self.assertEqual(codex_command[-1], prompt)
+
+        change_step = {"id": "implement", "prompt": "Implement", "_kctl_step_type": {"effective_type": "change"}}
+        with patch(
+            "kctl_pkg.runner.run_streaming_command",
+            return_value=CommandResult(["codex"], "/tmp", 0, "ok\n", ""),
+        ) as mock_run_streaming:
+            _prompt, result = execute_agent_step(
+                Path("/tmp"),
+                "Objective",
+                [],
+                change_step,
+                {},
+                False,
+                NullOutputSink(),
+                provider="codex",
+                permission_mode="auto",
+            )
+        self.assertEqual(result.exit_code, 0)
+        codex_change_command = mock_run_streaming.call_args.args[0]
+        self.assertEqual(codex_change_command[:4], ["codex", "exec", "--full-auto", "--cd"])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)

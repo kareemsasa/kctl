@@ -4,6 +4,7 @@ import json
 import re
 import shlex
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -46,6 +47,7 @@ from .types import (
     artifact_to_dict,
     parse_evaluation_artifact,
     parse_inspect_artifact,
+    parse_issue_report_artifact,
     parse_plan_artifact,
 )
 
@@ -385,9 +387,211 @@ def write_raw_output_artifact(
 
 def extract_last_fenced_json_block(output_text: str) -> str:
     matches = FENCED_JSON_PATTERN.findall(output_text)
-    if not matches:
-        raise PlanError("Expected a final fenced JSON block in Codex output.")
-    return matches[-1].strip()
+    if matches:
+        return matches[-1].strip()
+    stripped = output_text.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        return stripped
+    raise PlanError("Expected a final fenced JSON block in Codex output.")
+
+
+def _output_schema_payload(schema_name: str) -> dict[str, Any]:
+    if schema_name == "inspect_v1":
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "project_type",
+                "stack",
+                "summary",
+                "key_directories",
+                "key_files",
+                "relevant_areas",
+                "constraints",
+                "assumptions",
+                "unknowns",
+            ],
+            "properties": {
+                "project_type": {"type": "string"},
+                "stack": {"type": "array", "items": {"type": "string"}},
+                "summary": {"type": "string"},
+                "key_directories": {"type": "array", "items": _path_purpose_schema()},
+                "key_files": {"type": "array", "items": _path_purpose_schema()},
+                "relevant_areas": {"type": "array", "items": _path_reason_schema()},
+                "constraints": {"type": "array", "items": _path_note_schema()},
+                "assumptions": {"type": "array", "items": {"type": "string"}},
+                "unknowns": {"type": "array", "items": {"type": "string"}},
+            },
+        }
+    if schema_name == "plan_v1":
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["objective", "approach", "steps", "verification", "risks", "out_of_scope"],
+            "properties": {
+                "objective": {"type": "string"},
+                "approach": {"type": "string"},
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["id", "name", "files", "intent"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "files": {"type": "array", "items": {"type": "string"}},
+                            "intent": {"type": "string"},
+                        },
+                    },
+                },
+                "verification": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["commands", "manual_checks"],
+                    "properties": {
+                        "commands": {"type": "array", "items": {"type": "string"}},
+                        "manual_checks": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "risks": {"type": "array", "items": {"type": "string"}},
+                "out_of_scope": {"type": "array", "items": {"type": "string"}},
+            },
+        }
+    if schema_name == "evaluation_v1":
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "repository",
+                "rubric_id",
+                "rubric_version",
+                "evaluated_at",
+                "repo_name",
+                "repo_path",
+                "commit_sha",
+                "max_score",
+                "confidence",
+                "profile",
+                "normalization_basis",
+                "summary",
+                "categories",
+                "overall_findings",
+                "blocking_issues",
+                "recommended_next_actions",
+            ],
+            "properties": {
+                "repository": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["name", "path"],
+                    "properties": {"name": {"type": "string"}, "path": {"type": "string"}},
+                },
+                "rubric_id": {"type": "string"},
+                "rubric_version": {"type": "string"},
+                "evaluated_at": {"type": "string"},
+                "repo_name": {"type": "string"},
+                "repo_path": {"type": "string"},
+                "commit_sha": {"type": ["string", "null"]},
+                "max_score": {"type": "integer"},
+                "confidence": {"type": ["string", "null"]},
+                "profile": {"type": ["string", "null"]},
+                "normalization_basis": {"type": "string"},
+                "summary": {"type": "string"},
+                "categories": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["id", "name", "weight", "score", "max_score", "summary", "evidence", "risks"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "weight": {"type": "integer"},
+                            "score": {"type": "integer"},
+                            "max_score": {"type": "integer"},
+                            "summary": {"type": "string"},
+                            "evidence": {"type": "array", "items": {"type": "string"}},
+                            "risks": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                },
+                "overall_findings": {"type": "array", "items": {"type": "string"}},
+                "blocking_issues": {"type": "array", "items": {"type": "string"}},
+                "recommended_next_actions": {"type": "array", "items": {"type": "string"}},
+            },
+        }
+    if schema_name == "issue_report_v1":
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["summary", "top_issues", "watch_items", "best_next_tasks"],
+            "properties": {
+                "summary": {"type": "string"},
+                "top_issues": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["rank", "title", "severity", "why_it_matters", "evidence", "next_action"],
+                        "properties": {
+                            "rank": {"type": "integer"},
+                            "title": {"type": "string"},
+                            "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                            "why_it_matters": {"type": "string"},
+                            "evidence": {"type": "string"},
+                            "next_action": {"type": "string"},
+                        },
+                    },
+                },
+                "watch_items": {"type": "array", "items": {"type": "string"}},
+                "best_next_tasks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                },
+            },
+        }
+    raise PlanError(f"No output schema payload is defined for schema '{schema_name}'.")
+
+
+def _path_purpose_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["path", "purpose"],
+        "properties": {"path": {"type": "string"}, "purpose": {"type": "string"}},
+    }
+
+
+def _path_reason_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["path", "reason"],
+        "properties": {"path": {"type": "string"}, "reason": {"type": "string"}},
+    }
+
+
+def _path_note_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["path", "note"],
+        "properties": {"path": {"type": "string"}, "note": {"type": "string"}},
+    }
+
+
+def _write_output_schema_file(schema_name: str) -> Path:
+    payload = _output_schema_payload(schema_name)
+    handle = tempfile.NamedTemporaryFile("w", suffix=f"-{schema_name}.json", delete=False)
+    try:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+        return Path(handle.name)
+    finally:
+        handle.close()
 
 
 def parse_structured_artifact(schema_name: str, output_text: str) -> dict[str, Any]:
@@ -402,6 +606,8 @@ def parse_structured_artifact(schema_name: str, output_text: str) -> dict[str, A
         return artifact_to_dict(parse_plan_artifact(data))
     if schema_name == "evaluation_v1":
         return artifact_to_dict(parse_evaluation_artifact(data))
+    if schema_name == "issue_report_v1":
+        return artifact_to_dict(parse_issue_report_artifact(data))
     raise PlanError(f"No structured artifact parser is defined for schema '{schema_name}'.")
 
 
@@ -674,6 +880,24 @@ def _build_claude_command(prompt: str, effective_permission_mode: str) -> list[s
     return ["claude", "--permission-mode", effective_permission_mode, "-p", prompt]
 
 
+def _build_codex_command(
+    repo_path: Path,
+    prompt: str,
+    effective_step_type: str,
+    schema_name: str | None = None,
+) -> list[str]:
+    command = ["codex"]
+    if effective_step_type in {"analyze", "review"}:
+        command.extend(["-a", "never", "exec", "-s", "read-only"])
+    else:
+        command.extend(["exec", "--full-auto"])
+    if schema_name:
+        schema_path = _write_output_schema_file(schema_name)
+        command.extend(["--output-schema", str(schema_path)])
+    command.extend(["--cd", str(repo_path), prompt])
+    return command
+
+
 def execute_agent_step(
     repo_path: Path,
     objective: str,
@@ -694,11 +918,12 @@ def execute_agent_step(
         step,
         prior_artifacts=prior_artifacts,
     )
+    effective_step_type = ((step.get("_kctl_step_type") or {}).get("effective_type")) or "change"
+    schema_name = ((step.get("_kctl_output") or {}).get("effective_schema")) or None
     prompt_lines_to_hide = {
         line.strip() for line in agent_prompt.splitlines() if line.strip()
     }
     if provider == "claude":
-        effective_step_type = ((step.get("_kctl_step_type") or {}).get("effective_type")) or "change"
         if effective_step_type in {"analyze", "review"}:
             effective_permission_mode = "plan"
         else:
@@ -717,18 +942,31 @@ def execute_agent_step(
             process_finished=process_finished,
         )
     else:
-        agent_result = run_streaming_command(
-            ["codex", "exec", "--full-auto", "--cd", str(repo_path), agent_prompt],
-            cwd=repo_path,
-            stdout_prefix=CODEX_STREAM_PREFIX,
-            stderr_prefix=CODEX_STREAM_PREFIX,
-            filter_stream=not verbose,
-            hidden_lines=prompt_lines_to_hide if not verbose else None,
-            output_sink=output_sink,
-            stop_requested=stop_requested,
-            process_started=process_started,
-            process_finished=process_finished,
+        codex_command = _build_codex_command(
+            repo_path,
+            agent_prompt,
+            effective_step_type,
+            schema_name=schema_name if isinstance(schema_name, str) and schema_name.strip() else None,
         )
+        schema_path: Path | None = None
+        if "--output-schema" in codex_command:
+            schema_path = Path(codex_command[codex_command.index("--output-schema") + 1])
+        try:
+            agent_result = run_streaming_command(
+                codex_command,
+                cwd=repo_path,
+                stdout_prefix=CODEX_STREAM_PREFIX,
+                stderr_prefix=CODEX_STREAM_PREFIX,
+                filter_stream=not verbose,
+                hidden_lines=prompt_lines_to_hide if not verbose else None,
+                output_sink=output_sink,
+                stop_requested=stop_requested,
+                process_started=process_started,
+                process_finished=process_finished,
+            )
+        finally:
+            if schema_path is not None:
+                schema_path.unlink(missing_ok=True)
     return agent_prompt, agent_result
 
 

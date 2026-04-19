@@ -83,6 +83,12 @@ python3 kctl.py plans run-many plans/traffic-simulator --concurrency 3 --provide
 python3 kctl.py plans status plans/traffic-simulator
 ```
 
+Create a reusable plan from a template:
+
+```bash
+python3 kctl.py init repo_issue_finder .kctl/plans/004-repo-issue-finder.yaml /path/to/repo "Find the highest-signal issues in this repo"
+```
+
 Opt in to external artifact storage for multi-plan runs and UI/index state:
 
 ```bash
@@ -242,6 +248,22 @@ steps:
 ```
 
 Explicit fields override legacy inference. When omitted, `kctl` resolves behavior from legacy conventions for compatibility.
+
+## Issue Finder Plan
+
+For repo triage work, prefer a read-only issue-finder plan over a score-first
+rubric pass. The canonical example lives at
+[`.kctl/plans/004-repo-issue-finder.yaml`](/home/kareem/code/personal/tooling/kctl/.kctl/plans/004-repo-issue-finder.yaml).
+
+The intended flow is:
+
+- `inspect`: map the repo and identify the safest high-signal validation paths
+- `plan`: convert that into repo-local verification commands plus manual checks
+- `verify`: run the supported commands
+- `summarize`: emit a ranked list of up to 10 concrete issues with evidence and the smallest practical next action
+
+Use it when you want a prioritized defect/backlog view instead of a normalized
+score across repositories.
 
 ## Effective Behavior Resolution
 

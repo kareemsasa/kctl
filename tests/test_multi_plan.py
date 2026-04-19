@@ -626,7 +626,10 @@ class MultiPlanTests(unittest.TestCase):
         with self.assertRaises(PlanError) as context:
             validate_plan(plan)
 
-        self.assertIn("evaluation_v1, inspect_v1, plan_v1", str(context.exception))
+        self.assertIn(
+            "evaluation_v1, inspect_v1, issue_report_v1, plan_v1",
+            str(context.exception),
+        )
 
     def test_execute_plan_run_explicit_read_only_mode_fails_on_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
