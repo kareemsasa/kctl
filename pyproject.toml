@@ -16,7 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "coverage[toml]>=7.6",
-  "pytest>=8.0",
+  "pytest>=9.1.1",
 ]
 
 [project.scripts]
